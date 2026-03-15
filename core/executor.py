@@ -8,8 +8,29 @@ import logging
 import os
 import shutil
 from typing import List, Optional, Tuple
+import random
+import time
 
 logger = logging.getLogger("recon.executor")
+
+
+def add_evasion(cmd: List[str]) -> List[str]:
+    """Add evasion techniques: random delay, user-agent"""
+    # Random delay 1-5 seconds
+    delay = random.randint(1, 5)
+    time.sleep(delay)
+    logger.debug(f"[EVASION] Slept {delay}s")
+
+    # Add user-agent if curl
+    if cmd[0] == "curl":
+        ua = random.choice([
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.101 Safari/537.36"
+        ])
+        cmd.extend(["-H", f"User-Agent: {ua}"])
+
+    return cmd
 
 
 def run_command(
@@ -34,6 +55,9 @@ def run_command(
 
     cmd_str = " ".join(str(c) for c in cmd)
     logger.info(f"[EXEC] Running: {cmd_str}")
+
+    # Add evasion
+    cmd = add_evasion(cmd)
 
     try:
         result = subprocess.run(

@@ -179,3 +179,37 @@ class EndpointRanker:
             if ep['reasons']:
                 print(f"       Reasons: {', '.join(ep['reasons'][:3])}")
         print(f"{'='*60}\n")
+
+    def categorize_endpoints(self, endpoints: List[Dict]) -> Dict[str, List[Dict]]:
+        """Categorize endpoints into groups"""
+        categories = {
+            "auth": [],
+            "upload": [],
+            "api": [],
+            "admin": [],
+            "debug": [],
+            "config": [],
+            "backup": [],
+            "other": []
+        }
+
+        for ep in endpoints:
+            url = ep["url"].lower()
+            if re.search(r"login|auth|token|signin|register|password", url):
+                categories["auth"].append(ep)
+            elif re.search(r"upload|file|import|attachment", url):
+                categories["upload"].append(ep)
+            elif re.search(r"/api/|/v\d+/|/graphql|/rest/", url):
+                categories["api"].append(ep)
+            elif re.search(r"admin|dashboard|panel|manager|console", url):
+                categories["admin"].append(ep)
+            elif re.search(r"debug|test|dev|staging|demo|phpinfo|server.?info", url):
+                categories["debug"].append(ep)
+            elif re.search(r"config|setting|\.env|\.ini|\.cfg", url):
+                categories["config"].append(ep)
+            elif re.search(r"backup|\.bak|\.sql|\.tar|\.zip", url):
+                categories["backup"].append(ep)
+            else:
+                categories["other"].append(ep)
+
+        return categories

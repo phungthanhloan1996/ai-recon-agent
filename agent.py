@@ -250,6 +250,10 @@ class ReconAgent:
         planner = ChainPlanner(self.state)
         chains = planner.plan_chains()
 
+        # Combine overlapping chains for smarter planning
+        if len(chains) > 1:
+            chains = planner.combine_chains(chains)
+
         if chains:
             chain_report = planner.format_chain_report(chains)
             self.logger.info(f"\n{chain_report}")
@@ -258,6 +262,16 @@ class ReconAgent:
             chain_file = os.path.join(self.output_dir, "exploit_chains.txt")
             with open(chain_file, "w") as f:
                 f.write(chain_report)
+
+            # Auto-execute if enabled
+            if self.options.get("auto_exploit"):
+                self.logger.warning("[CHAIN] Auto-exploit enabled! This is dangerous.")
+                for chain in chains[:1]:  # Execute only top chain for safety
+                    exec_result = planner.execute_chain(chain)
+                    self.logger.info(f"[CHAIN] Execution result: {exec_result}")
+                    if exec_result["success"]:
+                        self.logger.info(f"[CHAIN] Chain {chain.name} succeeded!")
+                        break
 
         return chains
 
@@ -343,6 +357,11 @@ Examples:
         "--no-exploit",
         action="store_true",
         help="Disable exploitation phase (recon only)"
+    )
+    parser.add_argument(
+        "--auto-exploit",
+        action="store_true",
+        help="Automatically execute planned exploit chains (dangerous!)"
     )
     parser.add_argument(
         "--skip-recon",

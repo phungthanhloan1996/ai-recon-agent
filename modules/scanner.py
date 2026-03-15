@@ -11,6 +11,7 @@ from typing import Dict, List
 
 from core.executor import run_command, check_tools
 from core.state_manager import StateManager
+from core.session_manager import SessionManager
 
 logger = logging.getLogger("recon.phase5")
 
@@ -31,6 +32,8 @@ class ScannerModule:
         self.output_dir = output_dir
         self.target = state.get("target")
         self.vulns_file = os.path.join(output_dir, "vulnerabilities.json")
+        self.session_mgr = SessionManager(output_dir)
+        self.session_mgr.load_session()  # Load if exists
 
     def run(self) -> List[Dict]:
         logger.info(f"\n{'='*60}")
@@ -67,6 +70,9 @@ class ScannerModule:
             logger.info(f"[SCAN] nikto scanned {len(nikto_hosts)} hosts")
         else:
             logger.warning("[SCAN] nikto not found - skipping")
+
+        # Deduplicate results
+        all_vulns = self._deduplicate_vulns(all_vulns)
 
         # Save results
         self._save_vulns(all_vulns)
@@ -114,6 +120,15 @@ class ScannerModule:
             "-timeout", "15",
             "-no-color",
         ]
+
+        # Add session if available
+        session_data = self.session_mgr.get_session_data()
+        if session_data["cookies"]:
+            cookie_str = "; ".join([f"{k}={v}" for k, v in session_data["cookies"].items()])
+            cmd.extend(["-H", f"Cookie: {cookie_str}"])
+        if session_data["headers"]:
+            for k, v in session_data["headers"].items():
+                cmd.extend(["-H", f"{k}: {v}"])
 
         _, _, _ = run_command(cmd, timeout=600)
 
@@ -184,6 +199,18 @@ class ScannerModule:
                 logger.warning(f"[NIKTO] {line[:80]}")
 
         return vulns
+
+    def _deduplicate_vulns(self, vulns: List[Dict]) -> List[Dict]:
+        """Remove duplicate vulnerabilities based on URL + name + severity"""
+        seen = set()
+        deduped = []
+        for vuln in vulns:
+            key = (vuln.get("url", ""), vuln.get("name", ""), vuln.get("severity", ""))
+            if key not in seen:
+                seen.add(key)
+                deduped.append(vuln)
+        logger.info(f"[SCAN] Deduplicated {len(vulns)} → {len(deduped)} vulnerabilities")
+        return deduped
 
     def _save_vulns(self, vulns: List[Dict]):
         with open(self.vulns_file, "w") as f:
