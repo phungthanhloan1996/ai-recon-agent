@@ -1,5 +1,6 @@
-.env
-config.py
+results/
 venv/
 __pycache__/
 *.pyc
+.env
+*.log

@@ -1,2 +1,0 @@
-http://testphp.vulnweb.com
-https://testphp.vulnweb.com
