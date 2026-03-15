@@ -1,0 +1,118 @@
+[13:02:25] [INFO] Target: trungdung.com.vn
+[13:02:25] [INFO] [STATE] Initialized state for target: trungdung.com.vn
+[13:02:25] [INFO] [AGENT] AI report enabled (Groq, free tier)
+[13:02:25] [INFO] 🎯 Target: trungdung.com.vn
+[13:02:25] [INFO] 📁 Output: /home/root17/Desktop/ai-recon-agent/results/20260315_130225
+[13:02:25] [INFO] ⚙️  Options: {'skip_recon': False, 'skip_live': False, 'skip_crawl': False, 'skip_scan': False, 'skip_wp': False, 'skip_exploit': False, 'verbose': False}
+[13:02:25] [INFO] 
+============================================================
+[13:02:25] [INFO]   PHASE 1: SUBDOMAIN ENUMERATION → trungdung.com.vn
+[13:02:25] [INFO] ============================================================
+[13:02:25] [INFO] [STATE] Phase → recon
+[13:02:25] [INFO] [TOOLS] ✓ subfinder
+[13:02:25] [INFO] [TOOLS] ✗ assetfinder
+[13:02:25] [INFO] [TOOLS] ✓ amass
+[13:02:33] [WARNING] [RECON] crt.sh failed: HTTP Error 404: Not Found
+[13:02:33] [INFO] [EXEC] Running: subfinder -d trungdung.com.vn -silent -all
+[13:02:33] [INFO] [EXEC] Running: amass enum -passive -d trungdung.com.vn -o /home/root17/Desktop/ai-recon-agent/results/20260315_130225/amass_out.txt -timeout 5
+[13:03:04] [INFO] [EXEC] ✓ subfinder finished (lines: 6)
+[13:03:04] [INFO] [RECON] subfinder: 6 subdomains
+[13:07:53] [INFO] [EXEC] ✓ amass finished (lines: 0)
+[13:07:53] [INFO] [RECON] amass: 0 subdomains
+[13:07:53] [INFO] [RECON] Saved 7 subdomains → /home/root17/Desktop/ai-recon-agent/results/20260315_130225/subdomains.txt
+[13:07:53] [INFO] [RECON] Total unique subdomains: 7
+[13:07:53] [INFO] 
+============================================================
+[13:07:53] [INFO]   PHASE 2: LIVE HOST DETECTION
+[13:07:53] [INFO] ============================================================
+[13:07:53] [INFO] [STATE] Phase → live_hosts
+[13:07:53] [INFO] [LIVE] Probing 7 hosts...
+[13:07:53] [INFO] [EXEC] Running: httpx -ports 80,443,8080,8443,8888,3000,5000,4443,9000 -title -tech-detect -status-code -content-length -json -silent -timeout 10 -threads 50 -follow-redirects
+[13:07:53] [WARNING] [EXEC] ✗ httpx exited 2: Usage: httpx [OPTIONS] URL
+
+Error: No such option: -t
+[13:07:53] [WARNING] [LIVE] httpx flag error: Usage: httpx [OPTIONS] URL
+
+Error: No such option: -t — thử fallback flags
+[13:07:53] [INFO] [EXEC] Running: httpx -status-code -title -json -silent -timeout 10 -threads 50
+[13:07:53] [WARNING] [EXEC] ✗ httpx exited 2: Usage: httpx [OPTIONS] URL
+
+Error: No such option: -s
+[13:07:53] [WARNING] [LIVE] httpx fallback minimal — chỉ dùng -json -silent
+[13:07:53] [INFO] [EXEC] Running: httpx -json -silent
+[13:07:53] [WARNING] [EXEC] ✗ httpx exited 2: Usage: httpx [OPTIONS] URL
+
+Error: No such option: -s
+[13:07:53] [INFO] [LIVE] Saved 0 live hosts → /home/root17/Desktop/ai-recon-agent/results/20260315_130225/live_hosts.txt
+[13:07:53] [INFO] [LIVE] Found 0 live hosts
+[13:07:53] [INFO] 
+============================================================
+[13:07:53] [INFO]   PHASE 3: CRAWLING & URL DISCOVERY
+[13:07:53] [INFO] ============================================================
+[13:07:53] [INFO] [STATE] Phase → crawling
+[13:07:53] [INFO] [TOOLS] ✗ katana
+[13:07:53] [INFO] [TOOLS] ✗ gau
+[13:07:53] [INFO] [TOOLS] ✗ waybackurls
+[13:07:53] [INFO] [TOOLS] ✗ hakrawler
+[13:07:53] [WARNING] [CRAWL] No live hosts found, crawling base target
+[13:07:53] [INFO] [CRAWL] Crawling 1 hosts (parallel max 6), depth=4
+[13:07:53] [INFO] [CRAWL] https://trungdung.com.vn → 0 URLs
+[13:07:53] [WARNING] [CRAWL] No crawl tools available! Using basic URL generation
+[13:07:53] [INFO] [CRAWL] Saved 0 URLs → /home/root17/Desktop/ai-recon-agent/results/20260315_130225/urls.txt
+[13:07:53] [INFO] [CRAWL] Saved 0 endpoints → /home/root17/Desktop/ai-recon-agent/results/20260315_130225/endpoints.txt
+[13:07:53] [INFO] [CRAWL] Total: 0 URLs, 0 categorized endpoints
+[13:07:53] [INFO] 
+============================================================
+[13:07:53] [INFO]   PHASE 4: ENDPOINT PRIORITIZATION
+[13:07:53] [INFO] ============================================================
+[13:07:53] [INFO] [STATE] Phase → endpoint_ranking
+[13:07:53] [WARNING] [RANK] No URLs to rank
+[13:07:53] [INFO] 
+============================================================
+[13:07:53] [INFO]   PHASE 5: VULNERABILITY SCANNING
+[13:07:53] [INFO] ============================================================
+[13:07:53] [INFO] [STATE] Phase → scanning
+[13:07:53] [INFO] [TOOLS] ✓ nuclei
+[13:07:53] [INFO] [TOOLS] ✓ nikto
+[13:07:53] [INFO] [SCAN] nuclei tags: ['cve', 'sqli', 'xss', 'lfi', 'rce', 'ssrf', 'exposure', 'misconfig', 'default-login', 'wp-plugin', 'file-upload', 'auth-bypass']
+[13:07:53] [INFO] [EXEC] Running: nuclei -l /home/root17/Desktop/ai-recon-agent/results/20260315_130225/nuclei_targets.txt -tags cve,sqli,xss,lfi,rce,ssrf,exposure,misconfig,default-login,wp-plugin,file-upload,auth-bypass -severity info,low,medium,high,critical -json -o /home/root17/Desktop/ai-recon-agent/results/20260315_130225/nuclei_out.json -silent -c 20 -timeout 15 -no-color
+[13:07:54] [WARNING] [EXEC] ✗ nuclei exited 2: 
+[13:07:54] [INFO] [SCAN] nuclei found 0 issues
+[13:07:54] [INFO] [EXEC] Running: nikto -h https://trungdung.com.vn -output /home/root17/Desktop/ai-recon-agent/results/20260315_130225/nikto_out0.txt -Format txt -Tuning 1234567890abc -nointeractive
+[13:09:11] [INFO] [EXEC] ✓ nikto finished (lines: 32)
+[13:09:11] [WARNING] [NIKTO] + [000427] /: Link header(s) found with value(s): <https://trungdung.com.vn/wp-j
+[13:09:11] [WARNING] [NIKTO] + [999100] /: Uncommon header(s) 'platform' found, with contents: hostinger.
+[13:09:11] [WARNING] [NIKTO] + [999100] /: Uncommon header(s) 'panel' found, with contents: hpanel.
+[13:09:11] [WARNING] [NIKTO] + [011799] /: An alt-svc header was found which is advertising HTTP/3. The endpo
+[13:09:11] [WARNING] [NIKTO] + No CGI Directories found (use '-C all' to force check all possible dirs). CGI 
+[13:09:11] [WARNING] [NIKTO] + [999100] /wp-admin/: Uncommon header(s) 'x-redirect-by' found, with contents: 
+[13:09:11] [INFO] [SCAN] nikto scanned 1 hosts
+[13:09:11] [INFO] [SCAN] Saved 6 vulnerabilities → /home/root17/Desktop/ai-recon-agent/results/20260315_130225/vulnerabilities.json
+[13:09:11] [INFO] [WP] WPScan API token loaded ✓
+[13:09:11] [INFO] [WP] NVD API key loaded ✓
+[13:09:11] [INFO] 
+============================================================
+[13:09:11] [INFO]   PHASE 6: WORDPRESS DEEP SCAN
+[13:09:11] [INFO] ============================================================
+[13:09:11] [INFO] [STATE] Phase → wp_scan
+[13:09:11] [INFO] [WP] WordPress not detected - skipping WP scan
+[13:09:11] [INFO] 
+============================================================
+[13:09:11] [INFO]   EXPLOIT CHAIN PLANNING
+[13:09:11] [INFO] ============================================================
+[13:09:11] [INFO] [CHAIN] Planned 0 exploit chains
+[13:09:11] [INFO] 
+============================================================
+[13:09:11] [INFO]   PHASE 7: EXPLOIT ENGINE
+[13:09:11] [INFO] ============================================================
+[13:09:11] [INFO] [STATE] Phase → exploiting
+[13:09:11] [INFO] [EXPLOIT] Completed. 0 successful exploits
+[13:09:11] [INFO] 
+============================================================
+[13:09:11] [INFO]   FINAL REPORT GENERATION
+[13:09:11] [INFO] ============================================================
+[13:09:11] [INFO] [STATE] Phase → reporting
+[13:09:11] [INFO] [REPORT] Generating AI-enhanced report...
+[13:09:11] [WARNING] [REPORT] AI generation failed: HTTP Error 403: Forbidden, using static report
+[13:09:11] [INFO] [REPORT] Report saved → /home/root17/Desktop/ai-recon-agent/results/20260315_130225/ai_final_report.txt
+[13:09:11] [INFO] [AGENT] Done!

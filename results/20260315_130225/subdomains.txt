@@ -1,0 +1,7 @@
+apps.trungdung.com.vn
+mail.trungdung.com.vn
+nextcloud.trungdung.com.vn
+trungdung.com.vn
+wiki.trungdung.com.vn
+www.mail.trungdung.com.vn
+www.trungdung.com.vn

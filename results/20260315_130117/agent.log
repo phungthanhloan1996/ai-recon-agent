@@ -1,0 +1,29 @@
+[13:01:17] [INFO] Target: bvntd.gov.vn
+[13:01:17] [INFO] [STATE] Initialized state for target: bvntd.gov.vn
+[13:01:17] [INFO] [AGENT] AI report enabled (Groq, free tier)
+[13:01:17] [INFO] 🎯 Target: bvntd.gov.vn
+[13:01:17] [INFO] 📁 Output: /home/root17/Desktop/ai-recon-agent/results/20260315_130117
+[13:01:17] [INFO] ⚙️  Options: {'skip_recon': False, 'skip_live': False, 'skip_crawl': False, 'skip_scan': False, 'skip_wp': False, 'skip_exploit': False, 'verbose': False}
+[13:01:17] [INFO] 
+============================================================
+[13:01:17] [INFO]   PHASE 1: SUBDOMAIN ENUMERATION → bvntd.gov.vn
+[13:01:17] [INFO] ============================================================
+[13:01:17] [INFO] [STATE] Phase → recon
+[13:01:17] [INFO] [TOOLS] ✓ subfinder
+[13:01:17] [INFO] [TOOLS] ✗ assetfinder
+[13:01:17] [INFO] [TOOLS] ✓ amass
+[13:01:24] [WARNING] [RECON] crt.sh failed: HTTP Error 404: Not Found
+[13:01:24] [INFO] [EXEC] Running: subfinder -d bvntd.gov.vn -silent -all
+[13:01:24] [INFO] [EXEC] Running: amass enum -passive -d bvntd.gov.vn -o /home/root17/Desktop/ai-recon-agent/results/20260315_130117/amass_out.txt -timeout 5
+[13:01:47] [WARNING] [EXEC] ✗ subfinder exited -2: 
+[13:01:47] [WARNING] [EXEC] ✗ amass exited -2: 
+[13:01:47] [WARNING] 
+[AGENT] Scan interrupted by user. Saving state...
+[13:01:47] [INFO] 
+============================================================
+[13:01:47] [INFO]   FINAL REPORT GENERATION
+[13:01:47] [INFO] ============================================================
+[13:01:47] [INFO] [STATE] Phase → reporting
+[13:01:47] [INFO] [REPORT] Generating AI-enhanced report...
+[13:01:47] [WARNING] [REPORT] AI generation failed: HTTP Error 403: Forbidden, using static report
+[13:01:47] [INFO] [REPORT] Report saved → /home/root17/Desktop/ai-recon-agent/results/20260315_130117/ai_final_report.txt

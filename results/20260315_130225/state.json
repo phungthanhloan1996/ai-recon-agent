@@ -1,0 +1,95 @@
+{
+  "target": "trungdung.com.vn",
+  "scan_id": "20260315_130225",
+  "start_time": "2026-03-15T13:02:25.148061",
+  "subdomains": [
+    "nextcloud.trungdung.com.vn",
+    "mail.trungdung.com.vn",
+    "www.trungdung.com.vn",
+    "trungdung.com.vn",
+    "wiki.trungdung.com.vn",
+    "www.mail.trungdung.com.vn",
+    "apps.trungdung.com.vn"
+  ],
+  "live_hosts": [],
+  "technologies": {},
+  "urls": [],
+  "endpoints": [],
+  "prioritized_endpoints": [],
+  "vulnerabilities": [
+    {
+      "tool": "nikto",
+      "name": "+ [000427] /: Link header(s) found with value(s): <https://trungdung.com.vn/wp-json/>; rel=\"https://",
+      "severity": "MEDIUM",
+      "url": "https://trungdung.com.vn",
+      "description": "+ [000427] /: Link header(s) found with value(s): <https://trungdung.com.vn/wp-json/>; rel=\"https://api.w.org/\",<https://trungdung.com.vn/wp-json/wp/v2/pages/8>; rel=\"alternate\"; type=\"application/json\",<https://trungdung.com.vn/>; rel=shortlink. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Link",
+      "template": "nikto",
+      "tags": [
+        "nikto"
+      ]
+    },
+    {
+      "tool": "nikto",
+      "name": "+ [999100] /: Uncommon header(s) 'platform' found, with contents: hostinger.",
+      "severity": "MEDIUM",
+      "url": "https://trungdung.com.vn",
+      "description": "+ [999100] /: Uncommon header(s) 'platform' found, with contents: hostinger.",
+      "template": "nikto",
+      "tags": [
+        "nikto"
+      ]
+    },
+    {
+      "tool": "nikto",
+      "name": "+ [999100] /: Uncommon header(s) 'panel' found, with contents: hpanel.",
+      "severity": "MEDIUM",
+      "url": "https://trungdung.com.vn",
+      "description": "+ [999100] /: Uncommon header(s) 'panel' found, with contents: hpanel.",
+      "template": "nikto",
+      "tags": [
+        "nikto"
+      ]
+    },
+    {
+      "tool": "nikto",
+      "name": "+ [011799] /: An alt-svc header was found which is advertising HTTP/3. The endpoint is: ':443'. Nikt",
+      "severity": "MEDIUM",
+      "url": "https://trungdung.com.vn",
+      "description": "+ [011799] /: An alt-svc header was found which is advertising HTTP/3. The endpoint is: ':443'. Nikto cannot test HTTP/3 over QUIC. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/alt-svc",
+      "template": "nikto",
+      "tags": [
+        "nikto"
+      ]
+    },
+    {
+      "tool": "nikto",
+      "name": "+ No CGI Directories found (use '-C all' to force check all possible dirs). CGI tests skipped.",
+      "severity": "MEDIUM",
+      "url": "https://trungdung.com.vn",
+      "description": "+ No CGI Directories found (use '-C all' to force check all possible dirs). CGI tests skipped.",
+      "template": "nikto",
+      "tags": [
+        "nikto"
+      ]
+    },
+    {
+      "tool": "nikto",
+      "name": "+ [999100] /wp-admin/: Uncommon header(s) 'x-redirect-by' found, with contents: WordPress.",
+      "severity": "MEDIUM",
+      "url": "https://trungdung.com.vn",
+      "description": "+ [999100] /wp-admin/: Uncommon header(s) 'x-redirect-by' found, with contents: WordPress.",
+      "template": "nikto",
+      "tags": [
+        "nikto"
+      ]
+    }
+  ],
+  "wordpress_detected": false,
+  "wp_plugins": [],
+  "wp_themes": [],
+  "wp_users": [],
+  "wp_vulns": [],
+  "exploit_results": [],
+  "current_phase": "reporting",
+  "errors": []
+}

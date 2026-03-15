@@ -1,12 +1,12 @@
 """
 modules/scanner.py - Phase 5: Vulnerability Scanning
-Tools: nuclei, nikto
-Detect: XSS, SQLi, misconfigurations, exposed files
+Tools: nuclei, nikto (nuclei tags theo target; nikto chạy song song)
 """
 
 import json
 import os
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List
 
 from core.executor import run_command, check_tools
@@ -16,11 +16,13 @@ logger = logging.getLogger("recon.phase5")
 
 SCAN_TOOLS = ["nuclei", "nikto"]
 
-NUCLEI_TAGS = [
+NUCLEI_TAGS_BASE = [
     "cve", "sqli", "xss", "lfi", "rce", "ssrf",
     "exposure", "misconfig", "default-login",
     "wp-plugin", "file-upload", "auth-bypass",
 ]
+NIKTO_MAX_PARALLEL = int(os.environ.get("NIKTO_PARALLEL", "4"))
+NIKTO_MAX_HOSTS = int(os.environ.get("NIKTO_MAX_HOSTS", "10"))
 
 
 class ScannerModule:
@@ -43,7 +45,7 @@ class ScannerModule:
         if not live_hosts:
             live_hosts = [{"url": f"https://{self.target}"}]
 
-        # Run nuclei
+        # Run nuclei (tags động theo endpoint: wp, api)
         if tool_status.get("nuclei"):
             nuclei_vulns = self._run_nuclei(live_hosts)
             all_vulns.extend(nuclei_vulns)
@@ -51,12 +53,18 @@ class ScannerModule:
         else:
             logger.warning("[SCAN] nuclei not found - skipping")
 
-        # Run nikto
+        # Run nikto song song nhiều host
         if tool_status.get("nikto"):
-            for host in live_hosts[:5]:  # Nikto is slow, limit
-                nikto_vulns = self._run_nikto(host["url"])
-                all_vulns.extend(nikto_vulns)
-            logger.info(f"[SCAN] nikto added {len(all_vulns)} total issues")
+            nikto_hosts = live_hosts[:NIKTO_MAX_HOSTS]
+            with ThreadPoolExecutor(max_workers=min(NIKTO_MAX_PARALLEL, len(nikto_hosts))) as executor:
+                futures = {executor.submit(self._run_nikto, h["url"], i): i for i, h in enumerate(nikto_hosts)}
+                for future in as_completed(futures):
+                    try:
+                        nikto_vulns = future.result()
+                        all_vulns.extend(nikto_vulns)
+                    except Exception as e:
+                        logger.warning(f"[SCAN] nikto host failed: {e}")
+            logger.info(f"[SCAN] nikto scanned {len(nikto_hosts)} hosts")
         else:
             logger.warning("[SCAN] nikto not found - skipping")
 
@@ -71,10 +79,23 @@ class ScannerModule:
         self._print_summary(all_vulns)
         return all_vulns
 
+    def _nuclei_tags(self) -> List[str]:
+        """Tags động: thêm wordpress, api nếu endpoint có dấu hiệu"""
+        tags = list(NUCLEI_TAGS_BASE)
+        endpoints = self.state.get("endpoints", [])
+        urls_str = " ".join(e.get("url", "") + " " + " ".join(e.get("categories", [])) for e in endpoints)
+        if "wp" in urls_str or "wordpress" in urls_str.lower() or "wp-admin" in urls_str or "wp-json" in urls_str:
+            tags.extend(["wordpress"])
+        if "/api/" in urls_str or "api" in urls_str or "graphql" in urls_str.lower():
+            tags.extend(["api", "swagger"])
+        return list(dict.fromkeys(tags))  # unique, giữ thứ tự
+
     def _run_nuclei(self, live_hosts: List[Dict]) -> List[Dict]:
         """Run nuclei against all live hosts"""
         targets_file = os.path.join(self.output_dir, "nuclei_targets.txt")
         output_file = os.path.join(self.output_dir, "nuclei_out.json")
+        tags = self._nuclei_tags()
+        logger.info(f"[SCAN] nuclei tags: {tags}")
 
         # Write targets
         with open(targets_file, "w") as f:
@@ -84,7 +105,7 @@ class ScannerModule:
         cmd = [
             "nuclei",
             "-l", targets_file,
-            "-tags", ",".join(NUCLEI_TAGS),
+            "-tags", ",".join(tags),
             "-severity", "info,low,medium,high,critical",
             "-json",
             "-o", output_file,
@@ -128,9 +149,10 @@ class ScannerModule:
 
         return vulns
 
-    def _run_nikto(self, url: str) -> List[Dict]:
-        """Run nikto against a single URL"""
-        output_file = os.path.join(self.output_dir, "nikto_out.txt")
+    def _run_nikto(self, url: str, index: int = 0) -> List[Dict]:
+        """Run nikto against a single URL (index để ghi file riêng khi chạy song song)"""
+        safe = str(index).replace("/", "_")
+        output_file = os.path.join(self.output_dir, f"nikto_out{safe}.txt")
 
         cmd = [
             "nikto",

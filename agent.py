@@ -89,6 +89,58 @@ class ReconAgent:
         self.state = StateManager(self.target, output_dir)
         self.logger = logging.getLogger("recon.agent")
         self.start_time = time.time()
+        # AI client cho báo cáo: ưu tiên Groq (miễn phí), sau đó Anthropic
+        self._ai_client = None
+        groq_key = os.environ.get("GROQ_API_KEY")
+        if groq_key:
+            try:
+                class _GroqReportClient:
+                    def __init__(self, key):
+                        self._key = key
+                        self._url = "https://api.groq.com/openai/v1/chat/completions"
+                    def generate(self, prompt: str) -> str:
+                        import urllib.request
+                        body = json.dumps({
+                            "model": "llama-3.3-70b-versatile",
+                            "messages": [{"role": "user", "content": prompt}],
+                            "max_tokens": 8192,
+                            "temperature": 0.3,
+                        }).encode()
+                        req = urllib.request.Request(
+                            self._url,
+                            data=body,
+                            headers={
+                                "Authorization": f"Bearer {self._key}",
+                                "Content-Type": "application/json",
+                            },
+                            method="POST",
+                        )
+                        with urllib.request.urlopen(req, timeout=120) as resp:
+                            out = json.loads(resp.read().decode())
+                        return (out.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+                self._ai_client = _GroqReportClient(groq_key)
+                self.logger.info("[AGENT] AI report enabled (Groq, free tier)")
+            except Exception as e:
+                self.logger.debug(f"[AGENT] Groq init failed: {e}")
+        if self._ai_client is None:
+            api_key = os.environ.get("ANTHROPIC_API_KEY")
+            if api_key:
+                try:
+                    import anthropic
+                    class _AIReportClient:
+                        def __init__(self, key):
+                            self._client = anthropic.Anthropic(api_key=key)
+                        def generate(self, prompt: str) -> str:
+                            r = self._client.messages.create(
+                                model="claude-3-5-sonnet-20241022",
+                                max_tokens=8192,
+                                messages=[{"role": "user", "content": prompt}]
+                            )
+                            return r.content[0].text if r.content else ""
+                    self._ai_client = _AIReportClient(api_key)
+                    self.logger.info("[AGENT] AI report enabled (Anthropic)")
+                except Exception as e:
+                    self.logger.debug(f"[AGENT] Anthropic init failed: {e}")
 
     def run(self):
         """Execute the full recon pipeline"""
@@ -178,13 +230,14 @@ class ReconAgent:
         # Show top risky
         ranker.print_top(ranked, n=20)
 
-        # Update state with top 100 ranked
-        self.state.update(prioritized_endpoints=ranked[:100])
+        # Số endpoint ưu tiên lưu (env RANK_TOP=150 để tăng)
+        rank_top = int(os.environ.get("RANK_TOP", "150"))
+        self.state.update(prioritized_endpoints=ranked[:rank_top])
 
         # Save to file
         ranked_file = os.path.join(self.output_dir, "endpoints_ranked.json")
         with open(ranked_file, "w") as f:
-            json.dump(ranked[:100], f, indent=2)
+            json.dump(ranked[:rank_top], f, indent=2)
 
         self.logger.info(f"[RANK] Saved ranked endpoints → {ranked_file}")
 
@@ -210,7 +263,7 @@ class ReconAgent:
 
     def _generate_report(self):
         """Generate final AI report"""
-        analyzer = AIAnalyzer(self.state, self.output_dir)
+        analyzer = AIAnalyzer(self.state, self.output_dir, ai_client=getattr(self, "_ai_client", None))
         report = analyzer.generate_report()
 
         # Print first part of report to console

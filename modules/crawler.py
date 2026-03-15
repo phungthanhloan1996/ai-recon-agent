@@ -7,7 +7,8 @@ Discover: parameters, API endpoints, uploads, admin panels
 import os
 import re
 import logging
-from typing import Dict, List, Set
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, List, Set, Tuple
 from urllib.parse import urlparse
 
 from core.executor import run_command, check_tools
@@ -16,6 +17,9 @@ from core.state_manager import StateManager
 logger = logging.getLogger("recon.phase3")
 
 CRAWL_TOOLS = ["katana", "gau", "waybackurls", "hakrawler"]
+# Số host crawl đồng thời; depth katana (env CRAWL_DEPTH=5 nếu muốn sâu hơn)
+CRAWL_MAX_PARALLEL_HOSTS = int(os.environ.get("CRAWL_PARALLEL_HOSTS", "6"))
+CRAWL_DEPTH = int(os.environ.get("CRAWL_DEPTH", "4"))
 
 # Patterns to identify interesting endpoints
 ENDPOINT_PATTERNS = {
@@ -59,39 +63,33 @@ class CrawlerModule:
             logger.warning("[CRAWL] No live hosts found, crawling base target")
             live_hosts = [{"url": f"https://{self.target}"}]
 
-        # Crawl each live host
-        for host in live_hosts[:20]:  # Limit to 20 hosts max
+        hosts_to_crawl = live_hosts[:20]
+        logger.info(f"[CRAWL] Crawling {len(hosts_to_crawl)} hosts (parallel max {CRAWL_MAX_PARALLEL_HOSTS}), depth={CRAWL_DEPTH}")
+
+        def _crawl_one_host(host: dict) -> Tuple[str, Set[str]]:
             base_url = host.get("url", "")
             if not base_url:
-                continue
-
-            logger.info(f"[CRAWL] Crawling: {base_url}")
-
-            # katana - active crawling
+                return base_url or "?", set()
+            urls: Set[str] = set()
             if tool_status.get("katana"):
-                urls = self._run_katana(base_url)
-                all_urls.update(urls)
-                logger.info(f"[CRAWL] katana → {len(urls)} URLs")
-
-            # gau - historical URLs
+                urls.update(self._run_katana(base_url))
             if tool_status.get("gau"):
-                domain = urlparse(base_url).netloc
-                urls = self._run_gau(domain)
-                all_urls.update(urls)
-                logger.info(f"[CRAWL] gau → {len(urls)} URLs")
-
-            # waybackurls
+                urls.update(self._run_gau(urlparse(base_url).netloc))
             if tool_status.get("waybackurls"):
-                domain = urlparse(base_url).netloc
-                urls = self._run_waybackurls(domain)
-                all_urls.update(urls)
-                logger.info(f"[CRAWL] waybackurls → {len(urls)} URLs")
-
-            # hakrawler
+                urls.update(self._run_waybackurls(urlparse(base_url).netloc))
             if tool_status.get("hakrawler"):
-                urls = self._run_hakrawler(base_url)
-                all_urls.update(urls)
-                logger.info(f"[CRAWL] hakrawler → {len(urls)} URLs")
+                urls.update(self._run_hakrawler(base_url))
+            return base_url, urls
+
+        with ThreadPoolExecutor(max_workers=min(CRAWL_MAX_PARALLEL_HOSTS, len(hosts_to_crawl))) as executor:
+            futures = {executor.submit(_crawl_one_host, h): h for h in hosts_to_crawl}
+            for future in as_completed(futures):
+                try:
+                    base_url, urls = future.result()
+                    all_urls.update(urls)
+                    logger.info(f"[CRAWL] {base_url} → {len(urls)} URLs")
+                except Exception as e:
+                    logger.warning(f"[CRAWL] Host failed: {e}")
 
         if not any(tool_status.values()):
             logger.warning("[CRAWL] No crawl tools available! Using basic URL generation")
@@ -117,7 +115,7 @@ class CrawlerModule:
         cmd = [
             "katana",
             "-u", url,
-            "-d", "3",
+            "-d", str(CRAWL_DEPTH),
             "-jc",
             "-silent",
             "-timeout", "10",

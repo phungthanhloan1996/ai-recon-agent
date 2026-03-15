@@ -43,3 +43,20 @@
 # The agent uses Python standard library only:
 # - subprocess, os, sys, json, logging, re, urllib
 # - dataclasses, typing, datetime, time, argparse, base64
+#
+# ═══════════════════════════════════════════════════════════════
+# OPTIONAL ENV (tùy chỉnh để agent mạnh hơn)
+# ═══════════════════════════════════════════════════════════════
+# Báo cáo AI (ưu tiên Groq miễn phí, sau đó Anthropic):
+# GROQ_API_KEY         → Báo cáo cuối dùng Groq/Llama (miễn phí, lấy tại console.groq.com)
+# ANTHROPIC_API_KEY    → Báo cáo cuối dùng Claude (trả phí)
+# CRAWL_DEPTH           → Độ sâu Katana (mặc định 4)
+# CRAWL_PARALLEL_HOSTS  → Số host crawl cùng lúc (mặc định 6)
+# NIKTO_PARALLEL        → Số host nikto cùng lúc (mặc định 4)
+# NIKTO_MAX_HOSTS       → Tối đa host chạy nikto (mặc định 10)
+# RANK_TOP              → Số endpoint ưu tiên lưu (mặc định 150)
+# MAX_SQLI_TARGETS      → Số target SQLi thử (mặc định 6)
+# MAX_UPLOAD_TARGETS    → Số target upload thử (mặc định 4)
+# MAX_LFI_TARGETS       → Số target LFI thử (mặc định 5)
+# MAX_XSS_TARGETS       → Số target XSS thử (mặc định 10)
+# MAX_WP_PLUGINS        → Số plugin WP exploit thử (mặc định 4)

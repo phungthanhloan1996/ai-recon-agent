@@ -1,0 +1,11 @@
+- Nikto v2.6.0/
++ Target Host: bvntd.gov.vn
++ Target Port: 443
++ GET /: Uncommon header(s) 'x-redirect-by' found, with contents: WordPress.
++ SSL Info:           Subject:  /CN=*.bvntd.gov.vn
+                      CN:       *.bvntd.gov.vn
+                      SAN:      *.bvntd.gov.vn, bvntd.gov.vn
+                      Ciphers:  ECDHE-RSA-AES256-GCM-SHA384
+                      Issuer:   /C=GB/O=Sectigo Limited/CN=Sectigo Public Server Authentication CA DV R36
++ GET https://www.bvntd.gov.vn/: Link header(s) found with value(s): <https://www.bvntd.gov.vn/wp-json/>; rel="https://api.w.org/",<https://www.bvntd.gov.vn/wp-json/wp/v2/pages/12>; rel="alternate"; title="JSON"; type="application/json",<https://www.bvntd.gov.vn/>; rel=shortlink. See: https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Link: 
++ GET /: Server is using a wildcard certificate: *.bvntd.gov.vn. See: https://en.wikipedia.org/wiki/Wildcard_certificate: 

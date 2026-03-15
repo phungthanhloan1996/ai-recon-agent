@@ -1,10 +1,14 @@
 """
 modules/recon.py - Phase 1: Subdomain Enumeration
-Tools: subfinder, assetfinder, amass
+Tools: subfinder, assetfinder, amass + crt.sh (API, không cần binary)
 """
 
+import json
 import os
 import logging
+import ssl
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Set
 
 from core.executor import run_command, check_tools
@@ -31,29 +35,36 @@ class ReconModule:
         tool_status = check_tools(RECON_TOOLS)
         all_subdomains: Set[str] = set()
 
-        # --- subfinder ---
+        # crt.sh (cert transparency) - luôn chạy, không cần binary
+        try:
+            crt_subs = self._run_crtsh()
+            all_subdomains.update(crt_subs)
+            logger.info(f"[RECON] crt.sh: {len(crt_subs)} subdomains")
+        except Exception as e:
+            logger.warning(f"[RECON] crt.sh failed: {e}")
+
+        # Chạy song song các tool có sẵn
+        tasks = []
         if tool_status.get("subfinder"):
-            subs = self._run_subfinder()
-            all_subdomains.update(subs)
-            logger.info(f"[RECON] subfinder: {len(subs)} subdomains")
-        else:
-            logger.warning("[RECON] subfinder not found - skipping")
-
-        # --- assetfinder ---
+            tasks.append(("subfinder", self._run_subfinder))
         if tool_status.get("assetfinder"):
-            subs = self._run_assetfinder()
-            all_subdomains.update(subs)
-            logger.info(f"[RECON] assetfinder: {len(subs)} subdomains")
-        else:
-            logger.warning("[RECON] assetfinder not found - skipping")
-
-        # --- amass ---
+            tasks.append(("assetfinder", self._run_assetfinder))
         if tool_status.get("amass"):
-            subs = self._run_amass()
-            all_subdomains.update(subs)
-            logger.info(f"[RECON] amass: {len(subs)} subdomains")
+            tasks.append(("amass", self._run_amass))
+
+        if tasks:
+            with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+                future_to_name = {executor.submit(fn): name for name, fn in tasks}
+                for future in as_completed(future_to_name):
+                    name = future_to_name[future]
+                    try:
+                        subs = future.result()
+                        all_subdomains.update(subs)
+                        logger.info(f"[RECON] {name}: {len(subs)} subdomains")
+                    except Exception as e:
+                        logger.warning(f"[RECON] {name} failed: {e}")
         else:
-            logger.warning("[RECON] amass not found - skipping")
+            logger.warning("[RECON] No recon tools available")
 
         # Always include the base domain
         all_subdomains.add(self.target)
@@ -69,6 +80,24 @@ class ReconModule:
 
         logger.info(f"[RECON] Total unique subdomains: {len(cleaned)}")
         return list(cleaned)
+
+    def _run_crtsh(self) -> Set[str]:
+        """Certificate Transparency via crt.sh - không cần cài thêm tool"""
+        url = f"https://crt.sh/?q=%.{self.target}&output=json"
+        req = urllib.request.Request(url, headers={"User-Agent": "AI-Recon-Agent/1.0"})
+        ctx = ssl.create_default_context()
+        with urllib.request.urlopen(req, timeout=30, context=ctx) as resp:
+            data = json.loads(resp.read().decode())
+        subs = set()
+        for item in data:
+            name = (item.get("name_value") or "").strip().lower()
+            for part in name.split():
+                if part and ("*" not in part):
+                    subs.add(part)
+            cn = (item.get("common_name") or "").strip().lower()
+            if cn and "*" not in cn:
+                subs.add(cn)
+        return self._clean_subdomains(subs)
 
     def _run_subfinder(self) -> Set[str]:
         cmd = ["subfinder", "-d", self.target, "-silent", "-all"]
