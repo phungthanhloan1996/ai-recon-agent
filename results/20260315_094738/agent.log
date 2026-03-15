@@ -1,0 +1,247 @@
+[09:47:38] [INFO] AI Recon Agent starting...
+[09:47:38] [INFO] Target: benthanhlogistics.com.vn
+[09:47:38] [INFO] [STATE] Initialized state for target: benthanhlogistics.com.vn
+[09:47:38] [INFO] 🎯 Target: benthanhlogistics.com.vn
+[09:47:38] [INFO] 📁 Output: /home/root17/Desktop/ai-recon-agent/results/20260315_094738
+[09:47:38] [INFO] ⚙️  Options: {'skip_recon': False, 'skip_live': False, 'skip_crawl': False, 'skip_scan': False, 'skip_wp': False, 'skip_exploit': False, 'verbose': False}
+[09:47:38] [INFO] 
+============================================================
+[09:47:38] [INFO]   PHASE 1: SUBDOMAIN ENUMERATION → benthanhlogistics.com.vn
+[09:47:38] [INFO] ============================================================
+[09:47:38] [INFO] [STATE] Phase → recon
+[09:47:38] [INFO] [TOOLS] ✓ subfinder
+[09:47:38] [INFO] [TOOLS] ✓ assetfinder
+[09:47:38] [INFO] [TOOLS] ✓ amass
+[09:47:38] [INFO] [EXEC] Running: subfinder -d benthanhlogistics.com.vn -silent -all
+[09:48:09] [INFO] [EXEC] ✓ subfinder finished (lines: 7)
+[09:48:09] [INFO] [RECON] subfinder: 7 subdomains
+[09:48:09] [INFO] [EXEC] Running: assetfinder --subs-only benthanhlogistics.com.vn
+[09:48:10] [INFO] [EXEC] ✓ assetfinder finished (lines: 24)
+[09:48:10] [INFO] [RECON] assetfinder: 8 subdomains
+[09:48:10] [INFO] [EXEC] Running: amass enum -passive -d benthanhlogistics.com.vn -o /home/root17/Desktop/ai-recon-agent/results/20260315_094738/amass_out.txt -timeout 5
+[09:49:33] [INFO] [EXEC] ✓ amass finished (lines: 0)
+[09:49:33] [INFO] [RECON] amass: 0 subdomains
+[09:49:33] [INFO] [RECON] Saved 8 subdomains → /home/root17/Desktop/ai-recon-agent/results/20260315_094738/subdomains.txt
+[09:49:33] [INFO] [RECON] Total unique subdomains: 8
+[09:49:33] [INFO] 
+============================================================
+[09:49:33] [INFO]   PHASE 2: LIVE HOST DETECTION
+[09:49:33] [INFO] ============================================================
+[09:49:33] [INFO] [STATE] Phase → live_hosts
+[09:49:33] [INFO] [LIVE] Probing 8 hosts...
+[09:49:33] [INFO] [EXEC] Running: httpx -ports 80,443,8080,8443,8888,3000,5000,4443,9000 -title -tech-detect -status-code -content-length -json -silent -timeout 10 -threads 50 -follow-redirects
+[09:49:33] [WARNING] [EXEC] ✗ httpx exited 2: Usage: httpx [OPTIONS] URL
+
+Error: No such option: -t
+[09:49:33] [WARNING] [LIVE] httpx flag error: Usage: httpx [OPTIONS] URL
+
+Error: No such option: -t — thử fallback flags
+[09:49:33] [INFO] [EXEC] Running: httpx -status-code -title -json -silent -timeout 10 -threads 50
+[09:49:33] [WARNING] [EXEC] ✗ httpx exited 2: Usage: httpx [OPTIONS] URL
+
+Error: No such option: -s
+[09:49:33] [WARNING] [LIVE] httpx fallback minimal — chỉ dùng -json -silent
+[09:49:33] [INFO] [EXEC] Running: httpx -json -silent
+[09:49:33] [WARNING] [EXEC] ✗ httpx exited 2: Usage: httpx [OPTIONS] URL
+
+Error: No such option: -s
+[09:49:33] [INFO] [LIVE] Saved 0 live hosts → /home/root17/Desktop/ai-recon-agent/results/20260315_094738/live_hosts.txt
+[09:49:33] [INFO] [LIVE] Found 0 live hosts
+[09:49:33] [INFO] 
+============================================================
+[09:49:33] [INFO]   PHASE 3: CRAWLING & URL DISCOVERY
+[09:49:33] [INFO] ============================================================
+[09:49:33] [INFO] [STATE] Phase → crawling
+[09:49:33] [INFO] [TOOLS] ✓ katana
+[09:49:33] [INFO] [TOOLS] ✓ gau
+[09:49:33] [INFO] [TOOLS] ✓ waybackurls
+[09:49:33] [INFO] [TOOLS] ✓ hakrawler
+[09:49:33] [WARNING] [CRAWL] No live hosts found, crawling base target
+[09:49:33] [INFO] [CRAWL] Crawling: https://benthanhlogistics.com.vn
+[09:49:33] [INFO] [EXEC] Running: katana -u https://benthanhlogistics.com.vn -d 3 -jc -silent -timeout 10 -c 20
+[09:49:51] [INFO] [EXEC] ✓ katana finished (lines: 197)
+[09:49:51] [INFO] [CRAWL] katana → 188 URLs
+[09:49:51] [INFO] [EXEC] Running: gau --threads 5 --timeout 30 benthanhlogistics.com.vn
+[09:50:26] [INFO] [EXEC] ✓ gau finished (lines: 283)
+[09:50:26] [INFO] [CRAWL] gau → 283 URLs
+[09:50:26] [INFO] [EXEC] Running: waybackurls
+[09:51:07] [INFO] [EXEC] ✓ waybackurls finished (lines: 288)
+[09:51:07] [INFO] [CRAWL] waybackurls → 288 URLs
+[09:51:07] [INFO] [EXEC] Running: hakrawler -depth 2 -plain -insecure
+[09:51:07] [WARNING] [EXEC] ✗ hakrawler exited 2: flag provided but not defined: -depth
+Usage of hakrawler:
+  -d int
+    	Depth to crawl. (default 2)
+  -dr
+    	Disable following HTTP redirects.
+  -h string
+    	Custom headers separated by two semi-c
+[09:51:07] [INFO] [CRAWL] hakrawler → 0 URLs
+[09:51:07] [DEBUG] [CRAWL] Endpoint: / [param]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /author/admin [admin, auth]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/oembed/1.0/embed [wp, param]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /services/exhibition-cargo [param]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-create [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /key-personel [param]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/wlwmanifest.xml [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/6 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/a-function [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/inspect-source [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/to-absolute-index [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-set-prototype-of [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/get-iterator [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-property-is-enumerable [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/call-with-safe-iteration-closing [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-define-properties [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-keys [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/add-to-unscopables [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/array-includes [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/is-array-iterator-method [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/indexed-object [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/global [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/string-multibyte [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /services/warehousing-and-distribution [param]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/get-iterator-method [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /xmlrpc.php [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/78 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/shared-key [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/53 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/ [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/require-object-coercible [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/uid [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/to-integer [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/32 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/to-string-tag-support [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/15 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/fails [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/35 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-get-own-property-names [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/create-non-enumerable-property [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/to-object [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/is-object [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/modules/web.url-search-params [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/iterators-core [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/an-object [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/46 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/shared [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/correct-prototype-getter [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/modules/es.string.iterator [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/vendor/.test [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/classof [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/array-from [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/modules/web.url [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/67 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/modules/web.url.to-json [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-get-prototype-of [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/redefine-all [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/string-punycode-to-ascii [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-admin/ [admin]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/export [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/native-weak-map [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/19 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/to-primitive [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/get-built-in [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/document-create-element [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/vendor/.exec [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /%5C/wp-admin%5C/admin-ajax.php [admin]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/50 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/create-property [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /services/seafreight [param]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/12 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/iterators [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/use-symbol-as-uid [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/an-instance [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-define-property [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/well-known-symbol [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/own-keys [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-get-own-property-descriptor [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/hidden-keys [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/redefine [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/path [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/define-iterator [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/create-iterator-constructor [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/to-indexed-object [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/set-global [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/create-property-descriptor [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/modules/es.array.iterator [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /contact-us [param]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/shared-store [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-admin%5C/admin-ajax.php [admin]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-keys-internal [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/users/1 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /admin [admin]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-assign [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /administrator [admin]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/native-symbol [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/set-to-string-tag [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/ie8-dom-define [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/a-possible-prototype [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/vendor/g.flags&&t [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/classof-raw [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/function-bind-context [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/internal-state [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /services/import-%e2%80%93-export-services [param]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/html [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /author/admin/feed [admin, auth]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/is-forced [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/object-get-own-property-symbols [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/is-pure [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/descriptors [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/to-length [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/native-url [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-json/wp/v2/pages/29 [api, wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/copy-constructor-properties [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-admin/edit-comments.php [admin]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-admin/post.php [admin]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/has [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/&& [wp]
+[09:51:07] [DEBUG] [CRAWL] Endpoint: /wp-includes/js/dist/internals/enum-bug-keys [wp]
+[09:51:07] [INFO] [CRAWL] Saved 312 URLs → /home/root17/Desktop/ai-recon-agent/results/20260315_094738/urls.txt
+[09:51:07] [INFO] [CRAWL] Saved 119 endpoints → /home/root17/Desktop/ai-recon-agent/results/20260315_094738/endpoints.txt
+[09:51:07] [INFO] [CRAWL] Total: 312 URLs, 119 categorized endpoints
+[09:51:07] [INFO] 
+============================================================
+[09:51:07] [INFO]   PHASE 4: ENDPOINT PRIORITIZATION
+[09:51:07] [INFO] ============================================================
+[09:51:07] [INFO] [STATE] Phase → endpoint_ranking
+[09:51:07] [INFO] [RANKER] Scoring 312 endpoints...
+[09:51:07] [INFO] [RANKER] Results: {'CRITICAL': 126, 'HIGH': 31, 'MEDIUM': 26, 'LOW': 0, 'INFO': 129}
+[09:51:07] [INFO] [RANK] Saved ranked endpoints → /home/root17/Desktop/ai-recon-agent/results/20260315_094738/endpoints_ranked.json
+[09:51:07] [INFO] 
+============================================================
+[09:51:07] [INFO]   PHASE 5: VULNERABILITY SCANNING
+[09:51:07] [INFO] ============================================================
+[09:51:07] [INFO] [STATE] Phase → scanning
+[09:51:07] [INFO] [TOOLS] ✓ nuclei
+[09:51:07] [INFO] [TOOLS] ✓ nikto
+[09:51:07] [INFO] [EXEC] Running: nuclei -l /home/root17/Desktop/ai-recon-agent/results/20260315_094738/nuclei_targets.txt -tags cve,sqli,xss,lfi,rce,ssrf,exposure,misconfig,default-login,wp-plugin,file-upload,auth-bypass -severity info,low,medium,high,critical -json -o /home/root17/Desktop/ai-recon-agent/results/20260315_094738/nuclei_out.json -silent -c 20 -timeout 15 -no-color
+[09:51:07] [WARNING] [EXEC] ✗ nuclei exited 2: 
+[09:51:07] [INFO] [SCAN] nuclei found 0 issues
+[09:51:07] [INFO] [EXEC] Running: nikto -h https://benthanhlogistics.com.vn -output /home/root17/Desktop/ai-recon-agent/results/20260315_094738/nikto_out.txt -Format txt -Tuning 1234567890abc -nointeractive
+[09:56:07] [ERROR] [EXEC] TIMEOUT after 300s: nikto -h https://benthanhlogistics.com.vn -output /home/root17/Desktop/ai-recon-agent/results/20260315_094738/nikto_out.txt -Format txt -Tuning 1234567890abc -nointeractive
+[09:56:07] [INFO] [SCAN] nikto added 0 total issues
+[09:56:07] [INFO] [SCAN] Saved 0 vulnerabilities → /home/root17/Desktop/ai-recon-agent/results/20260315_094738/vulnerabilities.json
+[09:56:07] [INFO] 
+============================================================
+[09:56:07] [INFO]   PHASE 6: WORDPRESS DEEP SCAN
+[09:56:07] [INFO] ============================================================
+[09:56:07] [INFO] [STATE] Phase → wp_scan
+[09:56:07] [INFO] [WP] WordPress not detected - skipping WP scan
+[09:56:07] [INFO] 
+============================================================
+[09:56:07] [INFO]   EXPLOIT CHAIN PLANNING
+[09:56:07] [INFO] ============================================================
+[09:56:07] [INFO] [CHAIN] Planned 0 exploit chains
+[09:56:07] [INFO] 
+============================================================
+[09:56:07] [INFO]   PHASE 7: EXPLOIT ENGINE
+[09:56:07] [INFO] ============================================================
+[09:56:07] [INFO] [STATE] Phase → exploiting
+[09:56:07] [INFO] [EXPLOIT] Completed. 0 successful exploits
+[09:56:07] [INFO] 
+============================================================
+[09:56:07] [INFO]   FINAL REPORT GENERATION
+[09:56:07] [INFO] ============================================================
+[09:56:07] [INFO] [STATE] Phase → reporting
+[09:56:07] [INFO] [REPORT] Report saved → /home/root17/Desktop/ai-recon-agent/results/20260315_094738/ai_final_report.txt
+[09:56:07] [INFO] [AGENT] Done!

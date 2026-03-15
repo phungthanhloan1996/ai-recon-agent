@@ -1,0 +1,14 @@
+[2026-03-15 04:09:02] [INFO] Starting pentest for nisci.gov.vn with profile Standard Scan (30-60 mins)
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: api_endpoint from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: api_endpoint from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: api_endpoint from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: admin_panel from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:13:05] [INFO] 🧩 New fragment: path_info_pattern from crawler

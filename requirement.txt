@@ -1,0 +1,45 @@
+# AI Recon Agent - Python Dependencies
+# All standard library, no pip install needed for core functionality
+# External tools required (install separately):
+
+# ═══════════════════════════════════════════════════════════════
+# REQUIRED EXTERNAL TOOLS (install via package manager or Go)
+# ═══════════════════════════════════════════════════════════════
+#
+# Subdomain Enumeration:
+#   subfinder   → go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest
+#   assetfinder → go install github.com/tomnomnom/assetfinder@latest
+#   amass       → go install -v github.com/owasp-amass/amass/v4/...@master
+#
+# Live Host Detection:
+#   httpx       → go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest
+#
+# Crawling:
+#   katana      → go install github.com/projectdiscovery/katana/cmd/katana@latest
+#   gau         → go install github.com/lc/gau/v2/cmd/gau@latest
+#   waybackurls → go install github.com/tomnomnom/waybackurls@latest
+#   hakrawler   → go install github.com/hakluke/hakrawler@latest
+#
+# Vulnerability Scanning:
+#   nuclei      → go install -v github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest
+#   nikto       → sudo apt install nikto  OR  git clone https://github.com/sullo/nikto
+#
+# WordPress:
+#   wpscan      → gem install wpscan  OR  docker pull wpscanteam/wpscan
+#
+# Exploitation:
+#   sqlmap      → pip install sqlmap  OR  sudo apt install sqlmap
+#
+# ═══════════════════════════════════════════════════════════════
+# OPTIONAL PYTHON PACKAGES (for enhanced features)
+# ═══════════════════════════════════════════════════════════════
+#
+# For AI-powered report generation:
+#   anthropic   → pip install anthropic
+#
+# ═══════════════════════════════════════════════════════════════
+
+# No pip packages required for core functionality
+# The agent uses Python standard library only:
+# - subprocess, os, sys, json, logging, re, urllib
+# - dataclasses, typing, datetime, time, argparse, base64

@@ -1,0 +1,69 @@
+[
+    {
+        "id": "WP001",
+        "name": "WordPress Old Version",
+        "condition": {
+            "type": "tech",
+            "tech": "wordpress",
+            "version_compare": "<5.0"
+        },
+        "actions": [
+            {"type": "run_wpscan", "args": "--enumerate vp"},
+            {"type": "check_exploitdb", "args": "wordpress"}
+        ],
+        "priority": 1
+    },
+    {
+        "id": "UPL001",
+        "name": "Upload Form + Directory Listing",
+        "condition": {
+            "type": "fragments",
+            "required": ["upload_form", "directory_listing"]
+        },
+        "actions": [
+            {"type": "test_upload_bypass", "args": "php,php5,phtml"},
+            {"type": "check_htaccess_bypass", "args": ""}
+        ],
+        "priority": 2
+    },
+    {
+        "id": "LFI001",
+        "name": "LFI to RCE via Log Poisoning",
+        "condition": {
+            "type": "fragments",
+            "required": ["lfi_vulnerability"]
+        },
+        "actions": [
+            {"type": "test_log_poisoning", "args": "/var/log/apache2/access.log"},
+            {"type": "test_phpinfo_lfi", "args": ""}
+        ],
+        "priority": 2
+    },
+    {
+        "id": "SQL001",
+        "name": "SQL Injection to Shell",
+        "condition": {
+            "type": "vuln",
+            "severity": "critical",
+            "type_name": "sql"
+        },
+        "actions": [
+            {"type": "sqlmap_os_shell", "args": "--os-shell"},
+            {"type": "manual_sqli_check", "args": ""}
+        ],
+        "priority": 1
+    },
+    {
+        "id": "PHP001",
+        "name": "PHP Info Exposure",
+        "condition": {
+            "type": "endpoint",
+            "path": "/phpinfo.php"
+        },
+        "actions": [
+            {"type": "extract_phpinfo", "args": ""},
+            {"type": "check_sensitive_paths", "args": ""}
+        ],
+        "priority": 3
+    }
+]

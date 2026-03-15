@@ -1,0 +1,10 @@
+beta.nisci.gov.vn
+mail.nisci.gov.vn
+www.nisci.gov.vn
+images.nisci.gov.vn
+office.nisci.gov.vn
+inlab.nisci.gov.vn
+op.nisci.gov.vn
+pa.nisci.gov.vn
+cloud.nisci.gov.vn
+ops.nisci.gov.vn

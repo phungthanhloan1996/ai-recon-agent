@@ -1,0 +1,37 @@
+[2026-03-15 04:15:00] [INFO] Starting pentest for nisci.gov.vn with profile Standard Scan (30-60 mins)
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: api_endpoint from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: api_endpoint from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: api_endpoint from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: admin_panel from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: api_endpoint from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: upload_form from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: path_info_pattern from crawler
+[2026-03-15 04:19:21] [INFO] 🧩 New fragment: admin_panel from crawler
+[2026-03-15 04:19:35] [INFO] 🧩 New fragment: wp_admin from whatweb
+[2026-03-15 04:19:44] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fwww.nisci.gov.vn%2F%3Fp%3D2055
+[2026-03-15 04:19:46] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fwww.nisci.gov.vn%2F%3Fp%3D2055
+[2026-03-15 04:19:48] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fwww.nisci.gov.vn%2F%3Fp%3D2055
+[2026-03-15 04:19:50] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fwww.nisci.gov.vn%2F%3Fp%3D2055
+[2026-03-15 04:19:52] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fwww.nisci.gov.vn%2F%3Fp%3D2055
+[2026-03-15 04:19:54] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fwww.nisci.gov.vn%2F%3Fp%3D2055
+[2026-03-15 04:20:02] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fwww.nisci.gov.vn%2F%3Fp%3D2055
+[2026-03-15 04:20:13] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fwww.nisci.gov.vn%2F%3Fp%3D2055
+[2026-03-15 04:20:25] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fwww.nisci.gov.vn%2F%3Fp%3D2055
+[2026-03-15 04:20:37] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fwww.nisci.gov.vn%2F%3Fp%3D2055
+[2026-03-15 04:20:49] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Fwp%2Fv2%2Fposts
+[2026-03-15 04:21:01] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Fwp%2Fv2%2Fposts
+[2026-03-15 04:21:11] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Fwp%2Fv2%2Fposts
+[2026-03-15 04:21:22] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Fwp%2Fv2%2Fposts
+[2026-03-15 04:21:33] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Fwp%2Fv2%2Fposts
+[2026-03-15 04:21:43] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Fwp%2Fv2%2Fposts
+[2026-03-15 04:21:54] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Fwp%2Fv2%2Fposts
+[2026-03-15 04:22:04] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Fwp%2Fv2%2Fposts
+[2026-03-15 04:22:15] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Fwp%2Fv2%2Fposts
+[2026-03-15 04:22:25] [INFO] Analyzing response for http://www.nisci.gov.vn/index.php?rest_route=%2Fwp%2Fv2%2Fposts

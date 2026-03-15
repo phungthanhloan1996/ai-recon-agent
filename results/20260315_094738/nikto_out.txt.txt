@@ -1,0 +1,10 @@
+- Nikto v2.6.0/
++ Target Host: benthanhlogistics.com.vn
++ Target Port: 443
++ GET /: IP address found in the 'server' header. The IP is "1.27.1.1". See: https://portswigger.net/kb/issues/00600300_private-ip-addresses-disclosed: 
++ SSL Info:           Subject:  /CN=cpcalendars.benthanhlogistics.com.vn
+                      CN:       cpcalendars.benthanhlogistics.com.vn
+                      SAN:      benthanhlogistics.com.vn, cpanel.benthanhlogistics.com.vn, cpcalendars.benthanhlogistics.com.vn, cpcontacts.benthanhlogistics.com.vn, ipv6.benthanhlogistics.com.vn, webdisk.benthanhlogistics.com.vn, webmail.benthanhlogistics.com.vn, www.benthanhlogistics.com.vn
+                      Ciphers:  TLS_AES_256_GCM_SHA384
+                      Issuer:   /C=US/O=Let's Encrypt/CN=R3
++ GET Multiple index files found (all unique): /index.xml, /default.asp, /index.php4, /index.html, /index.jsp, /index.pl, /index.htm, /index.aspx, /index.cfm, /index.shtml, /index.php5, /index.php, /index.cgi, /index.php3, /default.htm, /index.php7, /index.asp, /default.aspx, /index.do, /index.jhtml.

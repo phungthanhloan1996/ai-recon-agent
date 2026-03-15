@@ -1,0 +1,1018 @@
+[
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D35",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/author/admin",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Admin Panel (+8)",
+      "Authentication (+7)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fimport-%25e2%2580%2593-export-services&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "File Access (+6)",
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2Fkey-personel",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/wp/v2/pages/6",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D67&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2Fkey-personel&",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2F&",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=12",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fexhibition-cargo",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=46",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=9",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fremoval-of-personal-effects-and-houdehold-goods&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fabout-us&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D140",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/author/admin",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Admin Panel (+8)",
+      "Authentication (+7)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=19",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2Four-global-network",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fexhibition-cargo&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D46&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D78&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/xmlrpc.php",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "WordPress (+8)",
+      "Extension .php (+2)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/wp/v2/pages/78",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D62&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/wp/v2/pages/53",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D62",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fwarehousing-and-distribution&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/wp-login.php",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Authentication (+7)",
+      "WordPress (+8)",
+      "Extension .php (+2)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/xmlrpc.php",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "WordPress (+8)",
+      "Extension .php (+2)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=50",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D29&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/wp/v2/pages/32",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/wp/v2/pages/15",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/wp/v2/pages/35",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=78",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D50",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=62",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2F",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-login.php",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Authentication (+7)",
+      "WordPress (+8)",
+      "Extension .php (+2)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2F&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D53",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fproject-cargo&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/wp/v2/pages/46",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2Fkey-personel&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2Four-global-network&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2Fabout-us&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D32&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/wp/v2/pages/67",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D12",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2Four-global-network&",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D19",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2Fabout-us&",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fimport-%25e2%2580%2593-export-services",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "File Access (+6)",
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/xmlrpc.php?rsd",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "WordPress (+8)",
+      "Extension .php (+2)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=29",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-login.php?action=lostpassword",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Authentication (+7)",
+      "Password Reset (+7)",
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Extension .php (+2)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices&",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/wp/v2/pages/19",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-login.php?redirect_to=https%3A%2F%2Fbenthanhlogistics.com.vn%2Fwp-admin%2Fpost.php&reauth=1",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Admin Panel (+8)",
+      "Authentication (+7)",
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Extension .php (+2)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D19&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Four-global-network",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=35",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=67",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F&",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-login.php",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Authentication (+7)",
+      "WordPress (+8)",
+      "Extension .php (+2)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D12&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D46",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D29",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-includes/js/dist/vendor/.exec",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Command Execution (+10)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/%5C/wp-admin%5C/admin-ajax.php",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Admin Panel (+8)",
+      "Extension .php (+2)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/wp/v2/pages/78",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/wp/v2/pages/35",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/wp/v2/pages/50",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D15&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fkey-personel",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/wp/v2/pages/12",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fairfreight",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D35&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fseafreight",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fremoval-of-personal-effects-and-houdehold-goods",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D9",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fwarehousing-and-distribution",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=32",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/xmlrpc.php?rsd",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "WordPress (+8)",
+      "Extension .php (+2)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D15",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fproject-cargo",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D67",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/?rest_route=%2Foembed%2F1.0%2Fembed&url=http%3A%2F%2Fbenthanhlogistics.com.vn%2F%3Fpage_id%3D32",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/wp/v2/pages/6",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fairfreight&format=xml",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-admin%5C/admin-ajax.php",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Admin Panel (+8)",
+      "Extension .php (+2)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn:80/?page_id=53",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "Parameter Injection (+7)",
+      "Param 'page_id' (+1)"
+    ]
+  },
+  {
+    "url": "http://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=http%3A%2F%2Fbenthanhlogistics.com.vn%2Fservices%2Fdoor-delivery-service",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/wp/v2/users/1",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "API Endpoint (+7)",
+      "WordPress (+8)"
+    ]
+  },
+  {
+    "url": "https://benthanhlogistics.com.vn/wp-json/oembed/1.0/embed?url=https%3A%2F%2Fbenthanhlogistics.com.vn%2Fabout-us",
+    "score": 10,
+    "risk_level": "CRITICAL",
+    "reasons": [
+      "Search/Injection Point (+6)",
+      "WordPress (+8)",
+      "Potential SSRF (+8)",
+      "Param 'url' (+3)"
+    ]
+  }
+]
