@@ -1,7 +1,7 @@
 """
 agent.py - AI Recon Agent Main Orchestrator
-Pipeline: recon → live-host detection → crawling → endpoint ranking
-         → vulnerability scan → exploit engine → response analysis → report
+Autonomous Security Testing Agent with Knowledge-Driven Architecture
+NO HARDCODED LOGIC - Rules + AI + Graph Driven
 """
 
 import argparse
@@ -12,22 +12,40 @@ import json
 import time
 import signal
 from datetime import datetime
+from typing import Dict, List, Any
 
 # ─── Setup paths ─────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-# ─── Modules ──────────────────────────────────────────────────────────────────
+# ─── Core Components ─────────────────────────────────────────────────────────
 from core.state_manager import StateManager
 from core.endpoint_ranker import EndpointRanker
-from modules.recon import ReconModule
-from modules.live_hosts import LiveHostsModule
-from modules.crawler import CrawlerModule
-from modules.scanner import ScannerModule
-from modules.wp_scanner import WPScannerModule
-from modules.exploiter import ExploiterModule
-from ai.chain_planner import ChainPlanner
+from core.url_normalizer import URLNormalizer
+from core.http_engine import HTTPClient
+from core.response_analyzer import ResponseAnalyzer
+from core.attack_graph import AttackGraph
+from core.session_manager import SessionManager
+
+# ─── AI Components ───────────────────────────────────────────────────────────
+from ai.endpoint_classifier import EndpointClassifier
+from ai.payload_gen import PayloadGenerator
+from ai.payload_mutation import PayloadMutator
 from ai.analyzer import AIAnalyzer
+from ai.chain_planner import ChainPlanner
+
+from modules.wp_scanner import WordPressScannerEngine
+
+# ─── Learning & Rules ────────────────────────────────────────────────────────
+from learning.learning_engine import LearningEngine
+
+# ─── Integrations ────────────────────────────────────────────────────────────
+from integrations.gau_runner import GAURunner
+from integrations.wayback_runner import WaybackRunner
+from integrations.subfinder_runner import SubfinderRunner
+
+# ─── Reports ─────────────────────────────────────────────────────────────────
+from reports.report_generator import ReportGenerator
 
 
 # ─── Logging Setup ────────────────────────────────────────────────────────────
@@ -86,128 +104,336 @@ class ReconAgent:
         self.options = options
         self.wps_token = wps_token
         self.nvd_key = nvd_key
+        
+        # Initialize core components
         self.state = StateManager(self.target, output_dir)
+        self.session = SessionManager()
+        self.http_client = HTTPClient(self.session)
+        self.learning_engine = LearningEngine(output_dir)
+        
+        # Initialize AI components with Groq
+        groq_key = os.environ.get("GROQ_API_KEY", "")
+        self.endpoint_classifier = EndpointClassifier(groq_key)
+        self.payload_gen = PayloadGenerator(groq_key)
+        self.payload_mutator = PayloadMutator()
+        self.vuln_analyzer = AIAnalyzer(self.state, output_dir, groq_key)
+        self.chain_planner = ChainPlanner(self.state)
+        
+        # Initialize engines
+        self.recon_engine = ReconEngine(self.state, output_dir)
+        self.live_host_engine = LiveHostEngine(self.state, output_dir)
+        self.discovery_engine = DiscoveryEngine(self.state, output_dir)
+        self.scanning_engine = ScanningEngine(self.state, output_dir, self.payload_gen, self.payload_mutator)
+        self.exploit_engine = ExploitTestEngine(self.state, output_dir)
+        self.wp_scanner = WordPressScannerEngine(self.state, output_dir)
+        
         self.logger = logging.getLogger("recon.agent")
         self.start_time = time.time()
-        # AI client cho báo cáo: ưu tiên Groq (miễn phí), sau đó Anthropic
-        self._ai_client = None
-        groq_key = os.environ.get("GROQ_API_KEY")
-        if groq_key:
-            try:
-                class _GroqReportClient:
-                    def __init__(self, key):
-                        self._key = key
-                        self._url = "https://api.groq.com/openai/v1/chat/completions"
-                    def generate(self, prompt: str) -> str:
-                        import urllib.request
-                        body = json.dumps({
-                            "model": "llama-3.3-70b-versatile",
-                            "messages": [{"role": "user", "content": prompt}],
-                            "max_tokens": 8192,
-                            "temperature": 0.3,
-                        }).encode()
-                        req = urllib.request.Request(
-                            self._url,
-                            data=body,
-                            headers={
-                                "Authorization": f"Bearer {self._key}",
-                                "Content-Type": "application/json",
-                            },
-                            method="POST",
-                        )
-                        with urllib.request.urlopen(req, timeout=120) as resp:
-                            out = json.loads(resp.read().decode())
-                        return (out.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
-                self._ai_client = _GroqReportClient(groq_key)
-                self.logger.info("[AGENT] AI report enabled (Groq, free tier)")
-            except Exception as e:
-                self.logger.debug(f"[AGENT] Groq init failed: {e}")
-        if self._ai_client is None:
-            api_key = os.environ.get("ANTHROPIC_API_KEY")
-            if api_key:
-                try:
-                    import anthropic
-                    class _AIReportClient:
-                        def __init__(self, key):
-                            self._client = anthropic.Anthropic(api_key=key)
-                        def generate(self, prompt: str) -> str:
-                            r = self._client.messages.create(
-                                model="claude-3-5-sonnet-20241022",
-                                max_tokens=8192,
-                                messages=[{"role": "user", "content": prompt}]
-                            )
-                            return r.content[0].text if r.content else ""
-                    self._ai_client = _AIReportClient(api_key)
-                    self.logger.info("[AGENT] AI report enabled (Anthropic)")
-                except Exception as e:
-                    self.logger.debug(f"[AGENT] Anthropic init failed: {e}")
+        self.iteration_count = 0
+        self.max_iterations = 5  # Prevent infinite loops
+        self.confidence_threshold = 0.8
 
     def run(self):
-        """Execute the full recon pipeline"""
+        """Execute the autonomous security testing loop"""
         self.logger.info(f"🎯 Target: {self.target}")
         self.logger.info(f"📁 Output: {self.output_dir}")
         self.logger.info(f"⚙️  Options: {self.options}")
 
         try:
-            # ── Phase 1: Subdomain Recon ──────────────────────────────────
-            if not self.options.get("skip_recon"):
-                recon = ReconModule(self.state, self.output_dir)
-                recon.run()
-            else:
-                self.logger.info("[AGENT] Skipping recon phase")
-
-            # ── Phase 2: Live Host Detection ──────────────────────────────
-            if not self.options.get("skip_live"):
-                live = LiveHostsModule(self.state, self.output_dir)
-                live.run()
-
-            # ── Phase 3: Crawling ─────────────────────────────────────────
-            if not self.options.get("skip_crawl"):
-                crawler = CrawlerModule(self.state, self.output_dir)
-                crawler.run()
-
-            # ── Phase 4: Endpoint Prioritization ─────────────────────────
-            self._run_endpoint_ranking()
-
-            # ── Phase 5: Vulnerability Scan ───────────────────────────────
-            if not self.options.get("skip_scan"):
-                scanner = ScannerModule(self.state, self.output_dir)
-                scanner.run()
-
-            # ── Phase 6: WordPress Scan ───────────────────────────────────
-            if not self.options.get("skip_wp"):
-                wp_scanner = WPScannerModule(self.state, self.output_dir,
-                                             wpscan_token=self.wps_token,
-                                             nvd_key=self.nvd_key)
-                wp_scanner.run()
-
-            # ── Exploit Chain Planning ────────────────────────────────────
-            chains = self._plan_exploit_chains()
-
-            # ── Phase 7: Exploitation ─────────────────────────────────────
-            if not self.options.get("skip_exploit"):
-                exploiter = ExploiterModule(self.state, self.output_dir)
-                exploiter.run()
-            else:
-                self.logger.info("[AGENT] Exploitation disabled (--no-exploit)")
-
-            # ── Final Report ──────────────────────────────────────────────
-            self._generate_report()
-
-            # ── Summary ───────────────────────────────────────────────────
+            # Initialize attack graph
+            attack_graph = AttackGraph()
+            
+            # Main autonomous loop
+            while self.iteration_count < self.max_iterations:
+                self.iteration_count += 1
+                self.logger.info(f"\n{'='*60}")
+                self.logger.info(f"  ITERATION {self.iteration_count}/{self.max_iterations}")
+                self.logger.info(f"{'='*60}")
+                
+                # Phase 2: Live Host Detection
+                if not self._should_skip_phase("live_hosts"):
+                    self._run_live_hosts_phase()
+                
+                # Phase 3: WordPress Detection & Scanning
+                if not self._should_skip_phase("wordpress"):
+                    self._run_wordpress_phase()
+                
+                # Phase 4: Endpoint Discovery
+                if not self._should_skip_phase("discovery"):
+                    self._run_discovery_phase()
+                
+                # Phase 5: Endpoint Classification
+                self._run_classification_phase()
+                
+                # Phase 6: Endpoint Prioritization
+                self._run_prioritization_phase()
+                
+                # Phase 7: Scanning & Testing
+                if not self._should_skip_phase("scan"):
+                    self._run_scanning_phase()
+                
+                # Phase 8: Response Analysis
+                self._run_analysis_phase()
+                
+                # Phase 9: Attack Graph Construction
+                self._run_attack_graph_phase(attack_graph)
+                
+                # Phase 10: Chain Planning
+                self._run_chain_planning_phase(attack_graph)
+                
+                # Phase 11: Exploit Testing
+                if not self._should_skip_phase("exploit"):
+                    self._run_exploit_phase()
+                
+                # Phase 12: Learning & Adaptation
+                self._run_learning_phase()
+                
+                # Check confidence and decide to continue
+                if self._check_confidence_threshold():
+                    self.logger.info("[AGENT] Confidence threshold reached, stopping iterations")
+                    break
+                    
+                # Learn from failures and mutate payloads
+                self._adapt_for_next_iteration()
+                
+            # Final Report Generation
+            self._generate_final_report()
             self._print_final_summary()
-
+            
         except KeyboardInterrupt:
             self.logger.warning("\n[AGENT] Scan interrupted by user. Saving state...")
             self.state.save()
-            self._generate_report()
+            self._generate_final_report()
         except Exception as e:
             self.logger.error(f"[AGENT] Fatal error: {e}", exc_info=True)
             self.state.add_error(str(e))
             self.state.save()
             raise
 
+    def _should_skip_phase(self, phase: str) -> bool:
+        """Check if a phase should be skipped based on options"""
+        skip_map = {
+            "recon": "skip_recon",
+            "live_hosts": "skip_live_hosts",
+            "wordpress": "skip_wordpress",
+            "discovery": "skip_crawl", 
+            "scan": "skip_scan",
+            "exploit": "skip_exploit"
+        }
+        return self.options.get(skip_map.get(phase, ""), False)
+
+    def _run_recon_phase(self):
+        """Phase 1: Reconnaissance - Discover surface area"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 1: RECONNAISSANCE")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("recon")
+        
+        self.recon_engine.run()
+        
+        # Validate live hosts
+        self.live_host_engine.detect_live_hosts(self.state.get("subdomains", []))
+
+    def _run_live_hosts_phase(self):
+        """Phase 2: Live Host Detection"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 2: LIVE HOST DETECTION")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("live_hosts")
+        
+        # Already done in recon phase, but can be run separately if needed
+        pass
+
+    def _run_wordpress_phase(self):
+        """Phase 3: WordPress Detection & Scanning"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 3: WORDPRESS SCANNING")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("wordpress")
+        
+        live_hosts = self.state.get("live_hosts", [])
+        target_urls = [host.get("url", "") for host in live_hosts if host.get("url")]
+        
+        if target_urls:
+            self.wp_scanner.scan_wordpress_sites(target_urls)
+
+    def _run_discovery_phase(self):
+        """Phase 2: Endpoint Discovery - Extract endpoints from sources"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 2: ENDPOINT DISCOVERY")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("discovery")
+        
+        self.discovery_engine.run()
+
+    def _run_classification_phase(self):
+        """Phase 3: AI Endpoint Classification"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 3: ENDPOINT CLASSIFICATION")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("classification")
+        
+        endpoints = self.state.get("endpoints", [])
+        classified = []
+        
+        for endpoint in endpoints:
+            classification = self.endpoint_classifier.classify(endpoint)
+            endpoint.update(classification)
+            classified.append(endpoint)
+            
+        self.state.update(classified_endpoints=classified)
+
+    def _run_prioritization_phase(self):
+        """Phase 4: Endpoint Risk Ranking"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 4: ENDPOINT PRIORITIZATION")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("prioritization")
+        
+        self._run_endpoint_ranking()
+
+    def _run_scanning_phase(self):
+        """Phase 5: Vulnerability Scanning with AI-generated payloads"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 5: VULNERABILITY SCANNING")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("scanning")
+        
+        self.scanning_engine.run()
+
+    def _run_analysis_phase(self):
+        """Phase 6: Response Analysis & Vulnerability Reasoning"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 6: RESPONSE ANALYSIS")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("analysis")
+        
+        responses = self.state.get("scan_responses", [])
+        vulnerabilities = []
+        
+        for response in responses:
+            analysis = self.vuln_analyzer.analyze_response(response)
+            if analysis.get("is_vulnerable"):
+                vulnerabilities.append(analysis)
+                
+        self.state.update(confirmed_vulnerabilities=vulnerabilities)
+
+    def _run_attack_graph_phase(self, attack_graph: AttackGraph):
+        """Phase 7: Attack Graph Construction"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 7: ATTACK GRAPH CONSTRUCTION")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("attack_graph")
+        
+        vulnerabilities = self.state.get("confirmed_vulnerabilities", [])
+        attack_graph.build_from_vulnerabilities(vulnerabilities)
+        
+        # Save graph
+        graph_file = os.path.join(self.output_dir, "attack_graph.json")
+        attack_graph.save_to_file(graph_file)
+
+    def _run_chain_planning_phase(self, attack_graph: AttackGraph):
+        """Phase 8: Exploit Chain Planning"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 8: CHAIN PLANNING")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("chain_planning")
+        
+        chains = self.chain_planner.plan_chains_from_graph(attack_graph)
+        self.state.update(exploit_chains=chains)
+
+    def _run_exploit_phase(self):
+        """Phase 9: Exploit Testing"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 9: EXPLOIT TESTING")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("exploitation")
+        
+        chains = self.state.get("exploit_chains", [])
+        results = []
+        
+        for chain in chains[:3]:  # Test top 3 chains
+            result = self.exploit_engine.test_chain(chain)
+            results.append(result)
+            
+        self.state.update(exploit_results=results)
+
+    def _run_learning_phase(self):
+        """Phase 10: Learning from Results"""
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("  PHASE 10: LEARNING & ADAPTATION")
+        self.logger.info(f"{'='*60}")
+        self.state.set_phase("learning")
+        
+        self.learning_engine.learn_from_iteration(self.state)
+
+    def _check_confidence_threshold(self) -> bool:
+        """Check if we've reached sufficient confidence to stop iterating"""
+        vulnerabilities = self.state.get("confirmed_vulnerabilities", [])
+        exploit_results = self.state.get("exploit_results", [])
+        
+        if not vulnerabilities:
+            return False
+            
+        successful_exploits = [r for r in exploit_results if r.get("success")]
+        confidence = len(successful_exploits) / len(vulnerabilities) if vulnerabilities else 0
+        
+        self.logger.info(f"[AGENT] Current confidence: {confidence:.2f} (threshold: {self.confidence_threshold})")
+        return confidence >= self.confidence_threshold
+
+    def _adapt_for_next_iteration(self):
+        """Adapt payloads and strategies for next iteration based on learning"""
+        failed_payloads = self.learning_engine.get_failed_payloads()
+        if failed_payloads:
+            self.logger.info(f"[AGENT] Mutating {len(failed_payloads)} failed payloads for next iteration")
+            mutated = self.payload_mutator.mutate_payloads(failed_payloads)
+            self.payload_gen.add_mutated_payloads(mutated)
+
     def _run_endpoint_ranking(self):
+        """Phase 4: Score and rank all discovered endpoints"""
+        urls = self.state.get("urls", [])
+        endpoints = self.state.get("endpoints", [])
+
+        # Combine all URLs for ranking
+        all_urls = list(set(urls + [ep.get("url", "") for ep in endpoints if ep.get("url")]))
+
+        if not all_urls:
+            self.logger.warning("[RANK] No URLs to rank")
+            return
+
+        ranker = EndpointRanker()
+        ranked = ranker.rank_endpoints(all_urls)
+
+        # Show top risky
+        ranker.print_top(ranked, n=20)
+
+        # Số endpoint ưu tiên lưu (env RANK_TOP=150 để tăng)
+        rank_top = int(os.environ.get("RANK_TOP", "150"))
+        self.state.update(prioritized_endpoints=ranked[:rank_top])
+
+        # Save to file
+        ranked_file = os.path.join(self.output_dir, "endpoints_ranked.json")
+        with open(ranked_file, "w") as f:
+            json.dump(ranked[:rank_top], f, indent=2)
+
+        self.logger.info(f"[RANK] Saved ranked endpoints → {ranked_file}")
+
+    def _generate_final_report(self):
+        """Generate comprehensive final report"""
+        report_gen = ReportGenerator(self.state, self.output_dir)
+        report_gen.generate()
+
+    def _print_final_summary(self):
+        elapsed = time.time() - self.start_time
+        mins = int(elapsed // 60)
+        secs = int(elapsed % 60)
+
+        summary = self.state.summary()
+        exploit_results = self.state.get("exploit_results", [])
+        successful = [r for r in exploit_results if r.get("success")]
+
+        print(f"\n{'='*60}")
+        print(f"  SCAN COMPLETE - {mins}m {secs}s - {self.iteration_count} iterations")
         """Phase 4: Score and rank all discovered endpoints"""
         self.logger.info(f"\n{'='*60}")
         self.logger.info(f"  PHASE 4: ENDPOINT PRIORITIZATION")
@@ -241,51 +467,10 @@ class ReconAgent:
 
         self.logger.info(f"[RANK] Saved ranked endpoints → {ranked_file}")
 
-    def _plan_exploit_chains(self) -> list:
-        """Plan exploit chains based on current findings"""
-        self.logger.info(f"\n{'='*60}")
-        self.logger.info(f"  EXPLOIT CHAIN PLANNING")
-        self.logger.info(f"{'='*60}")
-
-        planner = ChainPlanner(self.state)
-        chains = planner.plan_chains()
-
-        # Combine overlapping chains for smarter planning
-        if len(chains) > 1:
-            chains = planner.combine_chains(chains)
-
-        if chains:
-            chain_report = planner.format_chain_report(chains)
-            self.logger.info(f"\n{chain_report}")
-
-            # Save chain plan
-            chain_file = os.path.join(self.output_dir, "exploit_chains.txt")
-            with open(chain_file, "w") as f:
-                f.write(chain_report)
-
-            # Auto-execute if enabled
-            if self.options.get("auto_exploit"):
-                self.logger.warning("[CHAIN] Auto-exploit enabled! This is dangerous.")
-                for chain in chains[:1]:  # Execute only top chain for safety
-                    exec_result = planner.execute_chain(chain)
-                    self.logger.info(f"[CHAIN] Execution result: {exec_result}")
-                    if exec_result["success"]:
-                        self.logger.info(f"[CHAIN] Chain {chain.name} succeeded!")
-                        break
-
-        return chains
-
-    def _generate_report(self):
-        """Generate final AI report"""
-        analyzer = AIAnalyzer(self.state, self.output_dir, ai_client=getattr(self, "_ai_client", None))
-        report = analyzer.generate_report()
-
-        # Print first part of report to console
-        lines = report.splitlines()
-        for line in lines[:50]:
-            print(line)
-        if len(lines) > 50:
-            print(f"... (full report in {analyzer.report_file})")
+    def _generate_final_report(self):
+        """Generate comprehensive final report"""
+        report_gen = ReportGenerator(self.state, self.output_dir)
+        report_gen.generate()
 
     def _print_final_summary(self):
         elapsed = time.time() - self.start_time
@@ -297,7 +482,22 @@ class ReconAgent:
         successful = [r for r in exploit_results if r.get("success")]
 
         print(f"\n{'='*60}")
-        print(f"  SCAN COMPLETE - {mins}m {secs}s")
+        print(f"  SCAN COMPLETE - {mins}m {secs}s - {self.iteration_count} iterations")
+        print(f"{'='*60}")
+        print(f"  Target        : {self.target}")
+        print(f"  Subdomains    : {summary['subdomains']}")
+        print(f"  Live Hosts    : {summary['live_hosts']}")
+        print(f"  URLs          : {summary['urls']}")
+        print(f"  Endpoints     : {summary['endpoints']}")
+        print(f"  Vulnerabilities: {summary['vulnerabilities']}")
+        print(f"  Exploit Chains: {len(self.state.get('exploit_chains', []))}")
+        print(f"  Successful Exploits: {len(successful)}")
+        print(f"  Iterations    : {self.iteration_count}")
+        print(f"{'='*60}")
+        print(f"  Output Dir    : {self.output_dir}")
+        print(f"{'='*60}\n")
+
+        self.logger.info("[AGENT] Done!")
         print(f"{'='*60}")
         print(f"  Target        : {self.target}")
         print(f"  Subdomains    : {summary['subdomains']}")

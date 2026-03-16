@@ -44,6 +44,84 @@ class ChainPlanner:
     def __init__(self, state_manager):
         self.state = state_manager
 
+    def plan_chains_from_graph(self, attack_graph) -> List[ExploitChain]:
+        """Plan chains from attack graph analysis"""
+        chains = []
+        
+        # Get top attack chains from graph
+        graph_chains = attack_graph.get_top_chains(limit=20)
+        
+        for chain_data in graph_chains:
+            chain = self._build_chain_from_graph_path(chain_data, attack_graph)
+            if chain:
+                chains.append(chain)
+        
+        # Add pattern-based chains as fallback
+        pattern_chains = self._detect_chain_patterns()
+        chains.extend(pattern_chains)
+        
+        # Smart prioritization
+        chains = self.smart_prioritize(chains)
+        
+        logger.info(f"[CHAIN] Planned {len(chains)} exploit chains from graph")
+        return chains
+
+    def _build_chain_from_graph_path(self, chain_data: Dict, attack_graph) -> Optional[ExploitChain]:
+        """Build an ExploitChain from a graph path"""
+        path = chain_data.get('path', [])
+        if len(path) < 2:
+            return None
+            
+        # Get node data
+        nodes = []
+        for node_id in path:
+            node_data = attack_graph.graph.nodes[node_id]
+            nodes.append(node_data)
+        
+        # Build chain name
+        start_type = nodes[0].get('vuln_type', 'unknown')
+        end_type = nodes[-1].get('vuln_type', 'unknown')
+        chain_name = f"{start_type.title()} → {end_type.title()} Chain"
+        
+        # Build steps
+        steps = []
+        for i, node in enumerate(nodes):
+            step = ExploitStep(
+                name=f"Exploit {node.get('name', f'Vuln {i+1}')}",
+                action=f"exploit_{node.get('vuln_type', 'unknown')}",
+                target=node.get('endpoint', ''),
+                tool=self._get_tool_for_vuln_type(node.get('vuln_type', '')),
+                success_indicator=f"{node.get('vuln_type', 'unknown')} exploited",
+                priority=10 - i  # Decreasing priority
+            )
+            steps.append(step)
+        
+        # Calculate risk level
+        risk_levels = [node.get('severity', 'MEDIUM') for node in nodes]
+        risk_level = 'CRITICAL' if 'CRITICAL' in risk_levels else 'HIGH' if 'HIGH' in risk_levels else 'MEDIUM'
+        
+        return ExploitChain(
+            name=chain_name,
+            description=f"Attack chain from {start_type} to {end_type} via {len(path)} steps",
+            risk_level=risk_level,
+            estimated_time=f"{len(path) * 5}-{len(path) * 15} min",
+            prerequisites=[f"{nodes[0].get('vuln_type')} vulnerability"],
+            steps=steps
+        )
+
+    def _get_tool_for_vuln_type(self, vuln_type: str) -> str:
+        """Get appropriate tool for vulnerability type"""
+        tool_map = {
+            'sqli': 'sqlmap',
+            'xss': 'custom_script',
+            'rce': 'curl',
+            'file_upload': 'curl',
+            'lfi': 'curl',
+            'auth_bypass': 'curl',
+            'csrf': 'curl'
+        }
+        return tool_map.get(vuln_type.lower(), 'curl')
+
     def plan_chains(self) -> List[ExploitChain]:
         """Analyze state and build relevant exploit chains"""
         chains = []
