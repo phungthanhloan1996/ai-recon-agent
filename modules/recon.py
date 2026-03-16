@@ -7,6 +7,8 @@ import json
 import os
 import logging
 import ssl
+import socket
+from urllib.parse import urljoin, quote
 import urllib.request
 from typing import List, Set, Dict
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -49,10 +51,9 @@ class ReconEngine:
 
     def run(self):
         """Execute full reconnaissance pipeline"""
-        print("DEBUG TARGET:", self.target)
         logger.info(f"[RECON] Starting reconnaissance for {self.target}")
 
-        # Subdomain discovery
+        # Multi-source subdomain discovery
         subdomains = self.discover_subdomains()
         self.state.update(subdomains=subdomains)
 
@@ -67,6 +68,55 @@ class ReconEngine:
         # Validate live hosts
         live_hosts = self.validate_live_hosts(all_urls)
         self.state.update(live_hosts=live_hosts)
+
+        # CRITICAL: Check if we have minimum data to continue
+        min_subdomains = 1  # At least the main domain
+        min_urls = 1        # At least one URL to work with
+
+        if len(subdomains) < min_subdomains or len(all_urls) < min_urls:
+            logger.warning(f"[RECON] ⚠️  LOW DISCOVERY: Only {len(subdomains)} subdomains, {len(all_urls)} URLs")
+            logger.info("[RECON] 🔄 Activating fallback discovery methods...")
+
+            # Fallback 1: Direct domain probing
+            try:
+                fallback_urls = self.fallback_direct_probing()
+                if fallback_urls:
+                    all_urls.extend(fallback_urls)
+                    self.state.update(urls=all_urls)
+                    logger.info(f"[RECON] ✅ Fallback added {len(fallback_urls)} direct URLs")
+            except Exception as e:
+                logger.warning(f"[RECON] Fallback direct probing failed: {e}")
+
+            # Fallback 2: Certificate transparency lookup
+            try:
+                cert_subdomains = self.fallback_cert_transparency()
+                if cert_subdomains:
+                    subdomains.extend(cert_subdomains)
+                    self.state.update(subdomains=subdomains)
+                    logger.info(f"[RECON] ✅ Fallback added {len(cert_subdomains)} CT subdomains")
+            except Exception as e:
+                logger.warning(f"[RECON] Fallback CT failed: {e}")
+
+            # Fallback 3: DNS enumeration
+            try:
+                dns_subdomains = self.fallback_dns_enumeration()
+                if dns_subdomains:
+                    subdomains.extend(dns_subdomains)
+                    self.state.update(subdomains=subdomains)
+                    logger.info(f"[RECON] ✅ Fallback added {len(dns_subdomains)} DNS subdomains")
+            except Exception as e:
+                logger.warning(f"[RECON] Fallback DNS failed: {e}")
+
+        # Final validation
+        if not all_urls:
+            logger.error("[RECON] ❌ CRITICAL: No URLs found even with fallbacks!")
+            logger.error("[RECON] 💡 Suggestions:")
+            logger.error("   - Check if domain is valid and online")
+            logger.error("   - Try manual URL input: --urls-file urls.txt")
+            logger.error("   - Domain might be too new or heavily protected")
+            # Don't crash - let agent continue with minimal data
+            all_urls = [f"https://{self.target}", f"http://{self.target}"]
+            self.state.update(urls=all_urls)
 
         logger.info(f"[RECON] Completed: {len(subdomains)} subdomains, {len(archived_urls)} archived URLs, {len(live_hosts)} live hosts")
 
@@ -85,7 +135,7 @@ class ReconEngine:
         # Save to file
         subdomains_file = os.path.join(self.output_dir, "subdomains.txt")
         with open(subdomains_file, 'w') as f:
-            f.write('\n'.join(sorted(subdomains)))
+            f.write('\\n'.join(sorted(subdomains)))
 
         logger.info(f"[RECON] Found {len(subdomains)} unique subdomains")
         return list(subdomains)
@@ -107,7 +157,7 @@ class ReconEngine:
         # Save to file
         archived_file = os.path.join(self.output_dir, "archived_urls.txt")
         with open(archived_file, 'w') as f:
-            f.write('\n'.join(sorted(urls)))
+            f.write('\\n'.join(sorted(urls)))
 
         logger.info(f"[RECON] Found {len(urls)} archived URLs")
         return list(urls)
@@ -170,3 +220,65 @@ class ReconEngine:
 
         logger.info(f"[RECON] Validated {len(live_hosts)} live hosts out of {len(urls[:200])} checked")
         return live_hosts
+
+    def fallback_direct_probing(self) -> List[str]:
+        """Generate common paths for direct probing fallback"""
+        logger.info(f"[RECON] Generating direct probe URLs for {self.target}")
+        common_paths = [
+            '', '/', '/admin', '/login', '/wp-admin', '/administrator', '/dashboard',
+            '/panel', '/cpanel', '/admin.php', '/login.php', '/index.php', '/sitemap.xml',
+            '/robots.txt', '/.env', '/config', '/api', '/graphql', '/wp-login.php'
+        ]
+        for path in common_paths:
+            urls.append(urljoin(f"https://{self.target}", path))
+            urls.append(urljoin(f"http://{self.target}", path))
+        
+        # Normalize
+        from core.url_normalizer import URLNormalizer
+        normalizer = URLNormalizer()
+        normalized = normalizer.normalize_urls(urls)
+        logger.info(f"[RECON] Generated {len(normalized)} direct probe URLs")
+        return list(normalized)
+
+    def fallback_cert_transparency(self) -> List[str]:
+        """Fetch subdomains from crt.sh Certificate Transparency logs"""
+        logger.info(f"[RECON] Querying Certificate Transparency logs for {self.target}")
+        try:
+            query = f"%25.{self.target}"
+            url = f"https://crt.sh/?q={quote(query)}&output=json"
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+            
+            subdomains = set()
+            for entry in data[:50]:  # Limit to first 50
+                if 'name_value' in entry:
+                    subs = str(entry['name_value']).strip().split('\n')
+                    for sub in subs:
+                        if self.target in sub:
+                            subdomains.add(sub.lower())
+            
+            logger.info(f"[RECON] Found {len(subdomains)} CT subdomains")
+            return list(subdomains)
+        except Exception as e:
+            logger.warning(f"[RECON] CT lookup failed: {e}")
+            return []
+
+    def fallback_dns_enumeration(self) -> List[str]:
+        """Bruteforce common subdomains with DNS resolution"""
+        logger.info(f"[RECON] DNS bruteforce enumeration for {self.target}")
+        common_subs = [
+            'www', 'mail', 'ftp', 'webmail', 'admin', 'test', 'staging', 'dev',
+            'beta', 'demo', 'api', 'app', 'mobile', 'portal', 'secure', 'ns1', 'ns2',
+            'mx1', 'backup', 'db', 'db1', 'db2', 'cdn', 'files', 'images', 'blog',
+            'forum', 'shop', 'store', 'docs', 'wiki', 'cpanel', 'whm', 'panel'
+        ]
+        subdomains = []
+        for sub in common_subs:
+            subdomain = f"{sub}.{self.target}"
+            try:
+                socket.gethostbyname(subdomain)
+                subdomains.append(subdomain)
+            except socket.gaierror:
+                pass
+        logger.info(f"[RECON] DNS resolved {len(subdomains)} common subdomains")
+        return subdomains

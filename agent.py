@@ -97,12 +97,16 @@ BANNER = r"""
 # ─── Main Agent ───────────────────────────────────────────────────────────────
 class ReconAgent:
     def __init__(self, target: str, output_dir: str, options: dict,
-                 wps_token: str = "", nvd_key: str = ""):
+                 wps_token: str = "", nvd_key: str = "", 
+                 urls_file: str = "", subdomains_file: str = "", force_recon: bool = False):
         self.target = target.lower().strip()
         self.output_dir = output_dir
         self.options = options
         self.wps_token = wps_token
         self.nvd_key = nvd_key
+        self.urls_file = urls_file
+        self.subdomains_file = subdomains_file
+        self.force_recon = force_recon
         
         # Initialize core components
         self.state = StateManager(self.target, output_dir)
@@ -138,6 +142,9 @@ class ReconAgent:
         self.logger.info(f"🎯 Target: {self.target}")
         self.logger.info(f"📁 Output: {self.output_dir}")
         self.logger.info(f"⚙️  Options: {self.options}")
+
+        # Load manual URLs/subdomains if provided
+        self._load_manual_inputs()
 
         try:
             # Initialize attack graph
@@ -211,6 +218,34 @@ class ReconAgent:
         except Exception as e:
             self.logger.error(f"[AGENT] Fatal error: {e}", exc_info=True)
             self.state.add_error(str(e))
+
+    def _load_manual_inputs(self):
+        """Load manual URLs/subdomains from files if provided"""
+        # Load manual URLs
+        if hasattr(self, 'urls_file') and self.urls_file:
+            try:
+                with open(self.urls_file, 'r') as f:
+                    urls = [line.strip() for line in f if line.strip()]
+                    if urls:
+                        self.state.update(urls=urls)
+                        self.logger.info(f"[AGENT] ✅ Loaded {len(urls)} manual URLs from {self.urls_file}")
+            except Exception as e:
+                self.logger.error(f"[AGENT] Failed to load URLs from {self.urls_file}: {e}")
+
+        # Load manual subdomains  
+        if hasattr(self, 'subdomains_file') and self.subdomains_file:
+            try:
+                with open(self.subdomains_file, 'r') as f:
+                    subdomains = [line.strip() for line in f if line.strip()]
+                    if subdomains:
+                        self.state.update(subdomains=subdomains)
+                        self.logger.info(f"[AGENT] ✅ Loaded {len(subdomains)} manual subdomains from {self.subdomains_file}")
+            except Exception as e:
+                self.logger.error(f"[AGENT] Failed to load subdomains from {self.subdomains_file}: {e}")
+
+        # Force recon flag
+        if hasattr(self, 'force_recon') and self.force_recon:
+            self.logger.info("[AGENT] 🔄 Force recon enabled - will continue even with minimal data")
             self.state.save()
             raise
 
@@ -572,15 +607,25 @@ Examples:
         help="WPScan API token (hoac set env WPSCAN_API_TOKEN)"
     )
     parser.add_argument(
+        "--urls-file",
+        help="File chứa URLs để scan (mỗi dòng 1 URL) - dùng khi passive recon fail"
+    )
+    parser.add_argument(
+        "--subdomains-file", 
+        help="File chứa subdomains (mỗi dòng 1 subdomain) - dùng khi subdomain enum fail"
+    )
+    parser.add_argument(
+        "--force-recon",
+        action="store_true",
+        help="Force continue even if recon finds nothing (use basic URLs)"
+    )
+    parser.add_argument(
         "--nvd-key",
         default="",
-        help="NVD API key (hoac set env NVD_API_KEY)"
+        help="NVD API key (optional)"
     )
 
     return parser.parse_args()
-
-
-# ─── Batch State Tracker ──────────────────────────────────────────────────────
 
 class BatchTracker:
     """
@@ -732,6 +777,9 @@ def run_batch(targets: list, options: dict, args):
                 options=options,
                 wps_token=args.wps_token,
                 nvd_key=args.nvd_key,
+                urls_file=getattr(args, 'urls_file', ''),
+                subdomains_file=getattr(args, 'subdomains_file', ''),
+                force_recon=getattr(args, 'force_recon', False),
             )
             agent.run()
             tracker.mark_done(domain)
@@ -824,6 +872,9 @@ def main():
         options=options,
         wps_token=args.wps_token,
         nvd_key=args.nvd_key,
+        urls_file=getattr(args, 'urls_file', ''),
+        subdomains_file=getattr(args, 'subdomains_file', ''),
+        force_recon=getattr(args, 'force_recon', False),
     )
 
     if args.resume:
