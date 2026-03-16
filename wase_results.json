@@ -1,0 +1,95 @@
+[
+  {
+    "domain": "visa.com.vn",
+    "score": 0,
+    "level": "INFO",
+    "color_code": "\u001b[94m",
+    "findings": [],
+    "cves": [],
+    "wp_version": null,
+    "plugin_count": 15,
+    "vulnerable_plugins": 0,
+    "php_version": null,
+    "timestamp": 1773680336.64092
+  },
+  {
+    "domain": "visa.com.vn",
+    "score": 0,
+    "level": "INFO",
+    "color_code": "\u001b[94m",
+    "findings": [],
+    "cves": [],
+    "wp_version": null,
+    "plugin_count": 15,
+    "vulnerable_plugins": 0,
+    "php_version": null,
+    "timestamp": 1773680555.7810655
+  },
+  {
+    "domain": "resmed.vn",
+    "score": 0,
+    "level": "INFO",
+    "color_code": "\u001b[94m",
+    "findings": [],
+    "cves": [],
+    "wp_version": null,
+    "plugin_count": 15,
+    "vulnerable_plugins": 0,
+    "php_version": null,
+    "timestamp": 1773680591.1612325
+  },
+  {
+    "domain": "visa.com.vn",
+    "score": 0,
+    "level": "INFO",
+    "color_code": "\u001b[94m",
+    "findings": [],
+    "cves": [],
+    "wp_version": null,
+    "plugin_count": 15,
+    "vulnerable_plugins": 0,
+    "php_version": null,
+    "timestamp": 1773680672.5317419
+  },
+  {
+    "domain": "visa.com.vn",
+    "score": 0,
+    "level": "INFO",
+    "color_code": "\u001b[94m",
+    "findings": [],
+    "cves": [],
+    "wp_version": null,
+    "plugin_count": 15,
+    "vulnerable_plugins": 0,
+    "php_version": null,
+    "timestamp": 1773680678.1165268
+  },
+  {
+    "domain": "autodiscover.cbrevaluation.com.vn",
+    "score": 80,
+    "level": "CRITICAL",
+    "color_code": "\u001b[91m",
+    "findings": [
+      "wp-config.php exposed"
+    ],
+    "cves": [],
+    "wp_version": null,
+    "plugin_count": 15,
+    "vulnerable_plugins": 0,
+    "php_version": null,
+    "timestamp": 1773680794.5686002
+  },
+  {
+    "domain": "resmed.vn",
+    "score": 0,
+    "level": "INFO",
+    "color_code": "\u001b[94m",
+    "findings": [],
+    "cves": [],
+    "wp_version": null,
+    "plugin_count": 15,
+    "vulnerable_plugins": 0,
+    "php_version": null,
+    "timestamp": 1773680802.363963
+  }
+]

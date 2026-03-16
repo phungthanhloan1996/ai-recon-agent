@@ -11,6 +11,7 @@ import sys
 import json
 import time
 import signal
+import concurrent.futures
 from datetime import datetime
 
 # ─── Core Components ─────────────────────────────────────────────────────────
@@ -526,10 +527,9 @@ Examples:
   python agent.py -t example.com
   python agent.py -t example.com --no-exploit
 
-  # Batch mode (file.txt, one domain per line)
+  # Continuous batch mode (monitor file for new domains)
   python agent.py -f targets.txt
   python agent.py -f targets.txt --no-exploit --skip-recon
-  python agent.py -f targets.txt --delay 30 --workers 1
         """
     )
 
@@ -541,7 +541,7 @@ Examples:
     )
     target_group.add_argument(
         "-f", "--file",
-        help="File chứa danh sách domain, mỗi dòng một domain"
+        help="File chứa danh sách domain để monitor liên tục, mỗi dòng một domain (continuous batch mode)"
     )
 
     parser.add_argument(
@@ -588,17 +588,6 @@ Examples:
         "--skip-wp",
         action="store_true",
         help="Skip WordPress scanning"
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume: bỏ qua domain đã scan xong (chỉ dùng với -f)"
-    )
-    parser.add_argument(
-        "--delay",
-        type=int,
-        default=5,
-        help="Delay (giây) giữa các domain khi batch mode (default: 5)"
     )
 
     parser.add_argument(
@@ -712,8 +701,8 @@ def print_batch_header(targets: list, options: dict):
 """)
 
 
-def run_batch(targets: list, options: dict, args):
-    """Chạy scan tuần tự toàn bộ danh sách domain"""
+def run_batch(targets_file: str, options: dict, args):
+    """Chạy scan đồng thời, monitor targets.txt cho domain mới"""
     base_output = args.output or os.path.join(BASE_DIR, "results")
     os.makedirs(base_output, exist_ok=True)
 
@@ -731,103 +720,117 @@ def run_batch(targets: list, options: dict, args):
     batch_logger = logging.getLogger("batch")
 
     tracker = BatchTracker(base_output)
-    total = len(targets)
 
-    print_batch_header(targets, options)
+    print(f"""
+╔══════════════════════════════════════════════════════════════╗
+║                 CONTINUOUS BATCH SCAN MODE                   ║
+╠══════════════════════════════════════════════════════════════╣
+║  Monitoring   : {targets_file}                                       ║
+║  Exploit      : {"OFF" if options.get("skip_exploit") else "ON ":3s}                                         ║
+║  Recon        : {"OFF" if options.get("skip_recon") else "ON ":3s}                                         ║
+║  WP Scan      : {"OFF" if options.get("skip_wp") else "ON ":3s}                                         ║
+╚══════════════════════════════════════════════════════════════╝
+""")
 
     # Handle Ctrl+C gracefully
     interrupted = [False]
     def _sigint(sig, frame):
         interrupted[0] = True
-        print("\n\n[BATCH] Ctrl+C — finishing current target then stopping...")
+        print("\n\n[BATCH] Ctrl+C — finishing current scans then stopping...")
     signal.signal(signal.SIGINT, _sigint)
 
     batch_start = time.time()
+    processed_count = 0
+    active_scans = {}  # domain -> future
 
-    for idx, domain in enumerate(targets, 1):
-        if interrupted[0]:
-            batch_logger.info(f"[BATCH] Interrupted by user at {domain}")
-            break
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:  # Limit concurrent scans
+        while not interrupted[0]:
+            try:
+                # Load current targets
+                current_targets = load_targets(targets_file)
+                new_targets = [t for t in current_targets if not tracker.is_done(t)]
 
-        # Resume: bỏ qua domain đã xong
-        if args.resume and tracker.is_done(domain):
-            batch_logger.info(f"[BATCH] [{idx}/{total}] SKIP (already done): {domain}")
-            continue
+                # Submit new scans
+                for domain in new_targets:
+                    if domain not in active_scans:
+                        future = executor.submit(process_single_target, domain, base_output, options, args, tracker, batch_logger)
+                        active_scans[domain] = future
+                        processed_count += 1
+                        batch_logger.info(f"[BATCH] Started scan for: {domain} (total processed: {processed_count})")
 
-        # Progress bar
-        pct = int((idx - 1) / total * 40)
-        bar = "█" * pct + "░" * (40 - pct)
-        print(f"\n[{bar}] {idx}/{total}")
-        print(f"{'='*60}")
-        print(f"  TARGET [{idx}/{total}] : {domain}")
-        print(f"{'='*60}")
+                # Clean up completed scans
+                completed = []
+                for domain, future in active_scans.items():
+                    if future.done():
+                        try:
+                            future.result()  # Raise any exception
+                        except Exception as e:
+                            batch_logger.error(f"[BATCH] Scan failed for {domain}: {e}")
+                        completed.append(domain)
 
-        # Output dir per domain
-        domain_safe = domain.replace(".", "_").replace("/", "_")
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        domain_output = os.path.join(base_output, f"{domain_safe}_{timestamp}")
+                for domain in completed:
+                    del active_scans[domain]
 
+                # Wait before checking again
+                time.sleep(10)  # Check every 10 seconds
+
+            except Exception as e:
+                batch_logger.error(f"[BATCH] Error in monitoring loop: {e}")
+                time.sleep(30)
+
+    # Wait for remaining scans to complete
+    for domain, future in active_scans.items():
         try:
-            # Setup per-domain logging (append to main batch log too)
-            setup_logging(domain_output, options.get("verbose", False))
-
-            agent = ReconAgent(
-                target=domain,
-                output_dir=domain_output,
-                options=options,
-                wps_token=args.wps_token,
-                nvd_key=args.nvd_key,
-                urls_file=getattr(args, 'urls_file', ''),
-                subdomains_file=getattr(args, 'subdomains_file', ''),
-                force_recon=getattr(args, 'force_recon', False),
-            )
-            agent.run()
-            tracker.mark_done(domain)
-
-            elapsed = int(time.time() - batch_start)
-            batch_logger.info(
-                f"[BATCH] [{idx}/{total}] DONE: {domain} "
-                f"(elapsed total: {elapsed//60}m{elapsed%60}s)"
-            )
-
-        except KeyboardInterrupt:
-            interrupted[0] = True
-            tracker.mark_failed(domain, "interrupted")
-            batch_logger.warning(f"[BATCH] [{idx}/{total}] INTERRUPTED: {domain}")
-            break
-
+            future.result()
         except Exception as e:
-            tracker.mark_failed(domain, str(e))
-            batch_logger.error(f"[BATCH] [{idx}/{total}] FAILED: {domain} — {e}")
-            print(f"[BATCH] ERROR on {domain}: {e} — continuing to next target...")
-
-        # Delay giữa các domain
-        if idx < total and not interrupted[0]:
-            remaining = total - idx
-            batch_logger.info(
-                f"[BATCH] Waiting {args.delay}s before next target... "
-                f"({remaining} remaining)"
-            )
-            for i in range(args.delay, 0, -1):
-                print(f"\r  Next target in {i}s...  ", end="", flush=True)
-                time.sleep(1)
-            print()
+            batch_logger.error(f"[BATCH] Final scan failed for {domain}: {e}")
 
     # Final batch summary
     stats = tracker.stats()
     elapsed_total = int(time.time() - batch_start)
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║                   BATCH SCAN COMPLETE                        ║
+║                CONTINUOUS BATCH SCAN COMPLETE                ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Total       : {str(total):5s}                                        ║
-║  Done        : {str(stats['done']):5s}                                        ║
-║  Failed      : {str(stats['failed']):5s}                                        ║
-║  Time        : {str(elapsed_total//60) + 'm' + str(elapsed_total%60) + 's':8s}                                     ║
-║  Output      : {str(base_output)[:45]:45s} ║
+║  Total Processed : {str(processed_count):5s}                                        ║
+║  Done           : {str(stats['done']):5s}                                        ║
+║  Failed         : {str(stats['failed']):5s}                                        ║
+║  Time           : {str(elapsed_total//60) + 'm' + str(elapsed_total%60) + 's':8s}                                     ║
+║  Output         : {str(base_output)[:45]:45s} ║
 ╚══════════════════════════════════════════════════════════════╝
 """)
     batch_logger.info(f"[BATCH] Complete. {stats}")
+
+
+def process_single_target(domain: str, base_output: str, options: dict, args, tracker: BatchTracker, logger):
+    """Process a single target"""
+    try:
+        # Output dir per domain
+        domain_safe = domain.replace(".", "_").replace("/", "_")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        domain_output = os.path.join(base_output, f"{domain_safe}_{timestamp}")
+
+        # Setup per-domain logging
+        setup_logging(domain_output, options.get("verbose", False))
+
+        agent = ReconAgent(
+            target=domain,
+            output_dir=domain_output,
+            options=options,
+            wps_token=args.wps_token,
+            nvd_key=args.nvd_key,
+            urls_file=getattr(args, 'urls_file', ''),
+            subdomains_file=getattr(args, 'subdomains_file', ''),
+            force_recon=getattr(args, 'force_recon', False),
+        )
+        agent.run()
+        tracker.mark_done(domain)
+        logger.info(f"[BATCH] DONE: {domain}")
+
+    except Exception as e:
+        tracker.mark_failed(domain, str(e))
+        logger.error(f"[BATCH] FAILED: {domain} — {e}")
+        raise
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -848,12 +851,11 @@ def main():
 
     # ── BATCH MODE ────────────────────────────────────────────
     if args.file:
-        targets = load_targets(args.file)
-        if not targets:
-            print(f"[ERROR] Không có domain nào hợp lệ trong {args.file}")
+        if not os.path.exists(args.file):
+            print(f"[ERROR] File không tồn tại: {args.file}")
             sys.exit(1)
-        print(f"[BATCH] Loaded {len(targets)} targets từ {args.file}")
-        run_batch(targets, options, args)
+        print(f"[BATCH] Monitoring {args.file} for new targets...")
+        run_batch(args.file, options, args)
         return
 
     # ── SINGLE TARGET MODE ────────────────────────────────────
