@@ -6,7 +6,7 @@ Model vulnerabilities as nodes and exploit relationships as edges
 import networkx as nx
 import json
 import logging
-from typing import Dict, List, Any, Set
+from typing import Dict, List, Any
 from dataclasses import dataclass
 
 logger = logging.getLogger("recon.attack_graph")

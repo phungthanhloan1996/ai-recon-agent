@@ -5,9 +5,7 @@ Fetches URLs from Internet Archive Wayback Machine
 
 import requests
 import logging
-from typing import List, Set, Dict
-import time
-import json
+from typing import List, Dict
 
 logger = logging.getLogger("recon.wayback_runner")
 

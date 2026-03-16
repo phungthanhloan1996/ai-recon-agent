@@ -6,7 +6,6 @@ Tổng hợp toàn bộ scan results và tạo báo cáo cuối
 import json
 import logging
 import os
-import time
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -31,7 +30,7 @@ class AIAnalyzer:
     def generate_report(self) -> str:
         """Generate the final security report"""
         logger.info(f"\n{'='*60}")
-        logger.info(f"  FINAL REPORT GENERATION")
+        logger.info("  FINAL REPORT GENERATION")
         logger.info(f"{'='*60}")
 
         self.state.set_phase("reporting")
@@ -161,7 +160,7 @@ class AIAnalyzer:
             f"  🟡 MEDIUM   : {sev['MEDIUM']}",
             f"  🟢 LOW      : {sev['LOW']}",
             f"  ⚪ INFO      : {sev['INFO']}",
-            f"  ─────────────",
+            "  ─────────────",
             f"  TOTAL      : {sum(sev.values())}",
             "",
         ])
@@ -248,7 +247,7 @@ class AIAnalyzer:
             lines.extend([
                 "WORDPRESS ANALYSIS",
                 "-" * 40,
-                f"  WordPress Detected: YES",
+                "  WordPress Detected: YES",
                 f"  Users Found: {', '.join(wp['users'][:10]) or 'None'}",
                 f"  Plugins: {len(wp['plugins'])} total, {len(wp['vuln_plugins'])} vulnerable",
                 f"  Themes: {len(wp['themes'])} total",

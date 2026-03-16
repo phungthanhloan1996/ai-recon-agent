@@ -12,16 +12,10 @@ import json
 import time
 import signal
 from datetime import datetime
-from typing import Dict, List, Any
-
-# ─── Setup paths ─────────────────────────────────────────────────────────────
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, BASE_DIR)
 
 # ─── Core Components ─────────────────────────────────────────────────────────
 from core.state_manager import StateManager
 from core.endpoint_ranker import EndpointRanker
-from core.url_normalizer import URLNormalizer
 from core.http_engine import HTTPClient
 from core.response_analyzer import ResponseAnalyzer
 from core.attack_graph import AttackGraph
@@ -34,18 +28,23 @@ from ai.payload_mutation import PayloadMutator
 from ai.analyzer import AIAnalyzer
 from ai.chain_planner import ChainPlanner
 
+# ─── Constants ──────────────────────────────────────────────────────────────
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 from modules.wp_scanner import WordPressScannerEngine
 
 # ─── Learning & Rules ────────────────────────────────────────────────────────
 from learning.learning_engine import LearningEngine
 
-# ─── Integrations ────────────────────────────────────────────────────────────
-from integrations.gau_runner import GAURunner
-from integrations.wayback_runner import WaybackRunner
-from integrations.subfinder_runner import SubfinderRunner
-
 # ─── Reports ─────────────────────────────────────────────────────────────────
 from reports.report_generator import ReportGenerator
+
+# ─── Modules ─────────────────────────────────────────────────────────────────
+from modules.recon import ReconEngine
+from modules.crawler import DiscoveryEngine
+from modules.scanner import ScanningEngine
+from modules.exploiter import ExploitTestEngine
+from modules.live_hosts import LiveHostEngine
 
 
 # ─── Logging Setup ────────────────────────────────────────────────────────────
@@ -107,8 +106,9 @@ class ReconAgent:
         
         # Initialize core components
         self.state = StateManager(self.target, output_dir)
-        self.session = SessionManager()
+        self.session = SessionManager(self.output_dir)
         self.http_client = HTTPClient(self.session)
+        self.response_analyzer = ResponseAnalyzer()
         self.learning_engine = LearningEngine(output_dir)
         
         # Initialize AI components with Groq
@@ -149,6 +149,10 @@ class ReconAgent:
                 self.logger.info(f"\n{'='*60}")
                 self.logger.info(f"  ITERATION {self.iteration_count}/{self.max_iterations}")
                 self.logger.info(f"{'='*60}")
+                
+                # Phase 1: Reconnaissance
+                if not self._should_skip_phase("recon"):
+                    self._run_recon_phase()
                 
                 # Phase 2: Live Host Detection
                 if not self._should_skip_phase("live_hosts"):
@@ -312,9 +316,14 @@ class ReconAgent:
         vulnerabilities = []
         
         for response in responses:
-            analysis = self.vuln_analyzer.analyze_response(response)
-            if analysis.get("is_vulnerable"):
-                vulnerabilities.append(analysis)
+            if response.get("vulnerable"):
+                vulnerabilities.append({
+                    "url": response.get("endpoint"),
+                    "type": response.get("category"),
+                    "payload": response.get("payload"),
+                    "confidence": response.get("confidence", 0),
+                    "evidence": response.get("reason", "")
+                })
                 
         self.state.update(confirmed_vulnerabilities=vulnerabilities)
 
@@ -387,7 +396,8 @@ class ReconAgent:
         if failed_payloads:
             self.logger.info(f"[AGENT] Mutating {len(failed_payloads)} failed payloads for next iteration")
             mutated = self.payload_mutator.mutate_payloads(failed_payloads)
-            self.payload_gen.add_mutated_payloads(mutated)
+            # Store mutated payloads in state for next iteration
+            self.state.update(mutated_payloads=mutated)
 
     def _run_endpoint_ranking(self):
         """Phase 4: Score and rank all discovered endpoints"""
@@ -422,50 +432,6 @@ class ReconAgent:
         """Generate comprehensive final report"""
         report_gen = ReportGenerator(self.state, self.output_dir)
         report_gen.generate()
-
-    def _print_final_summary(self):
-        elapsed = time.time() - self.start_time
-        mins = int(elapsed // 60)
-        secs = int(elapsed % 60)
-
-        summary = self.state.summary()
-        exploit_results = self.state.get("exploit_results", [])
-        successful = [r for r in exploit_results if r.get("success")]
-
-        print(f"\n{'='*60}")
-        print(f"  SCAN COMPLETE - {mins}m {secs}s - {self.iteration_count} iterations")
-        """Phase 4: Score and rank all discovered endpoints"""
-        self.logger.info(f"\n{'='*60}")
-        self.logger.info(f"  PHASE 4: ENDPOINT PRIORITIZATION")
-        self.logger.info(f"{'='*60}")
-        self.state.set_phase("endpoint_ranking")
-
-        urls = self.state.get("urls", [])
-        endpoints = self.state.get("endpoints", [])
-
-        # Combine all URLs for ranking
-        all_urls = list(set(urls + [ep.get("url", "") for ep in endpoints if ep.get("url")]))
-
-        if not all_urls:
-            self.logger.warning("[RANK] No URLs to rank")
-            return
-
-        ranker = EndpointRanker()
-        ranked = ranker.rank_endpoints(all_urls)
-
-        # Show top risky
-        ranker.print_top(ranked, n=20)
-
-        # Số endpoint ưu tiên lưu (env RANK_TOP=150 để tăng)
-        rank_top = int(os.environ.get("RANK_TOP", "150"))
-        self.state.update(prioritized_endpoints=ranked[:rank_top])
-
-        # Save to file
-        ranked_file = os.path.join(self.output_dir, "endpoints_ranked.json")
-        with open(ranked_file, "w") as f:
-            json.dump(ranked[:rank_top], f, indent=2)
-
-        self.logger.info(f"[RANK] Saved ranked endpoints → {ranked_file}")
 
     def _generate_final_report(self):
         """Generate comprehensive final report"""

@@ -107,7 +107,6 @@ class LearningEngine:
         for failure in self.failed_payloads[-100:]:  # Analyze last 100 failures
             payload = failure.get("payload", "")
             response_code = failure.get("response_code", 0)
-            reason = failure.get("reason", "")
 
             # Count response codes
             patterns["response_codes"][str(response_code)] = patterns["response_codes"].get(str(response_code), 0) + 1

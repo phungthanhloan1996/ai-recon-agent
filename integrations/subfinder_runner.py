@@ -5,7 +5,7 @@ Discovers subdomains using passive reconnaissance
 
 import subprocess
 import logging
-from typing import List, Set, Dict
+from typing import List, Dict
 import os
 import json
 
@@ -43,7 +43,7 @@ class SubfinderRunner:
         try:
             subprocess.run([command, "-version"], capture_output=True, timeout=5)
             return True
-        except:
+        except Exception:
             return False
 
     def discover_subdomains(self, domain: str) -> List[str]:

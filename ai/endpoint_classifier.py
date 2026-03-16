@@ -5,7 +5,7 @@ Uses Groq API to classify endpoints by type and risk level
 
 import json
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any
 import urllib.request
 
 logger = logging.getLogger("recon.endpoint_classifier")
@@ -123,7 +123,6 @@ Be precise and consider security implications."""
 
     def _fallback_classification(self, endpoint_data: Dict[str, Any]) -> Dict[str, Any]:
         """Fallback classification when AI is unavailable"""
-        url = endpoint_data.get('url', '').lower()
         path = endpoint_data.get('path', '').lower()
 
         # Simple rule-based classification

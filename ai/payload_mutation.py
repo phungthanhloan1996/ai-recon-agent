@@ -7,7 +7,7 @@ import re
 import logging
 import base64
 import urllib.parse
-from typing import List, Dict, Any
+from typing import List
 import random
 
 logger = logging.getLogger("recon.payload_mutation")
@@ -87,7 +87,7 @@ class PayloadMutator:
         try:
             double_encoded = self._url_encode(self._base64_encode(payload))
             combined.append(double_encoded)
-        except:
+        except Exception:
             pass
 
         # Encoded + mutated
@@ -95,7 +95,7 @@ class PayloadMutator:
             encoded = self._base64_encode(payload)
             mutated = self._add_comments(encoded)
             combined.extend(mutated)
-        except:
+        except Exception:
             pass
 
         return combined
@@ -248,7 +248,7 @@ class PayloadMutator:
         mutated = []
         for payload in payloads:
             # Add RCE-specific mutations
-            mutated.append(f"$(payload)")
+            mutated.append(f"$({payload})")
             mutated.append(f"`{payload}`")
             mutated.append(f"|{payload}")
             mutated.append(f";{payload};")

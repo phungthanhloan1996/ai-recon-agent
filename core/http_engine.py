@@ -6,7 +6,6 @@ Core network layer with connection pooling, retries, and rate limiting
 import requests
 import logging
 import time
-from typing import Dict, Optional, Any
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import random
@@ -36,7 +35,7 @@ class HTTPClient:
         retry_strategy = Retry(
             total=max_retries,
             status_forcelist=[429, 500, 502, 503, 504],
-            method_whitelist=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE"],
+            allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE"],
             backoff_factor=1
         )
 

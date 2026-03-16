@@ -7,7 +7,7 @@ import json
 import os
 import logging
 import requests
-from typing import Dict, Optional, Tuple
+from typing import Dict
 
 logger = logging.getLogger("recon.session")
 

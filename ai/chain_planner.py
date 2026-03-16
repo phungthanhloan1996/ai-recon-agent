@@ -138,7 +138,6 @@ class ChainPlanner:
         wp_users = self.state.get("wp_users", [])
         wp_plugins = self.state.get("wp_plugins", [])
         endpoints = self.state.get("prioritized_endpoints", [])
-        live_hosts = self.state.get("live_hosts", [])
 
         # Check for SQLi vulnerabilities
         sqli_vulns = [v for v in vulns if "sql" in v.get("name", "").lower() or

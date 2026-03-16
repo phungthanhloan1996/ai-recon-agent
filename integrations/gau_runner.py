@@ -5,7 +5,7 @@ Fetches archived URLs from various sources
 
 import subprocess
 import logging
-from typing import List, Set
+from typing import List
 import os
 
 logger = logging.getLogger("recon.gau_runner")
@@ -42,7 +42,7 @@ class GAURunner:
         try:
             subprocess.run([command, "--help"], capture_output=True, timeout=5)
             return True
-        except:
+        except Exception:
             return False
 
     def fetch_urls(self, domain: str, max_urls: int = 10000) -> List[str]:

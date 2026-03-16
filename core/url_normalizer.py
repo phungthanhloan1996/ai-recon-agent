@@ -5,7 +5,7 @@ Prevent redundant scanning by normalizing URLs
 
 import re
 import logging
-from typing import List, Set
+from typing import List
 from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 logger = logging.getLogger("recon.url_normalizer")
