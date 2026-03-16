@@ -27,6 +27,7 @@ RANK_TOP = int(os.getenv('RANK_TOP', 150))
 # System Settings
 OUTPUT_DIR = os.getenv('OUTPUT_DIR', 'results')
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
+SSL_VERIFY = os.getenv('SSL_VERIFY', 'false').lower() == 'true'
 
 # AI Models
 PRIMARY_AI_MODEL = 'mixtral'  # or 'llama'

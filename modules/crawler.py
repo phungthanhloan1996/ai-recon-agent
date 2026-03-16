@@ -78,7 +78,7 @@ class DiscoveryEngine:
         urls = self.state.get("urls", [])
         discovered_endpoints = []
 
-        for url in urls[:50]:  # Limit for performance
+        for url in urls[:200]:  # Increased limit for better coverage
             try:
                 endpoints = self.discover_from_url(url)
                 discovered_endpoints.extend(endpoints)

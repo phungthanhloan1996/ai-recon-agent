@@ -28,7 +28,9 @@ class SubfinderRunner:
             "/usr/local/bin/subfinder",
             "/usr/bin/subfinder",
             "/opt/subfinder/subfinder",
-            "subfinder"
+            "subfinder",  # Assume in PATH
+            os.path.expanduser("~/go/bin/subfinder"),  # Go install path
+            "/usr/local/go/bin/subfinder",
         ]
 
         for path in common_paths:

@@ -8,7 +8,11 @@ import logging
 import time
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from urllib3.exceptions import HeaderParsingError
 import random
+from config import SSL_VERIFY
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger("recon.http_engine")
 
@@ -43,6 +47,7 @@ class HTTPClient:
         adapter = HTTPAdapter(max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+        self.session.verify = False
 
         # Default headers
         self.session.headers.update({
@@ -61,11 +66,22 @@ class HTTPClient:
         
         kwargs.setdefault('timeout', self.timeout)
         kwargs.setdefault('allow_redirects', True)
+        kwargs.setdefault('verify', SSL_VERIFY)
         
         try:
             response = self.session.get(url, **kwargs)
             self._update_session(response)
             return response
+        except HeaderParsingError as e:
+            logger.warning(f"Failed to parse headers (url={url}): {e}")
+            # Try to get response anyway by making a raw request
+            try:
+                response = self.session.get(url, **kwargs)
+                self._update_session(response)
+                return response
+            except Exception as e2:
+                logger.error(f"GET request failed for {url}: {e2}")
+                raise e2
         except Exception as e:
             logger.error(f"GET request failed for {url}: {e}")
             raise
@@ -76,6 +92,7 @@ class HTTPClient:
         self._rotate_headers()
         
         kwargs.setdefault('timeout', self.timeout)
+        kwargs.setdefault('verify', SSL_VERIFY)
         
         try:
             response = self.session.post(url, data=data, json=json, **kwargs)

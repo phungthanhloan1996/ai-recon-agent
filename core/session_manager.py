@@ -54,3 +54,17 @@ class SessionManager:
                 self.cookies = data.get("cookies", {})
                 self.headers = data.get("headers", {})
             logger.info("[SESSION] Loaded existing session")
+
+    def update_from_response(self, response):
+        """Update session from HTTP response (cookies, etc.)"""
+        if hasattr(response, 'cookies') and response.cookies:
+            self.cookies.update(dict(response.cookies))
+            self._save_session()
+            logger.debug("[SESSION] Updated cookies from response")
+
+
+
+    def update_from_response(self, response: requests.Response):
+        """Update cookies from response"""
+        if response.cookies:
+            self.cookies.update(dict(response.cookies))

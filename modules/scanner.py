@@ -41,7 +41,7 @@ class ScanningEngine:
         prioritized_endpoints = self.state.get("prioritized_endpoints", [])
         scan_responses = []
 
-        for endpoint in prioritized_endpoints[:20]:  # Limit for performance
+        for endpoint in prioritized_endpoints[:50]:  # Increased limit
             try:
                 responses = self.scan_endpoint(endpoint)
                 scan_responses.extend(responses)

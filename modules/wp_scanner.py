@@ -12,6 +12,8 @@ import urllib.request
 import urllib.parse
 import urllib.error
 from typing import Dict, List, Any, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 from core.state_manager import StateManager
 from core.http_engine import HTTPClient
@@ -200,13 +202,23 @@ class WordPressScannerEngine:
 
         results = {}
 
-        for target in targets:
-            if self._is_wordpress_site(target):
-                logger.info(f"[WP] WordPress detected at {target}")
-                scan_result = self._scan_wordpress_site(target)
-                results[target] = scan_result
-            else:
-                logger.debug(f"[WP] Not WordPress: {target}")
+        # Use thread pool for parallel scanning
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = {executor.submit(self._check_and_scan_site, target): target for target in targets}
+
+            with tqdm(total=len(targets), desc="WordPress Scan", unit="site") as pbar:
+                for future in as_completed(futures):
+                    target = futures[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            results[target] = result
+                            logger.info(f"[WP] WordPress detected at {target}")
+                        else:
+                            logger.debug(f"[WP] Not WordPress: {target}")
+                    except Exception as e:
+                        logger.debug(f"[WP] Error scanning {target}: {e}")
+                    pbar.update(1)
 
         # Save results
         self._save_results(results)
@@ -216,6 +228,12 @@ class WordPressScannerEngine:
 
         logger.info(f"[WP] Scanned {len(results)} WordPress sites")
         return results
+
+    def _check_and_scan_site(self, target: str) -> Optional[Dict[str, Any]]:
+        """Check if site is WordPress and scan it"""
+        if self._is_wordpress_site(target):
+            return self._scan_wordpress_site(target)
+        return None
 
     def _is_wordpress_site(self, url: str) -> bool:
         """Check if URL is a WordPress site"""

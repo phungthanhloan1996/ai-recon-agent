@@ -27,7 +27,9 @@ class GAURunner:
             "/usr/local/bin/gau",
             "/usr/bin/gau",
             "/opt/gau/gau",
-            "gau"  # Assume in PATH
+            "gau",  # Assume in PATH
+            os.path.expanduser("~/go/bin/gau"),  # Go install path
+            "/usr/local/go/bin/gau",
         ]
 
         for path in common_paths:

@@ -150,33 +150,33 @@ class ReconAgent:
                 self.logger.info(f"  ITERATION {self.iteration_count}/{self.max_iterations}")
                 self.logger.info(f"{'='*60}")
                 
-                # Phase 1: Reconnaissance
-                if not self._should_skip_phase("recon"):
+                # Phase 1: Reconnaissance (only on first iteration)
+                if self.iteration_count == 1 and not self._should_skip_phase("recon"):
                     self._run_recon_phase()
                 
-                # Phase 2: Live Host Detection
-                if not self._should_skip_phase("live_hosts"):
+                # Phase 2: Live Host Detection (only on first iteration)
+                if self.iteration_count == 1 and not self._should_skip_phase("live_hosts"):
                     self._run_live_hosts_phase()
                 
-                # Phase 3: WordPress Detection & Scanning
-                if not self._should_skip_phase("wordpress"):
+                # Phase 3: WordPress Detection & Scanning (only on first iteration)
+                if self.iteration_count == 1 and not self._should_skip_phase("wordpress"):
                     self._run_wordpress_phase()
                 
-                # Phase 4: Endpoint Discovery
-                if not self._should_skip_phase("discovery"):
+                # Phase 4: Endpoint Discovery (only on first iteration)
+                if self.iteration_count == 1 and not self._should_skip_phase("discovery"):
                     self._run_discovery_phase()
                 
-                # Phase 5: Endpoint Classification
+                # Phase 5: Endpoint Classification (run every iteration for refinement)
                 self._run_classification_phase()
                 
-                # Phase 6: Endpoint Prioritization
+                # Phase 6: Endpoint Prioritization (run every iteration)
                 self._run_prioritization_phase()
                 
-                # Phase 7: Scanning & Testing
+                # Phase 7: Scanning & Testing (run every iteration with new payloads)
                 if not self._should_skip_phase("scan"):
                     self._run_scanning_phase()
                 
-                # Phase 8: Response Analysis
+                # Phase 8: Response Analysis (run every iteration)
                 self._run_analysis_phase()
                 
                 # Phase 9: Attack Graph Construction
