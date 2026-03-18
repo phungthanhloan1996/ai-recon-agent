@@ -11,6 +11,7 @@ import logging
 import urllib.request
 import urllib.parse
 import urllib.error
+from urllib.parse import urlparse
 from typing import Dict, List, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
@@ -18,6 +19,7 @@ from tqdm import tqdm
 from core.state_manager import StateManager
 from core.http_engine import HTTPClient
 from core.executor import tool_available, run_command
+from core.cve_matcher import match_any_range
 
 logger = logging.getLogger("recon.wordpress")
 
@@ -144,6 +146,8 @@ class WordPressScannerEngine:
         self.wps_token = wps_token
         self.http_client = HTTPClient()
         self.results_file = os.path.join(output_dir, "wordpress_scan.json")
+        self.wpscan_cache_dir = os.path.join(output_dir, "_cache", "wpscan")
+        self.wp_rules = self._load_wp_rules()
 
         # WordPress detection patterns
         self.wp_indicators = [
@@ -197,17 +201,30 @@ class WordPressScannerEngine:
             }
         ]
 
+    def _load_wp_rules(self) -> Dict[str, Any]:
+        rules_file = os.path.join(os.path.dirname(__file__), "../rules/wordpress_rules.json")
+        if not os.path.exists(rules_file):
+            return {}
+        try:
+            with open(rules_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data.get("wordpress", data)
+        except Exception as e:
+            logger.debug(f"[WP] Failed to load wordpress rules: {e}")
+            return {}
+
     def scan_wordpress_sites(self, targets: List[str]) -> Dict[str, Any]:
         """Scan WordPress installations"""
-        logger.info(f"[WP] Scanning {len(targets)} targets for WordPress...")
+        canonical_targets = self._canonicalize_targets(targets)
+        logger.info(f"[WP] Scanning {len(canonical_targets)} canonical targets for WordPress...")
 
         results = {}
 
         # Use thread pool for parallel scanning
         with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = {executor.submit(self._check_and_scan_site, target): target for target in targets}
+            futures = {executor.submit(self._check_and_scan_site, target): target for target in canonical_targets}
 
-            with tqdm(total=len(targets), desc="WordPress Scan", unit="site") as pbar:
+            with tqdm(total=len(canonical_targets), desc="WordPress Scan", unit="site") as pbar:
                 for future in as_completed(futures):
                     target = futures[future]
                     try:
@@ -229,6 +246,35 @@ class WordPressScannerEngine:
 
         logger.info(f"[WP] Scanned {len(results)} WordPress sites")
         return results
+
+    def _canonicalize_targets(self, targets: List[str]) -> List[str]:
+        """
+        Reduce noisy URL-level targets to canonical site roots:
+        - keep scheme + host only
+        - prefer https when both schemes exist
+        """
+        host_schemes: Dict[str, set] = {}
+        for raw in targets:
+            u = (raw or "").strip()
+            if not u:
+                continue
+            if not u.startswith(("http://", "https://")):
+                u = "https://" + u
+            try:
+                p = urlparse(u)
+            except Exception:
+                continue
+            host = (p.netloc or "").strip().lower()
+            scheme = (p.scheme or "https").lower()
+            if not host:
+                continue
+            host_schemes.setdefault(host, set()).add(scheme)
+
+        out = []
+        for host, schemes in sorted(host_schemes.items()):
+            scheme = "https" if "https" in schemes else sorted(schemes)[0]
+            out.append(f"{scheme}://{host}")
+        return out
 
     def _check_and_scan_site(self, target: str) -> Optional[Dict[str, Any]]:
         """Check if site is WordPress and scan it"""
@@ -269,8 +315,8 @@ class WordPressScannerEngine:
 
         return False
 
-    def _scan_wordpress_site(self, url: str) -> Dict[str, Any]:
-        """Scan a WordPress site for vulnerabilities and information"""
+    def _scan_wordpress_site_basic(self, url: str) -> Dict[str, Any]:
+        """Legacy/basic WordPress site scan."""
         logger.info(f"[WP] Scanning WordPress site: {url}")
 
         result = {
@@ -322,6 +368,15 @@ class WordPressScannerEngine:
             except Exception:
                 continue
 
+        # Fallback: homepage generator tag
+        try:
+            response = self.http_client.get(url, timeout=10)
+            meta_match = re.search(r'content="WordPress (\d+\.\d+(?:\.\d+)?)"', response.text, re.IGNORECASE)
+            if meta_match:
+                return meta_match.group(1)
+        except Exception:
+            pass
+
         return "unknown"
 
     def _enumerate_plugins(self, url: str) -> List[Dict[str, Any]]:
@@ -357,6 +412,27 @@ class WordPressScannerEngine:
             except Exception:
                 continue
 
+        # Fingerprint common plugins and infer versions from readme/stable tag.
+        for plugin in WP_PLUGINS:
+            plugin_url = f"{url.rstrip('/')}/wp-content/plugins/{plugin}/"
+            try:
+                r = self.http_client.get(plugin_url, timeout=8)
+                if r.status_code != 200:
+                    continue
+                version = "unknown"
+                readme = self.http_client.get(f"{plugin_url}readme.txt", timeout=8)
+                if readme.status_code == 200:
+                    version = self._extract_version_from_text(readme.text)
+                plugins.append(
+                    {
+                        "name": plugin,
+                        "version": version,
+                        "path": f"/wp-content/plugins/{plugin}/",
+                    }
+                )
+            except Exception:
+                continue
+
         return plugins
 
     def _enumerate_themes(self, url: str) -> List[Dict[str, Any]]:
@@ -369,6 +445,27 @@ class WordPressScannerEngine:
                 themes.extend(self._parse_theme_directory(response.text))
         except Exception:
             pass
+
+        # Fingerprint common themes and infer versions from style.css header.
+        for theme in WP_THEMES:
+            theme_base = f"{url.rstrip('/')}/wp-content/themes/{theme}/"
+            try:
+                r = self.http_client.get(theme_base, timeout=8)
+                if r.status_code != 200:
+                    continue
+                version = "unknown"
+                style = self.http_client.get(f"{theme_base}style.css", timeout=8)
+                if style.status_code == 200:
+                    version = self._extract_version_from_text(style.text)
+                themes.append(
+                    {
+                        "name": theme,
+                        "version": version,
+                        "path": f"/wp-content/themes/{theme}/",
+                    }
+                )
+            except Exception:
+                continue
 
         return themes
 
@@ -408,24 +505,30 @@ class WordPressScannerEngine:
             logger.debug("WPScan not available")
             return {}
 
-        cmd = ["wpscan", "--url", url, "--format", "json"]
+        os.makedirs(self.wpscan_cache_dir, exist_ok=True)
+        cmd = [
+            "wpscan",
+            "--url", url,
+            "--format", "json",
+            "--cache-dir", self.wpscan_cache_dir
+        ]
 
         if self.wps_token:
             cmd.extend(["--api-token", self.wps_token])
 
         try:
-            result = run_command(cmd, timeout=300)
-            if result["success"]:
-                # Parse JSON output
-                import json
+            cmd_env = os.environ.copy()
+            cmd_env["WPSCAN_CACHE_DIR"] = self.wpscan_cache_dir
+            ret, out, err = run_command(cmd, timeout=300, env=cmd_env)
+            if ret == 0 and out:
                 try:
-                    data = json.loads(result["output"])
+                    data = json.loads(out)
                     return data
                 except json.JSONDecodeError:
                     logger.error("Failed to parse WPScan JSON output")
                     return {}
             else:
-                logger.error(f"WPScan failed: {result['error']}")
+                logger.error(f"WPScan failed: {err}")
                 return {}
         except Exception as e:
             logger.error(f"WPScan execution error: {e}")
@@ -479,8 +582,120 @@ class WordPressScannerEngine:
         # Check for known vulnerabilities in plugins/themes
         known_vulns = self._check_known_vulnerabilities(url, site_info)
         site_info["vulnerabilities"].extend(known_vulns)
+        site_info["conditioned_findings"] = self._build_conditioned_findings(site_info)
 
         return site_info
+
+    def _normalize_component_name(self, name: str) -> str:
+        return (name or "").strip().lower().replace("_", "-")
+
+    def _infer_auth_requirement(self, vuln_type: str) -> str:
+        t = (vuln_type or "").lower()
+        if "auth_bypass" in t:
+            return "unauthenticated"
+        if "xss" in t:
+            return "authenticated_or_public_context"
+        if "file_disclosure" in t:
+            return "unauthenticated_or_low_priv"
+        if "rce" in t:
+            return "unknown_often_authenticated"
+        return "unknown"
+
+    def _score_condition(self, version_match: Optional[bool], component_present: bool, auth_requirement: str) -> int:
+        score = 0
+        if component_present:
+            score += 30
+        if version_match is True:
+            score += 45
+        elif version_match is None:
+            score += 15
+        if auth_requirement == "unauthenticated":
+            score += 15
+        elif auth_requirement == "unknown_often_authenticated":
+            score += 5
+        return min(score, 95)
+
+    def _build_conditioned_findings(self, site_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """
+        Build exploit-condition-aware findings:
+        - version range applicability
+        - component presence
+        - auth requirement hint
+        """
+        findings: List[Dict[str, Any]] = []
+        plugin_rules = self.wp_rules.get("plugin_vulnerabilities", {}) or {}
+        theme_rules = self.wp_rules.get("theme_vulnerabilities", {}) or {}
+        site_url = site_info.get("url", "")
+
+        for plugin in site_info.get("plugins", []):
+            p_name = plugin.get("name", "")
+            p_ver = plugin.get("version", "unknown")
+            norm = self._normalize_component_name(p_name)
+            rule = None
+            for k, v in plugin_rules.items():
+                if self._normalize_component_name(k) == norm:
+                    rule = v
+                    break
+            if not rule:
+                continue
+            vmatch = match_any_range(p_ver, rule.get("versions", []))
+            auth_req = self._infer_auth_requirement(rule.get("type", ""))
+            confidence = self._score_condition(vmatch, True, auth_req)
+            findings.append(
+                {
+                    "component_type": "plugin",
+                    "name": p_name,
+                    "version": p_ver,
+                    "cve": rule.get("cve", []),
+                    "vuln_type": rule.get("type", "unknown"),
+                    "severity": rule.get("severity", "HIGH"),
+                    "conditions": {
+                        "version_match": vmatch,
+                        "component_present": True,
+                        "auth_requirement": auth_req,
+                        "candidate_endpoint": f"{site_url.rstrip('/')}/wp-content/plugins/{p_name}/",
+                    },
+                    "confidence": confidence,
+                    "status": "candidate" if confidence >= 70 else "likely" if confidence >= 45 else "weak",
+                    "chain_candidate": confidence >= 70,
+                }
+            )
+
+        for theme in site_info.get("themes", []):
+            t_name = theme.get("name", "")
+            t_ver = theme.get("version", "unknown")
+            norm = self._normalize_component_name(t_name)
+            rule = None
+            for k, v in theme_rules.items():
+                if self._normalize_component_name(k) == norm:
+                    rule = v
+                    break
+            if not rule:
+                continue
+            vmatch = match_any_range(t_ver, rule.get("versions", []))
+            auth_req = self._infer_auth_requirement(rule.get("type", ""))
+            confidence = self._score_condition(vmatch, True, auth_req)
+            findings.append(
+                {
+                    "component_type": "theme",
+                    "name": t_name,
+                    "version": t_ver,
+                    "cve": rule.get("cve", []),
+                    "vuln_type": rule.get("type", "unknown"),
+                    "severity": rule.get("severity", "MEDIUM"),
+                    "conditions": {
+                        "version_match": vmatch,
+                        "component_present": True,
+                        "auth_requirement": auth_req,
+                        "candidate_endpoint": f"{site_url.rstrip('/')}/wp-content/themes/{t_name}/",
+                    },
+                    "confidence": confidence,
+                    "status": "candidate" if confidence >= 70 else "likely" if confidence >= 45 else "weak",
+                    "chain_candidate": confidence >= 70,
+                }
+            )
+
+        return findings
 
     def _run_vuln_check(self, url: str, check: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Run a single vulnerability check"""
@@ -556,6 +771,19 @@ class WordPressScannerEngine:
 
         return vulnerabilities
 
+    def _extract_version_from_text(self, text: str) -> str:
+        """Extract plugin/theme version from common headers."""
+        patterns = [
+            r"Stable tag:\s*([0-9][0-9a-zA-Z\.\-_]+)",
+            r"Version:\s*([0-9][0-9a-zA-Z\.\-_]+)",
+            r"WordPress\s*([0-9]+\.[0-9]+(?:\.[0-9]+)?)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                return match.group(1).strip()
+        return "unknown"
+
     def _parse_plugin_directory(self, html: str) -> List[Dict[str, Any]]:
         """Parse plugin directory listing"""
         plugins = []
@@ -596,12 +824,14 @@ class WordPressScannerEngine:
         all_themes = []
         all_users = []
         all_vulns = []
+        all_conditioned = []
 
         for site_result in results.values():
             all_plugins.extend(site_result.get("plugins", []))
             all_themes.extend(site_result.get("themes", []))
             all_users.extend(site_result.get("users", []))
             all_vulns.extend(site_result.get("vulnerabilities", []))
+            all_conditioned.extend(site_result.get("conditioned_findings", []))
 
         self.state.update(
             wordpress_detected=True,
@@ -609,7 +839,8 @@ class WordPressScannerEngine:
             wp_plugins=all_plugins,
             wp_themes=all_themes,
             wp_users=list(set(all_users)),
-            wp_vulnerabilities=all_vulns
+            wp_vulnerabilities=all_vulns,
+            wp_conditioned_findings=all_conditioned
         )
 
         critical_vulns = [v for v in all_vulns if v.get("severity") == "CRITICAL"]

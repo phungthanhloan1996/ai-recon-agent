@@ -6,13 +6,16 @@ Endpoint extraction from HTML, JavaScript, forms, and hidden parameters
 import os
 import re
 import logging
-from typing import Dict, List, Set, Tuple
+import json
+import tempfile
+from typing import Dict, List, Set, Tuple, Callable, Optional
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 from core.executor import check_tools, run_command
 from core.state_manager import StateManager
 from core.http_engine import HTTPClient
+from integrations.browser_crawler import BrowserCrawler
 
 logger = logging.getLogger("recon.discovery")
 
@@ -21,7 +24,7 @@ CRAWL_TOOLS = ["katana", "gau", "waybackurls", "hakrawler"]
 CRAWL_MAX_PARALLEL_HOSTS = 6
 CRAWL_DEPTH = 4
 PARAM_TOOLS = ["arjun", "paramspider"]
-JS_TOOLS = ["linkfinder", "jsfinder"]
+JS_TOOLS = ["linkfinder", "jsfinder2"]
 EXCLUDE_EXTENSIONS = [
     ".css", ".js", ".png", ".jpg", ".jpeg", ".gif",
     ".ico", ".woff", ".woff2", ".ttf", ".eot", ".svg",
@@ -51,6 +54,8 @@ class DiscoveryEngine:
         self.output_dir = output_dir
         self.target = state.get("target")
         self.http_client = HTTPClient()
+        self.browser_crawler = BrowserCrawler()
+        self.budget = (self.state.get("scan_metadata", {}) or {}).get("budget", {})
 
         # Patterns for endpoint discovery
         self.endpoint_patterns = {
@@ -71,19 +76,90 @@ class DiscoveryEngine:
             ".map", ".min.js", ".min.css"
         }
 
-    def run(self):
+    def run(self, progress_cb: Optional[Callable[[str, str, str], None]] = None):
         """Execute endpoint discovery pipeline"""
         logger.info("[DISCOVERY] Starting endpoint discovery")
 
         urls = self.state.get("urls", [])
         discovered_endpoints = []
+        seed_limit = int(self.budget.get("crawl_seed_urls", 260))
+        browser_limit = int(self.budget.get("crawl_browser_urls", 40))
+        browser_links = int(self.budget.get("crawl_browser_links_per_url", 120))
+        http_workers = int(self.budget.get("crawl_workers_http", 20))
+        browser_workers = int(self.budget.get("crawl_workers_browser", 4))
 
-        for url in urls[:200]:  # Increased limit for better coverage
-            try:
-                endpoints = self.discover_from_url(url)
-                discovered_endpoints.extend(endpoints)
-            except Exception as e:
-                logger.debug(f"[DISCOVERY] Failed to discover from {url}: {e}")
+        seed_urls = urls[:seed_limit]
+        browser_urls = urls[:browser_limit]
+
+        # Queue 1: HTTP parser crawl
+        if progress_cb:
+            progress_cb("crawl", "http-parser", "running")
+        with ThreadPoolExecutor(max_workers=http_workers) as executor:
+            futures = [executor.submit(self.discover_from_url, url) for url in seed_urls]
+            for future in as_completed(futures):
+                try:
+                    discovered_endpoints.extend(future.result())
+                except Exception as e:
+                    logger.debug(f"[DISCOVERY] HTTP crawl task failed: {e}")
+        if progress_cb:
+            progress_cb("crawl", "http-parser", "done")
+
+        # Queue 2: Browser runtime crawl
+        if progress_cb:
+            progress_cb("crawl", "playwright", "running")
+        with ThreadPoolExecutor(max_workers=browser_workers) as executor:
+            futures = [executor.submit(self.browser_crawler.crawl, url, browser_links) for url in browser_urls]
+            for future in as_completed(futures):
+                try:
+                    discovered_endpoints.extend(future.result())
+                except Exception as e:
+                    logger.debug(f"[DISCOVERY] Browser crawl task failed: {e}")
+        if progress_cb:
+            progress_cb("crawl", "playwright", "done")
+
+        # Queue 3: Katana CLI deep crawl
+        try:
+            if progress_cb:
+                progress_cb("crawl", "katana", "running")
+            discovered_endpoints.extend(self._discover_with_katana(seed_urls))
+        except Exception as e:
+            logger.debug(f"[DISCOVERY] Katana crawl failed: {e}")
+        finally:
+            if progress_cb:
+                progress_cb("crawl", "katana", "done")
+
+        # Queue 4: Hakrawler for additional runtime-discovered links/forms
+        try:
+            if progress_cb:
+                progress_cb("crawl", "hakrawler", "running")
+            discovered_endpoints.extend(self._discover_with_hakrawler(seed_urls))
+        except Exception as e:
+            logger.debug(f"[DISCOVERY] Hakrawler crawl failed: {e}")
+        finally:
+            if progress_cb:
+                progress_cb("crawl", "hakrawler", "done")
+
+        # Queue 5: Parameter discovery (Arjun + ParamSpider)
+        try:
+            if progress_cb:
+                progress_cb("crawl", "arjun+paramspider", "running")
+            discovered_endpoints.extend(self._discover_with_param_tools(seed_urls))
+        except Exception as e:
+            logger.debug(f"[DISCOVERY] Param tools failed: {e}")
+        finally:
+            if progress_cb:
+                progress_cb("crawl", "arjun+paramspider", "done")
+
+        # Queue 6: JS URL extraction via JSFinder2 / LinkFinder
+        try:
+            if progress_cb:
+                progress_cb("crawl", "jsfinder2+linkfinder", "running")
+            discovered_endpoints.extend(self._discover_with_js_tools(seed_urls))
+        except Exception as e:
+            logger.debug(f"[DISCOVERY] JS tools failed: {e}")
+        finally:
+            if progress_cb:
+                progress_cb("crawl", "jsfinder2+linkfinder", "done")
 
         # Remove duplicates and filter
         unique_endpoints = self.deduplicate_endpoints(discovered_endpoints)
@@ -100,6 +176,172 @@ class DiscoveryEngine:
                 f.write(f"{ep.get('url', '')}\n")
 
         logger.info(f"[DISCOVERY] Discovered {len(classified)} unique endpoints")
+
+    def _discover_with_katana(self, seed_urls: List[str]) -> List[Dict]:
+        """Use katana CLI for deeper JS-aware crawling."""
+        if not check_tools(["katana"]).get("katana"):
+            return []
+        seeds = [u for u in seed_urls[:30] if u.startswith(("http://", "https://"))]
+        if not seeds:
+            return []
+        rc, stdout, stderr = run_command(
+            ["katana", "-silent", "-d", str(CRAWL_DEPTH), "-list", "-"],
+            timeout=180,
+            stdin_data="\n".join(seeds) + "\n"
+        )
+        if rc != 0 or not stdout:
+            return []
+        found = []
+        for line in stdout.splitlines():
+            u = line.strip()
+            if not u:
+                continue
+            found.append({"url": u, "type": "katana", "source": "katana", "method": "GET"})
+        logger.info(f"[DISCOVERY] Katana discovered {len(found)} endpoints")
+        return found
+
+    def _discover_with_hakrawler(self, seed_urls: List[str]) -> List[Dict]:
+        """Use hakrawler for alternate crawl strategy."""
+        if not check_tools(["hakrawler"]).get("hakrawler"):
+            return []
+        seeds = [u for u in seed_urls[:30] if u.startswith(("http://", "https://"))]
+        if not seeds:
+            return []
+        rc, stdout, _ = run_command(
+            ["hakrawler", "-subs", "-d", "3", "-t", "15", "-u"],
+            timeout=180,
+            stdin_data="\n".join(seeds) + "\n"
+        )
+        if rc != 0 or not stdout:
+            return []
+        found = self._parse_plain_url_output(stdout, source="hakrawler")
+        logger.info(f"[DISCOVERY] Hakrawler discovered {len(found)} endpoints")
+        return found
+
+    def _discover_with_param_tools(self, seed_urls: List[str]) -> List[Dict]:
+        """Discover hidden parameters and convert to testable endpoints."""
+        out: List[Dict] = []
+        seeds = [u for u in seed_urls[:20] if u.startswith(("http://", "https://"))]
+        if not seeds:
+            return out
+
+        if check_tools(["arjun"]).get("arjun"):
+            for url in seeds[:8]:
+                with tempfile.NamedTemporaryFile(prefix="arjun_", suffix=".txt", delete=False) as tf:
+                    out_file = tf.name
+                try:
+                    rc, stdout, _ = run_command(
+                        ["arjun", "-u", url, "-oT", out_file, "-q", "-t", "8"],
+                        timeout=120
+                    )
+                    if rc == 0 and os.path.exists(out_file):
+                        with open(out_file, "r", encoding="utf-8", errors="ignore") as f:
+                            for line in f:
+                                param = line.strip()
+                                if not param or "=" in param:
+                                    continue
+                                sep = "&" if "?" in url else "?"
+                                out.append(
+                                    {
+                                        "url": f"{url}{sep}{param}=FUZZ",
+                                        "type": "param",
+                                        "source": "arjun",
+                                        "method": "GET",
+                                    }
+                                )
+                except Exception as e:
+                    logger.debug(f"[DISCOVERY] Arjun failed for {url}: {e}")
+                finally:
+                    if os.path.exists(out_file):
+                        os.unlink(out_file)
+
+        if check_tools(["paramspider"]).get("paramspider"):
+            domains = sorted({urlparse(u).netloc for u in seeds if urlparse(u).netloc})
+            for domain in domains[:4]:
+                rc, stdout, _ = run_command(["paramspider", "-d", domain, "-s"], timeout=180)
+                if rc != 0 or not stdout:
+                    continue
+                out.extend(self._parse_plain_url_output(stdout, source="paramspider"))
+
+        if out:
+            logger.info(f"[DISCOVERY] Param tools discovered {len(out)} endpoints")
+        return out
+
+    def _discover_with_js_tools(self, seed_urls: List[str]) -> List[Dict]:
+        """Extract endpoints from JavaScript assets using external analyzers."""
+        out: List[Dict] = []
+        js_assets = self._collect_js_assets(seed_urls[:20])[:30]
+        if not js_assets:
+            return out
+
+        if check_tools(["jsfinder2"]).get("jsfinder2"):
+            for js_url in js_assets[:20]:
+                with tempfile.NamedTemporaryFile(prefix="jsfinder2_", suffix=".txt", delete=False) as tf:
+                    url_file = tf.name
+                try:
+                    rc, stdout, _ = run_command(
+                        ["jsfinder2", "-u", js_url, "-ou", url_file],
+                        timeout=90
+                    )
+                    if os.path.exists(url_file):
+                        with open(url_file, "r", encoding="utf-8", errors="ignore") as f:
+                            out.extend(self._parse_plain_url_output(f.read(), source="jsfinder2"))
+                    elif rc == 0 and stdout:
+                        out.extend(self._parse_plain_url_output(stdout, source="jsfinder2"))
+                except Exception as e:
+                    logger.debug(f"[DISCOVERY] JSFinder2 failed for {js_url}: {e}")
+                finally:
+                    if os.path.exists(url_file):
+                        os.unlink(url_file)
+
+        # LinkFinder fallback when installed as Python module only.
+        for js_url in js_assets[:10]:
+            rc, stdout, _ = run_command(
+                ["python", "-m", "linkfinder", "-i", js_url, "-o", "cli"],
+                timeout=90
+            )
+            if rc == 0 and stdout:
+                out.extend(self._parse_plain_url_output(stdout, source="linkfinder"))
+
+        if out:
+            logger.info(f"[DISCOVERY] JS tools discovered {len(out)} endpoints")
+        return out
+
+    def _collect_js_assets(self, seed_urls: List[str]) -> List[str]:
+        assets: List[str] = []
+        for url in seed_urls:
+            try:
+                response = self.http_client.get(url, timeout=8)
+                if response.status_code >= 400:
+                    continue
+                soup = BeautifulSoup(response.text, "html.parser")
+                for tag in soup.find_all("script", src=True):
+                    script_src = tag.get("src", "").strip()
+                    normalized = self.normalize_endpoint(script_src, url)
+                    if normalized and normalized.endswith(".js"):
+                        assets.append(normalized)
+            except Exception:
+                continue
+        return list(dict.fromkeys(assets))
+
+    def _parse_plain_url_output(self, text: str, source: str) -> List[Dict]:
+        found: List[Dict] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("[") or "usage:" in line.lower():
+                continue
+            match = re.search(r"https?://[^\s'\"<>]+", line)
+            if not match:
+                continue
+            found.append(
+                {
+                    "url": match.group(0),
+                    "type": source,
+                    "source": source,
+                    "method": "GET",
+                }
+            )
+        return found
 
     def discover_from_url(self, url: str) -> List[Dict]:
         """Discover endpoints from a single URL"""

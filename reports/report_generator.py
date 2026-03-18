@@ -54,7 +54,8 @@ class ReportGenerator:
                 "live_hosts": self.state.get("live_hosts", []),
                 "endpoints": self.state.get("prioritized_endpoints", []),
                 "vulnerabilities": self.state.get("confirmed_vulnerabilities", []),
-                "exploit_chains": self._format_chains_for_json()
+                "exploit_chains": self._format_chains_for_json(),
+                "external_findings": self.state.get("external_findings", []),
             },
             "attack_surface": {
                 "total_endpoints": len(self.state.get("endpoints", [])),
@@ -65,7 +66,12 @@ class ReportGenerator:
             "technical_details": {
                 "scan_responses": len(self.state.get("scan_responses", [])),
                 "iterations_performed": getattr(self.state, 'iteration_count', 1),
-                "learning_data": self._get_learning_summary()
+                "learning_data": self._get_learning_summary(),
+                "manual_validation": {
+                    "pending": self.state.get("manual_validation_required", []),
+                    "completed": self.state.get("manual_validation_completed", [])
+                },
+                "manual_attack_playbook": self.state.get("manual_attack_playbook", [])
             }
         }
 
@@ -96,12 +102,24 @@ class ReportGenerator:
         lines.extend(self._build_attack_surface_section())
         lines.append("")
 
+        # External toolkit findings
+        lines.extend(self._build_external_findings_section())
+        lines.append("")
+
         # Critical Findings
         lines.extend(self._build_findings_section())
         lines.append("")
 
+        # Manual validation queue
+        lines.extend(self._build_manual_validation_section())
+        lines.append("")
+
         # Exploit Chains
         lines.extend(self._build_chains_section())
+        lines.append("")
+
+        # Manual playbook
+        lines.extend(self._build_manual_playbook_section())
         lines.append("")
 
         # Recommendations
@@ -201,6 +219,7 @@ class ReportGenerator:
             return lines
 
         for i, vuln in enumerate(vulns, 1):
+            manual_flag = "Yes" if vuln.get("requires_manual_validation") else "No"
             lines.extend([
                 f"### {i}. {vuln.get('name', 'Unknown Vulnerability')}",
                 "",
@@ -208,9 +227,35 @@ class ReportGenerator:
                 f"- **Type:** {vuln.get('type', '')}",
                 f"- **Severity:** {vuln.get('severity', 'MEDIUM')}",
                 f"- **Confidence:** {vuln.get('confidence', 0):.2f}",
+                f"- **Manual Validation Required:** {manual_flag}",
                 ""
             ])
 
+        return lines
+
+    def _build_manual_validation_section(self) -> List[str]:
+        """Build section for findings that require manual validation."""
+        lines = [
+            "## ✅ MANUAL VALIDATION STATUS",
+            ""
+        ]
+        pending = self.state.get("manual_validation_required", [])
+        completed = self.state.get("manual_validation_completed", [])
+
+        if not pending and not completed:
+            lines.append("No manual validation items were generated.")
+            return lines
+
+        lines.append(f"- Pending manual review: {len(pending)}")
+        lines.append(f"- Completed manual reviews: {len(completed)}")
+        lines.append("")
+        if pending:
+            lines.append("### Pending Items")
+            for item in pending[:20]:
+                lines.append(
+                    f"- [{item.get('severity', 'MEDIUM')}] {item.get('type', 'unknown')} at {item.get('endpoint', '')}"
+                )
+            lines.append("")
         return lines
 
     def _build_chains_section(self) -> List[str]:
@@ -258,6 +303,59 @@ class ReportGenerator:
 
         return lines
 
+    def _build_manual_playbook_section(self) -> List[str]:
+        """Build manually executable chain playbook section."""
+        lines = [
+            "## 🧭 MANUAL ATTACK PLAYBOOK",
+            ""
+        ]
+        playbook = self.state.get("manual_attack_playbook", [])
+        if not playbook:
+            lines.append("No manual playbook generated.")
+            return lines
+
+        lines.append(f"- Playbook chains: {len(playbook)}")
+        lines.append("")
+        for chain in playbook[:5]:
+            lines.append(f"### {chain.get('id', 'CHAIN')} - {chain.get('name', 'Unnamed Chain')}")
+            lines.append(f"- Risk: {chain.get('risk_level', 'MEDIUM')}")
+            lines.append(f"- Goal: {chain.get('goal', '')}")
+            lines.append(f"- Estimated Time: {chain.get('estimated_time', 'unknown')}")
+            lines.append("- Steps:")
+            for step in chain.get("steps", [])[:10]:
+                lines.append(
+                    f"  - [{step.get('step', '?')}] {step.get('title', 'step')} | tool={step.get('tool', 'manual')} | target={step.get('target', '')}"
+                )
+            lines.append("")
+        return lines
+
+    def _build_external_findings_section(self) -> List[str]:
+        """Build section for external-tool findings."""
+        lines = [
+            "## 🛠️ EXTERNAL TOOLKIT FINDINGS",
+            ""
+        ]
+        findings = self.state.get("external_findings", [])
+        if not findings:
+            lines.append("No external-tool findings recorded.")
+            return lines
+        lines.append(f"- Total findings: {len(findings)}")
+        by_tool: Dict[str, int] = {}
+        for finding in findings:
+            tool = finding.get("tool", "unknown")
+            by_tool[tool] = by_tool.get(tool, 0) + 1
+        for tool, count in sorted(by_tool.items(), key=lambda x: x[0]):
+            lines.append(f"- {tool}: {count}")
+        lines.append("")
+        for item in findings[:15]:
+            lines.append(f"### {item.get('tool', 'tool')} @ {item.get('url', '')}")
+            lines.append(f"- Severity: {item.get('severity', 'INFO')}")
+            lines.append("```text")
+            lines.append((item.get("output", "") or "").strip()[:1200])
+            lines.append("```")
+            lines.append("")
+        return lines
+
     def _build_technical_details_section(self) -> List[str]:
         """Build technical details section"""
         lines = [
@@ -298,6 +396,10 @@ class ReportGenerator:
         critical = summary.get('critical_vulns', 0)
         high = summary.get('high_vulns', 0)
         chains = summary.get('exploit_chains_planned', 0)
+        pending_manual = self.state.get("manual_validation_required", [])
+        pending_critical = any(item.get("severity") == "CRITICAL" for item in pending_manual)
+        if pending_critical:
+            return "CRITICAL (PENDING MANUAL VALIDATION)"
 
         if critical > 0 or chains > 3:
             return "CRITICAL"

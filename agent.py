@@ -7,6 +7,7 @@ import time
 import signal
 import concurrent.futures
 from datetime import datetime, timedelta
+from glob import glob
 import threading
 from collections import defaultdict, deque
 from typing import Dict, List, Optional
@@ -24,6 +25,7 @@ from core.http_engine import HTTPClient
 from core.response_analyzer import ResponseAnalyzer
 from core.attack_graph import AttackGraph
 from core.session_manager import SessionManager
+from core.scan_budget import ScanBudget
 
 # ─── AI Components ───────────────────────────────────────────────────────────
 from ai.endpoint_classifier import EndpointClassifier
@@ -34,6 +36,34 @@ from ai.chain_planner import ChainPlanner
 
 # ─── Constants ──────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+GO_BIN = os.path.expanduser("~/go/bin")
+LOCAL_BIN = os.path.expanduser("~/.local/bin")
+if GO_BIN not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + GO_BIN
+if LOCAL_BIN not in os.environ.get("PATH", ""):
+    os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + LOCAL_BIN
+
+
+def load_env_file(env_path: str = ".env"):
+    """Load simple KEY=VALUE pairs from .env if not already in process env."""
+    if not os.path.exists(env_path):
+        return
+    try:
+        with open(env_path, "r", encoding="utf-8", errors="ignore") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception:
+        pass
+
+
+load_env_file(os.path.join(BASE_DIR, ".env"))
 
 from modules.wp_scanner import WordPressScannerEngine
 
@@ -49,14 +79,16 @@ from modules.crawler import DiscoveryEngine
 from modules.scanner import ScanningEngine
 from modules.exploiter import ExploitTestEngine
 from modules.live_hosts import LiveHostEngine
+from modules.auth_scanner import AuthScannerEngine
+from modules.toolkit_scanner import ToolkitScanner
 
 
 # ─── API Key Check ───────────────────────────────────────────────────────────
 def check_api_keys() -> dict:
     """Kiểm tra trạng thái các API key cần thiết."""
-    groq_key = os.environ.get("GROQ_API_KEY", "")
-    wps_token = os.environ.get("WPScan_API_TOKEN", "")
-    nvd_key = os.environ.get("NVD_API_KEY", "")
+    groq_key = os.environ.get("GROQ_API_KEY", "") or os.environ.get("GROQ_APIKEY", "")
+    wps_token = os.environ.get("WPScan_API_TOKEN", "") or os.environ.get("WPSCAN_API_TOKEN", "")
+    nvd_key = os.environ.get("NVD_API_KEY", "") or os.environ.get("NVDAPI_KEY", "")
 
     def status(key):
         return "✓" if key else "✗"
@@ -150,12 +182,19 @@ class BatchDisplay:
             
             vulns = summary.get('vulns', 0)
             exploited = summary.get('exploited', 0)
-            self.completed.appendleft((domain, vulns, exploited, datetime.now().strftime("%H:%M:%S")))
+            chains = summary.get('chains', 0)
+            top_chain = summary.get('top_chain', '')
+            self.completed.appendleft((domain, vulns, exploited, chains, top_chain, datetime.now().strftime("%H:%M:%S")))
             
             if vulns > 0:
-                self._add_to_feed("✅", "Completed", domain, f"{vulns} vulns, {exploited} exploited")
+                chain_txt = f", {chains} chains" if chains else ""
+                self._add_to_feed("✅", "Completed", domain, f"{vulns} vulns, {exploited} exploited{chain_txt}")
             else:
-                self._add_to_feed("✅", "Completed", domain, "0 vulns")
+                chain_txt = f", {chains} chains" if chains else ""
+                self._add_to_feed("✅", "Completed", domain, f"0 vulns{chain_txt}")
+            if chains > 0:
+                shown = (top_chain or "top chain available")[:45]
+                self._add_to_feed("🔗", "Chains", domain, shown)
     
     def mark_failed(self, domain, reason):
         """Domain bị lỗi"""
@@ -244,11 +283,14 @@ class BatchDisplay:
             if active_count > 0:
                 for idx, (domain, data) in enumerate(list(self.domains.items())[:self.max_workers], 1):
                     phase = data.get('phase', 'init')
-                    phase_detail = data.get('phase_detail', '')
+                    phase_tool = data.get('phase_tool', '') or 'n/a'
+                    phase_status = data.get('phase_status', 'idle')
                     iter_info = f"iter {data.get('iter', 1)}/{data.get('max_iter', 5)}"
                     
                     phase_icon = {
                         'recon': '🔍', 'live': '🌐', 'wp': '🎯', 'crawl': '📁',
+                        'auth': '🔐',
+                        'toolkit': '🛠️',
                         'classify': '🤖', 'rank': '📊', 'scan': '⚡', 'analyze': '🔬',
                         'graph': '🕸️', 'chain': '🔗', 'exploit': '💥', 'learn': '🧠',
                         'init': '⚙️', 'report': '📋'
@@ -257,7 +299,8 @@ class BatchDisplay:
                     progress = self._get_progress_text(data)
                     domain_display = domain[:30] if len(domain) <= 30 else domain[:27] + "..."
                     
-                    print(f"│  │     #{idx} {domain_display:<30} [{phase_icon} {phase.capitalize()}] {iter_info:<10} | {progress:<20} │")
+                    print(f"│  │     #{idx} {domain_display:<30} [{phase_icon} {phase.capitalize()}] {iter_info:<10} | {progress:<12} │")
+                    print(f"│  │        tool={phase_tool[:20]:<20} status={phase_status[:14]:<14}                                      │")
             else:
                 print("│  │     No active targets                                                                          │")
             
@@ -279,8 +322,11 @@ class BatchDisplay:
             print(f"│  │  ✅ DONE ({completed_count}):                                                                                   │")
             if completed_count > 0:
                 completed_text = []
-                for domain, vulns, exploited, ts in list(self.completed)[:3]:
-                    completed_text.append(f"{domain} ({vulns} vulns)")
+                for domain, vulns, exploited, chains, top_chain, ts in list(self.completed)[:3]:
+                    if chains:
+                        completed_text.append(f"{domain} ({vulns}v/{chains}c)")
+                    else:
+                        completed_text.append(f"{domain} ({vulns} vulns)")
                 print(f"│  │     • {'  • '.join(completed_text)}                                 │")
                 if completed_count > 3:
                     print(f"│  │     • ... and {completed_count - 3} more                                                      │")
@@ -322,6 +368,10 @@ class BatchDisplay:
                     if data.get('endpoints'):
                         eps = data.get('endpoints', {})
                         print(f"│  │  ├─ 📁 Endpoints: {eps.get('total', 0)} total, API:{eps.get('api', 0)} Admin:{eps.get('admin', 0)}              │")
+                    phase = data.get('phase', 'init')
+                    phase_tool = data.get('phase_tool', '') or 'n/a'
+                    phase_status = data.get('phase_status', 'idle')
+                    print(f"│  │  ├─ ⚙️  Phase: {phase:<10} Tool: {phase_tool[:28]:<28} Status: {phase_status:<10} │")
                     
                     last_action = data.get('last_action', '')[:50]
                     if last_action:
@@ -362,6 +412,8 @@ class DomainDisplay:
             'chains': [],
             'last_action': 'initializing...',
             'phase_detail': '',
+            'phase_tool': '',
+            'phase_status': 'idle',
             'tech': {},
             'endpoints': {'api': 0, 'admin': 0, 'upload': 0, 'total': 0},
             'vuln_types': defaultdict(int),
@@ -413,6 +465,8 @@ class DomainDisplay:
         
         phase_icon = {
             'recon': '🔍', 'live': '🌐', 'wp': '🎯', 'crawl': '📁',
+            'auth': '🔐',
+            'toolkit': '🛠️',
             'classify': '🤖', 'rank': '📊', 'scan': '⚡', 'analyze': '🔬',
             'graph': '🕸️', 'chain': '🔗', 'exploit': '💥', 'learn': '🧠',
             'init': '⚙️', 'report': '📋'
@@ -427,6 +481,9 @@ class DomainDisplay:
         
         domain_display = self.target[:50] if len(self.target) <= 50 else self.target[:47] + "..."
         print(f"│  {domain_display} [{phase_icon} {d['phase']}] iter {d['iter']}/{d['max_iter']}  elapsed: {time_str}        │")
+        tool = (d.get('phase_tool') or 'n/a')[:24]
+        status = (d.get('phase_status') or 'idle')[:16]
+        print(f"│  Tool: {tool:<24} | Status: {status:<16}                                   │")
         print("├────────────────────────────────────────────────────────────────────────────────┤")
         
         # Stats
@@ -491,22 +548,33 @@ def setup_logging(output_dir: str, verbose: bool = False) -> logging.Logger:
     """File logging only - console handled by display system"""
     os.makedirs(output_dir, exist_ok=True)
     log_file = os.path.join(output_dir, "agent.log")
-    
-    file_handler = logging.FileHandler(log_file)
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
-        "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    ))
-    
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.ERROR)
-    console_handler.setFormatter(logging.Formatter("%(message)s"))
-    
+
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
-    root.addHandler(file_handler)
-    root.addHandler(console_handler)
+
+    # Avoid duplicate handlers when running many targets in batch mode.
+    has_file = False
+    has_console = False
+    for h in root.handlers:
+        if isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == os.path.abspath(log_file):
+            has_file = True
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+            has_console = True
+
+    if not has_file:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(logging.Formatter(
+            "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        ))
+        root.addHandler(file_handler)
+
+    if not has_console:
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.ERROR)
+        console_handler.setFormatter(logging.Formatter("%(message)s"))
+        root.addHandler(console_handler)
     
     logging.getLogger("urllib3").setLevel(logging.ERROR)
     logging.getLogger("requests").setLevel(logging.ERROR)
@@ -518,7 +586,7 @@ def setup_logging(output_dir: str, verbose: bool = False) -> logging.Logger:
 class ReconAgent:
     def __init__(self, target: str, output_dir: str, options: dict,
                  wps_token: str = "", nvd_key: str = "", 
-                 urls_file: str = "", subdomains_file: str = "", force_recon: bool = False,
+                 urls_file: str = "", subdomains_file: str = "", auth_file: str = "", force_recon: bool = False,
                  batch_display: BatchDisplay = None,
                  api_status: Optional[dict] = None,
                  target_index: int = 1,
@@ -527,16 +595,19 @@ class ReconAgent:
         self.target = target.lower().strip()
         self.output_dir = output_dir
         self.options = options
-        self.wps_token = wps_token
-        self.nvd_key = nvd_key
+        self.wps_token = wps_token or os.environ.get("WPScan_API_TOKEN", "") or os.environ.get("WPSCAN_API_TOKEN", "")
+        self.nvd_key = nvd_key or os.environ.get("NVD_API_KEY", "") or os.environ.get("NVDAPI_KEY", "")
         self.urls_file = urls_file
         self.subdomains_file = subdomains_file
+        self.auth_file = auth_file
         self.force_recon = force_recon
         self.batch_display = batch_display
         self.api_status = api_status or {}
         self.target_index = target_index
         self.total_targets = total_targets
         self.scan_start_time = time.time()
+        # Force full profile by default (no scan-strength selection).
+        self.budget = ScanBudget.build(self.target, aggressive=True)
         
         if batch_display:
             self.display = None
@@ -548,12 +619,17 @@ class ReconAgent:
         
         # Initialize components
         self.state = StateManager(self.target, output_dir)
+        self.resumed_from_state = self.state.load()
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        scan_meta["budget"] = self.budget.to_dict()
+        scan_meta["aggressive"] = True
+        self.state.update(scan_metadata=scan_meta)
         self.session = SessionManager(self.output_dir)
         self.http_client = HTTPClient(self.session)
         self.response_analyzer = ResponseAnalyzer()
         self.learning_engine = LearningEngine(output_dir)
         
-        groq_key = os.environ.get("GROQ_API_KEY", "")
+        groq_key = os.environ.get("GROQ_API_KEY", "") or os.environ.get("GROQ_APIKEY", "")
         self.endpoint_classifier = EndpointClassifier()
         self.payload_gen = PayloadGenerator(groq_key)
         self.payload_mutator = PayloadMutator()
@@ -569,6 +645,8 @@ class ReconAgent:
         self.scanning_engine = ScanningEngine(self.state, output_dir, self.payload_gen, self.payload_mutator, self.learning_engine)
         self.exploit_engine = ExploitTestEngine(self.state, output_dir, self.learning_engine)
         self.wp_scanner = WordPressScannerEngine(self.state, output_dir, self.wps_token)
+        self.auth_engine = AuthScannerEngine(self.state, output_dir, self.session)
+        self.toolkit = ToolkitScanner(self.state, output_dir, aggressive=True)
         
         self.logger = logging.getLogger("recon.agent")
         self.iteration_count = 0
@@ -588,8 +666,15 @@ class ReconAgent:
         self.last_action = "starting..."
         self.current_phase = "init"
         self.phase_detail = ""
+        self.phase_tool = ""
+        self.phase_status = "idle"
         self.learning_stats = {'mutated': 0, 'confidence': 0.0}
-        
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        self.completed_phases = set(scan_meta.get("completed_phases", []) or [])
+        if self.resumed_from_state:
+            previous_phase = self.state.get("current_phase", "unknown")
+            self.last_action = f"resumed from state ({previous_phase})"
+            self._update_stats()
         self._update_display()
 
     def _update_display(self):
@@ -597,6 +682,8 @@ class ReconAgent:
             self.batch_display.update(self.batch_id, {
                 'phase': self.current_phase,
                 'phase_detail': self.phase_detail,
+                'phase_tool': self.phase_tool,
+                'phase_status': self.phase_status,
                 'iter': self.iteration_count,
                 'max_iter': self.max_iterations,
                 'stats': self.stats.copy(),
@@ -611,6 +698,8 @@ class ReconAgent:
                 self.display.update(
                     phase=self.current_phase,
                     phase_detail=self.phase_detail,
+                    phase_tool=self.phase_tool,
+                    phase_status=self.phase_status,
                     iter=self.iteration_count,
                     stats=self.stats.copy(),
                     chains=self.chains_data,
@@ -620,6 +709,19 @@ class ReconAgent:
                     learning=self.learning_stats.copy(),
                     last_action=self.last_action
                 )
+
+    def _set_activity(self, tool: str, status: str, detail: str = ""):
+        self.phase_tool = tool
+        self.phase_status = status
+        if detail:
+            self.phase_detail = detail
+        self._update_display()
+
+    def _progress_callback(self, phase: str, tool: str, status: str):
+        # Keep current phase aligned with the module emitting progress.
+        if phase:
+            self.current_phase = phase
+        self._set_activity(tool=tool, status=status)
 
     def run(self):
         self._update_display()
@@ -637,6 +739,8 @@ class ReconAgent:
                 if self.iteration_count == 1 and not self._should_skip_phase("recon"):
                     self.current_phase = "recon"
                     self.phase_detail = "enum"
+                    self.phase_tool = "subfinder"
+                    self.phase_status = "queued"
                     self._update_display()
                     self._run_recon_phase()
                 
@@ -644,72 +748,122 @@ class ReconAgent:
                 if self.iteration_count == 1 and not self._should_skip_phase("live_hosts"):
                     self.current_phase = "live"
                     self.phase_detail = "detect"
+                    self.phase_tool = "httpx+requests"
+                    self.phase_status = "queued"
                     self._update_display()
                     self._run_live_hosts_phase()
+                    if self._should_abort_no_live_hosts():
+                        break
                 
                 # Phase 3: WordPress
                 if self.iteration_count == 1 and not self._should_skip_phase("wordpress"):
                     self.current_phase = "wp"
                     self.phase_detail = "scan"
+                    self.phase_tool = "wpscan+fingerprint"
+                    self.phase_status = "queued"
                     self._update_display()
                     self._run_wordpress_phase()
+
+                # Phase 3.5: External toolkit scan (Kali tools)
+                if self.iteration_count == 1 and not self._should_skip_phase("toolkit"):
+                    self.current_phase = "toolkit"
+                    self.phase_detail = "kali-tools"
+                    self.phase_tool = "whatweb/wafw00f/nikto/nmap"
+                    self.phase_status = "queued"
+                    self._update_display()
+                    self._run_toolkit_phase()
                 
                 # Phase 4: Discovery
                 if self.iteration_count == 1 and not self._should_skip_phase("discovery"):
                     self.current_phase = "crawl"
                     self.phase_detail = "spider"
+                    self.phase_tool = "parser+browser+katana"
+                    self.phase_status = "queued"
                     self._update_display()
                     self._run_discovery_phase()
+                    if self._should_abort_low_signal():
+                        break
+
+                # Phase 4.5: Authenticated sessions bootstrap
+                if self.iteration_count == 1 and self.auth_file and not self._should_skip_phase("auth"):
+                    self.current_phase = "auth"
+                    self.phase_detail = "roles"
+                    self.phase_tool = "session-bootstrap"
+                    self.phase_status = "queued"
+                    self._update_display()
+                    self._run_auth_phase()
                 
                 # Phase 5: Classification
-                self.current_phase = "classify"
-                self.phase_detail = "ai"
-                self._update_display()
-                self._run_classification_phase()
+                if "classify" not in self.completed_phases:
+                    self.current_phase = "classify"
+                    self.phase_detail = "ai"
+                    self.phase_tool = "endpoint-classifier"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_classification_phase()
                 
                 # Phase 6: Prioritization
-                self.current_phase = "rank"
-                self.phase_detail = "scoring"
-                self._update_display()
-                self._run_prioritization_phase()
+                if "rank" not in self.completed_phases:
+                    self.current_phase = "rank"
+                    self.phase_detail = "scoring"
+                    self.phase_tool = "endpoint-ranker"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_prioritization_phase()
                 
                 # Phase 7: Scanning
                 if not self._should_skip_phase("scan"):
                     self.current_phase = "scan"
                     self.phase_detail = "active"
+                    self.phase_tool = "nuclei/sqlmap/dalfox"
+                    self.phase_status = "running"
                     self._update_display()
                     self._run_scanning_phase()
                 
                 # Phase 8: Analysis
-                self.current_phase = "analyze"
-                self.phase_detail = "ai"
-                self._update_display()
-                self._run_analysis_phase()
+                if "analyze" not in self.completed_phases:
+                    self.current_phase = "analyze"
+                    self.phase_detail = "ai"
+                    self.phase_tool = "ai-analyzer"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_analysis_phase()
                 
                 # Phase 9: Attack Graph
-                self.current_phase = "graph"
-                self.phase_detail = "build"
-                self._update_display()
-                self._run_attack_graph_phase(attack_graph)
+                if "graph" not in self.completed_phases:
+                    self.current_phase = "graph"
+                    self.phase_detail = "build"
+                    self.phase_tool = "attack-graph"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_attack_graph_phase(attack_graph)
                 
                 # Phase 10: Chain Planning
-                self.current_phase = "chain"
-                self.phase_detail = "plan"
-                self._update_display()
-                self._run_chain_planning_phase(attack_graph)
+                if "chain" not in self.completed_phases:
+                    self.current_phase = "chain"
+                    self.phase_detail = "plan"
+                    self.phase_tool = "chain-planner"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_chain_planning_phase(attack_graph)
                 
                 # Phase 11: Exploit Testing
                 if not self._should_skip_phase("exploit"):
                     self.current_phase = "exploit"
                     self.phase_detail = "test"
+                    self.phase_tool = "exploit-validator"
+                    self.phase_status = "running"
                     self._update_display()
                     self._run_exploit_phase()
                 
                 # Phase 12: Learning
-                self.current_phase = "learn"
-                self.phase_detail = "adapt"
-                self._update_display()
-                self._run_learning_phase()
+                if "learn" not in self.completed_phases:
+                    self.current_phase = "learn"
+                    self.phase_detail = "adapt"
+                    self.phase_tool = "learning-engine"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_learning_phase()
                 
                 self._update_stats()
                 
@@ -721,20 +875,30 @@ class ReconAgent:
             # Final
             self.current_phase = "report"
             self.last_action = "generating final report..."
+            self.phase_tool = "report-generator"
+            self.phase_status = "running"
             self._update_display()
             self._generate_final_report()
+            self._mark_phase_done("report")
+            self.phase_status = "done"
+            self._update_display()
             
             if self.batch_display:
+                top_chain = ""
+                if self.chains_data:
+                    top_chain = self.chains_data[0].get("name", "")
                 self.batch_display.mark_completed(self.target, {
                     'vulns': self.stats['vulns'],
                     'chains': len(self.chains_data),
-                    'exploited': self.stats['exploited']
+                    'exploited': self.stats['exploited'],
+                    'top_chain': top_chain
                 })
             else:
                 self.display.stop()
             
         except KeyboardInterrupt:
             self.last_action = "interrupted by user"
+            self.phase_status = "interrupted"
             self._update_display()
             self.logger.warning("Scan interrupted")
             self.state.save()
@@ -743,6 +907,7 @@ class ReconAgent:
                 self.batch_display.mark_failed(self.target, "interrupted")
         except Exception as e:
             self.last_action = f"error: {str(e)[:30]}"
+            self.phase_status = "failed"
             self._update_display()
             self.logger.error(f"Fatal error: {e}", exc_info=True)
             self.state.add_error(str(e))
@@ -804,15 +969,29 @@ class ReconAgent:
             "recon": "skip_recon",
             "live_hosts": "skip_live_hosts",
             "wordpress": "skip_wordpress",
+            "toolkit": "skip_toolkit",
             "discovery": "skip_crawl", 
+            "auth": "skip_auth",
             "scan": "skip_scan",
             "exploit": "skip_exploit"
         }
-        return self.options.get(skip_map.get(phase, ""), False)
+        if self.options.get(skip_map.get(phase, ""), False):
+            return True
+        return phase in self.completed_phases
+
+    def _mark_phase_done(self, phase: str):
+        if not phase:
+            return
+        self.completed_phases.add(phase)
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        scan_meta["completed_phases"] = sorted(self.completed_phases)
+        self.state.update(scan_metadata=scan_meta)
 
     def _run_recon_phase(self):
         before = len(self.state.get("subdomains", []))
-        self.recon_engine.run()
+        self._set_activity("subfinder", "running", "enum")
+        self.recon_engine.run(progress_cb=self._progress_callback)
+        self._set_activity("recon-engine", "done", "enum")
         after = len(self.state.get("subdomains", []))
         if after > before:
             self.stats['subs'] = after
@@ -820,11 +999,20 @@ class ReconAgent:
             if self.batch_display:
                 self.batch_display._add_to_feed("➕", "Subdomain", self.target, f"Found {after-before} new")
         self._update_stats()
+        self._mark_phase_done("recon")
 
     def _run_live_hosts_phase(self):
         before = len(self.state.get("live_hosts", []))
+        if before >= int((self.budget.to_dict() if hasattr(self, "budget") else {}).get("live_secondary_targets", 90)):
+            self.last_action = f"live hosts: reused {before} from recon cache"
+            self.phase_status = "done"
+            self._update_display()
+            self._mark_phase_done("live_hosts")
+            return
+        self._set_activity("live-host-detector", "running", "detect")
         self.stats['total_hosts'] = len(self.state.get("subdomains", []))
         self.live_host_engine.detect_live_hosts(self.state.get("subdomains", []))
+        self._set_activity("live-host-detector", "done", "detect")
         after = len(self.state.get("live_hosts", []))
         if after > before:
             self.stats['live'] = after
@@ -832,10 +1020,55 @@ class ReconAgent:
             if self.batch_display:
                 self.batch_display._add_to_feed("🌐", "Live", self.target, f"Found {after-before} live")
         self._update_stats()
+        self._mark_phase_done("live_hosts")
+
+    def _should_abort_no_live_hosts(self) -> bool:
+        """Abort early when the target has no reachable live hosts."""
+        live_hosts = self.state.get("live_hosts", [])
+        if live_hosts:
+            return False
+        self.last_action = "no live hosts detected; aborting deep scan"
+        self.state.add_error("No live hosts reachable for target")
+        self._update_display()
+        return True
+
+    def _should_abort_low_signal(self) -> bool:
+        """
+        Abort deep phases when signal is too low to justify expensive scans.
+        """
+        eps = len(self.state.get("endpoints", []) or [])
+        prioritized = len(self.state.get("prioritized_endpoints", []) or [])
+        wp = bool(self.state.get("wordpress_detected", False))
+        live = len(self.state.get("live_hosts", []) or [])
+        if live == 0:
+            return True
+        if eps == 0 and prioritized == 0 and not wp:
+            self.last_action = "low-signal target; skipping deep exploit phases"
+            self.phase_status = "done"
+            self._update_display()
+            return True
+        return False
 
     def _run_wordpress_phase(self):
-        live_hosts = self.state.get("live_hosts", [])
-        target_urls = [host.get("url", "") for host in live_hosts if host.get("url")]
+        self._set_activity("wpscan+wp-fingerprint", "running", "scan")
+        live_hosts = self._select_live_hosts_for_deep_scan(limit=40)
+        from urllib.parse import urlparse
+        target_urls = []
+        seen = set()
+        for host in live_hosts:
+            u = host.get("url", "")
+            if not u:
+                continue
+            try:
+                p = urlparse(u)
+                if not p.scheme or not p.netloc:
+                    continue
+                root = f"{p.scheme}://{p.netloc.lower()}"
+            except Exception:
+                continue
+            if root not in seen:
+                seen.add(root)
+                target_urls.append(root)
         if target_urls:
             wp_sites = self.wp_scanner.scan_wordpress_sites(target_urls)
             if wp_sites:
@@ -843,11 +1076,33 @@ class ReconAgent:
                 self.last_action = f"wordpress: {len(wp_sites)} sites"
                 if self.batch_display:
                     self.batch_display._add_to_feed("🎯", "WordPress", self.target, f"Found {len(wp_sites)} sites")
+        self._set_activity("wpscan+wp-fingerprint", "done", "scan")
         self._update_stats()
+        self._mark_phase_done("wordpress")
+
+    def _run_toolkit_phase(self):
+        live_hosts = self._select_live_hosts_for_deep_scan(limit=30)
+        self._set_activity("kali-toolkit", "running", "kali-tools")
+        findings = self.toolkit.run(live_hosts, progress_cb=self._progress_callback)
+        self._set_activity("kali-toolkit", "done", "kali-tools")
+        if findings:
+            self.last_action = f"toolkit: {len(findings)} findings"
+            if self.batch_display:
+                self.batch_display._add_to_feed("🛠️", "Toolkit", self.target, f"{len(findings)} findings")
+        else:
+            self.last_action = "toolkit: no findings"
+        self._update_display()
+        self._mark_phase_done("toolkit")
 
     def _run_discovery_phase(self):
         before = len(self.state.get("endpoints", []))
-        self.discovery_engine.run()
+        self._set_activity("crawler", "running", "spider")
+        prioritized_hosts = [h.get("url", "") for h in self._select_live_hosts_for_deep_scan(limit=80) if h.get("url")]
+        if prioritized_hosts:
+            merged_urls = list(dict.fromkeys(prioritized_hosts + self.state.get("urls", [])))
+            self.state.update(urls=merged_urls)
+        self.discovery_engine.run(progress_cb=self._progress_callback)
+        self._set_activity("crawler", "done", "spider")
         after = len(self.state.get("endpoints", []))
         if after > before:
             self.endpoint_stats['total'] = after
@@ -856,6 +1111,18 @@ class ReconAgent:
             if self.batch_display:
                 self.batch_display._add_to_feed("📁", "Endpoint", self.target, f"Found {after-before} new")
         self._update_stats()
+        self._mark_phase_done("discovery")
+
+    def _run_auth_phase(self):
+        self._set_activity("session-bootstrap", "running", "roles")
+        results = self.auth_engine.run(self.auth_file)
+        self._set_activity("session-bootstrap", "done", "roles")
+        success = sum(1 for r in results if r.get("success"))
+        self.last_action = f"auth: {success}/{len(results)} roles authenticated"
+        if self.batch_display:
+            self.batch_display._add_to_feed("🔐", "Auth", self.target, self.last_action)
+        self._update_display()
+        self._mark_phase_done("auth")
 
     def _run_classification_phase(self):
         endpoints = self.state.get("endpoints", [])
@@ -871,14 +1138,21 @@ class ReconAgent:
             })
             
             self.last_action = f"classified {len(endpoints)} endpoints"
+        self.phase_status = "done"
         self._update_stats()
+        self._mark_phase_done("classify")
 
     def _run_prioritization_phase(self):
         self._run_endpoint_ranking()
+        self.phase_status = "done"
+        self._update_display()
+        self._mark_phase_done("rank")
 
     def _run_scanning_phase(self):
         before = len(self.state.get("confirmed_vulnerabilities", []))
+        self._set_activity("nuclei/sqlmap/dalfox", "running", "active")
         self.scanning_engine.run()
+        self._set_activity("nuclei/sqlmap/dalfox", "done", "active")
         after = len(self.state.get("confirmed_vulnerabilities", []))
         
         self.stats['payloads_tested'] = min(self.stats.get('payloads_tested', 0) + 25, 100)
@@ -910,25 +1184,55 @@ class ReconAgent:
                         except json.JSONDecodeError:
                             self.logger.warning(f"Invalid JSON line in scan_results: {line}")
         self.state.update(scan_responses=scan_responses)
+        self._mark_phase_done("scan")
 
     def _run_analysis_phase(self):
         responses = self.state.get("scan_responses", [])
         vulnerabilities = []
+        manual_queue = []
         for response in responses:
             if response.get("vulnerable"):
-                vulnerabilities.append({
+                confidence = float(response.get("confidence", 0) or 0)
+                severity = "CRITICAL" if confidence >= 0.9 else "HIGH" if confidence >= 0.75 else "MEDIUM"
+                requires_manual = severity in ("CRITICAL", "HIGH")
+                vuln = {
+                    "name": f"{response.get('category', 'unknown')} finding",
+                    "endpoint": response.get("endpoint"),
                     "url": response.get("endpoint"),
                     "type": response.get("category"),
+                    "severity": severity,
                     "payload": response.get("payload"),
-                    "confidence": response.get("confidence", 0),
-                    "evidence": response.get("reason", "")
-                })
+                    "confidence": confidence,
+                    "evidence": response.get("reason", ""),
+                    "auth_role": response.get("auth_role", "anonymous"),
+                    "requires_manual_validation": requires_manual,
+                    "validated": False
+                }
+                vulnerabilities.append(vuln)
+                if requires_manual:
+                    manual_queue.append(
+                        {
+                            "id": f"{response.get('endpoint')}::{response.get('category')}::{len(manual_queue)+1}",
+                            "endpoint": response.get("endpoint"),
+                            "type": response.get("category"),
+                            "severity": severity,
+                            "evidence": response.get("reason", ""),
+                            "status": "pending_manual_review"
+                        }
+                    )
         self.state.update(confirmed_vulnerabilities=vulnerabilities)
+        self.state.update(manual_validation_required=manual_queue)
+        if manual_queue:
+            queue_file = os.path.join(self.output_dir, "manual_validation_queue.json")
+            with open(queue_file, "w") as f:
+                json.dump(manual_queue, f, indent=2)
         
         if vulnerabilities:
             self.last_action = f"analysis: {len(vulnerabilities)} confirmed"
             self._update_stats()
+        self.phase_status = "done"
         self._update_display()
+        self._mark_phase_done("analyze")
 
     def _run_attack_graph_phase(self, attack_graph: AttackGraph):
         vulnerabilities = self.state.get("confirmed_vulnerabilities", [])
@@ -937,38 +1241,77 @@ class ReconAgent:
             graph_file = os.path.join(self.output_dir, "attack_graph.json")
             attack_graph.save_to_file(graph_file)
             self.last_action = f"graph: built from {len(vulnerabilities)} vulns"
+        self.phase_status = "done"
         self._update_display()
+        self._mark_phase_done("graph")
 
     def _run_chain_planning_phase(self, attack_graph: AttackGraph):
         chains = self.chain_planner.plan_chains_from_graph(attack_graph)
+        manual_playbook = self.chain_planner.build_manual_playbook(chains)
         
         self.chains_data = []
         for i, chain in enumerate(chains[:5], 1):
+            chain_name = chain.get("name") if isinstance(chain, dict) else getattr(chain, "name", f"Chain-{i}")
+            chain_risk = chain.get("risk") if isinstance(chain, dict) else getattr(chain, "risk_level", "MEDIUM")
+            chain_steps = chain.get("steps", []) if isinstance(chain, dict) else getattr(chain, "steps", [])
             chain_info = {
-                'name': f"CHAIN-{i:02d}",
-                'risk': chain.get('risk', 'MEDIUM'),
+                'name': chain_name or f"CHAIN-{i:02d}",
+                'risk': chain_risk or 'MEDIUM',
                 'exploited': False,
                 'partial': False,
                 'steps': [],
                 'result': ''
             }
             
-            steps = chain.get('steps', [])
-            for step in steps[:3]:
+            for step in chain_steps[:3]:
+                step_desc = step.get('description', '') if isinstance(step, dict) else getattr(step, "name", "")
+                step_payload = step.get('payload', '') if isinstance(step, dict) else getattr(step, "payload", "")
                 step_info = {
-                    'desc': step.get('description', ''),
-                    'success': step.get('exploited', False),
-                    'partial': step.get('partial', False),
-                    'payload': step.get('payload', '')
+                    'desc': step_desc,
+                    'success': step.get('exploited', False) if isinstance(step, dict) else False,
+                    'partial': step.get('partial', False) if isinstance(step, dict) else False,
+                    'payload': step_payload
                 }
                 chain_info['steps'].append(step_info)
             
             self.chains_data.append(chain_info)
         
-        self.state.update(exploit_chains=chains)
+        serializable_chains = []
+        for chain in chains:
+            if isinstance(chain, dict):
+                serializable_chains.append(chain)
+            else:
+                serializable_chains.append(
+                    {
+                        "name": getattr(chain, "name", ""),
+                        "description": getattr(chain, "description", ""),
+                        "risk_level": getattr(chain, "risk_level", "MEDIUM"),
+                        "estimated_time": getattr(chain, "estimated_time", "unknown"),
+                        "steps": [
+                            {
+                                "name": getattr(s, "name", ""),
+                                "action": getattr(s, "action", ""),
+                                "target": getattr(s, "target", ""),
+                                "tool": getattr(s, "tool", ""),
+                                "payload": getattr(s, "payload", ""),
+                                "success_indicator": getattr(s, "success_indicator", ""),
+                            }
+                            for s in getattr(chain, "steps", [])
+                        ],
+                    }
+                )
+        self.state.update(exploit_chains=serializable_chains)
+        self.state.update(manual_attack_playbook=manual_playbook)
+        playbook_file = os.path.join(self.output_dir, "manual_attack_playbook.json")
+        with open(playbook_file, "w") as f:
+            json.dump(manual_playbook, f, indent=2)
         if chains:
             self.last_action = f"chains: {len(chains)} attack paths"
+        else:
+            self.last_action = "chains: generated manual playbook"
+        self.phase_status = "done"
         self._update_display()
+        self._mark_phase_done("chain")
 
     def _run_exploit_phase(self):
         chains = self.state.get("exploit_chains", [])
@@ -1000,16 +1343,42 @@ class ReconAgent:
                 self.last_action = f"exploit: {exploited_count} chains successful"
             else:
                 self.last_action = "exploit: no success"
-            
+            self.phase_status = "done"
             self._update_display()
+        self._mark_phase_done("exploit")
 
     def _run_learning_phase(self):
         self.learning_engine.learn_from_iteration(self.state)
         
         failed_payloads = self.learning_engine.get_failed_payloads()
         self.learning_stats['mutated'] = len(failed_payloads)
-        
+        self.phase_status = "done"
         self._update_display()
+        self._mark_phase_done("learn")
+
+    def _select_live_hosts_for_deep_scan(self, limit: int = 50) -> List[Dict]:
+        live_hosts = self.state.get("live_hosts", []) or []
+        scored = []
+        for host in live_hosts:
+            url = host.get("url", "")
+            if not url:
+                continue
+            score = 0
+            code = int(host.get("status_code", 0) or 0)
+            if code == 200:
+                score += 35
+            elif 300 <= code < 400:
+                score += 20
+            elif 400 <= code < 500:
+                score += 10
+            low = url.lower()
+            if any(k in low for k in ("wp", "admin", "login", "api", "graphql", "auth")):
+                score += 25
+            if any(k in low for k in ("staging", "dev", "test", "beta")):
+                score += 10
+            scored.append((score, host))
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [h for _, h in scored[:limit]]
 
     def _check_confidence_threshold(self) -> bool:
         vulnerabilities = self.state.get("confirmed_vulnerabilities", [])
@@ -1061,6 +1430,7 @@ def parse_args():
         formatter_class=argparse.RawTextHelpFormatter
     )
     parser.add_argument("-f", "--file", default="targets.txt", help="File with targets (default: targets.txt)")
+    parser.add_argument("-t", "--target", default="", help="Single target domain (one-shot mode)")
     parser.add_argument("-o", "--output", default=None, help="Output dir")
     parser.add_argument("-v", "--verbose", action="store_true", help="Verbose logging")
     parser.add_argument("--no-exploit", action="store_true", help="Disable exploitation")
@@ -1069,11 +1439,17 @@ def parse_args():
     parser.add_argument("--skip-crawl", action="store_true", help="Skip crawling")
     parser.add_argument("--skip-scan", action="store_true", help="Skip scanning")
     parser.add_argument("--skip-wp", action="store_true", help="Skip WordPress scanning")
+    parser.add_argument("--skip-toolkit", action="store_true", help="Skip external Kali toolkit phase")
     parser.add_argument("--wps-token", default="", help="WPScan API token")
     parser.add_argument("--urls-file", help="File with manual URLs")
     parser.add_argument("--subdomains-file", help="File with manual subdomains")
+    parser.add_argument("--auth-file", help="JSON file with role-based login credentials")
     parser.add_argument("--force-recon", action="store_true", help="Force continue if recon fails")
     parser.add_argument("--max-workers", type=int, default=5, help="Max concurrent workers (default: 5)")
+    parser.add_argument("--skip-auth", action="store_true", help="Skip authenticated session bootstrap")
+    parser.add_argument("--once", action="store_true", help="Run one scheduling cycle and exit")
+    parser.add_argument("--no-resume", action="store_true", help="Always start fresh run (disable auto-resume)")
+    parser.add_argument("--aggressive", action="store_true", help=argparse.SUPPRESS)
 
     return parser.parse_args()
 
@@ -1106,6 +1482,32 @@ def load_targets(filepath: str) -> tuple[list, int]:
     return unique_targets, total_lines
 
 
+def _find_resume_dir(base_output: str, domain: str) -> Optional[str]:
+    """
+    Find latest incomplete run folder for a domain.
+    Incomplete means state exists but final_report.json is not present.
+    """
+    domain_safe = domain.replace(".", "_")
+    patterns = [
+        os.path.join(base_output, f"{domain_safe}_*"),
+        os.path.join(base_output, f"{domain}_*"),
+    ]
+    candidates = []
+    for pattern in patterns:
+        candidates.extend([p for p in glob(pattern) if os.path.isdir(p)])
+    candidates = list(dict.fromkeys(candidates))
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    for folder in candidates:
+        state_file = os.path.join(folder, "state.json")
+        final_report = os.path.join(folder, "final_report.json")
+        if os.path.exists(state_file) and not os.path.exists(final_report):
+            return folder
+    return None
+
+
 def process_single_target(domain: str, output_dir: str, options: dict, args, batch_display: BatchDisplay):
     """Process one target (for batch mode)"""
     try:
@@ -1117,6 +1519,7 @@ def process_single_target(domain: str, output_dir: str, options: dict, args, bat
             wps_token=args.wps_token,
             urls_file=getattr(args, 'urls_file', ''),
             subdomains_file=getattr(args, 'subdomains_file', ''),
+            auth_file=getattr(args, 'auth_file', ''),
             force_recon=getattr(args, 'force_recon', False),
             batch_display=batch_display,
             api_status=check_api_keys()
@@ -1170,10 +1573,16 @@ def run_batch(targets_file: str, options: dict, args):
                     domain = display.promote_from_queue()
                     if not domain:
                         break
-                    
-                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    domain_safe = domain.replace(".", "_")
-                    domain_output = os.path.join(base_output, f"{domain_safe}_{timestamp}")
+                    domain_output = None
+                    if not getattr(args, "no_resume", False):
+                        domain_output = _find_resume_dir(base_output, domain)
+                        if domain_output:
+                            display._add_to_feed("♻️", "Resume", domain, f"Continue {os.path.basename(domain_output)}")
+
+                    if not domain_output:
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        domain_safe = domain.replace(".", "_")
+                        domain_output = os.path.join(base_output, f"{domain_safe}_{timestamp}")
                     
                     future = executor.submit(
                         process_single_target, 
@@ -1195,6 +1604,9 @@ def run_batch(targets_file: str, options: dict, args):
                 for domain in done:
                     del futures[domain]
                 
+                if getattr(args, "once", False) and processed and not futures:
+                    break
+
                 time.sleep(10)
                 
     except KeyboardInterrupt:
@@ -1211,11 +1623,21 @@ def main():
         "skip_recon": args.skip_recon,
         "skip_live_hosts": args.skip_live,
         "skip_crawl": args.skip_crawl,
+        "skip_auth": args.skip_auth,
         "skip_scan": args.skip_scan,
         "skip_wordpress": args.skip_wp,
+        "skip_toolkit": args.skip_toolkit,
         "skip_exploit": args.no_exploit,
         "verbose": args.verbose,
+        "aggressive": True,
     }
+
+    if args.target:
+        target_file = "/tmp/ai_recon_single_target.txt"
+        with open(target_file, "w") as f:
+            f.write(args.target.strip() + "\n")
+        args.file = target_file
+        args.once = True
 
     # Chạy batch mode
     run_batch(args.file, options, args)

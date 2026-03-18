@@ -28,23 +28,38 @@ class ScanState:
     
     # Phase 3 - Crawling
     urls: List[str] = field(default_factory=list)
+    archived_urls: List[str] = field(default_factory=list)
     endpoints: List[Dict] = field(default_factory=list)
-    
+
     # Phase 4 - Prioritized endpoints
     prioritized_endpoints: List[Dict] = field(default_factory=list)
-    
+    tech_stack: List[str] = field(default_factory=list)
+
     # Phase 5 - Vulnerabilities
     vulnerabilities: List[Dict] = field(default_factory=list)
-    
+    confirmed_vulnerabilities: List[Dict] = field(default_factory=list)
+    scan_responses: List[Dict] = field(default_factory=list)
+    scan_metadata: Dict[str, Any] = field(default_factory=dict)
+
     # Phase 6 - WordPress
     wordpress_detected: bool = False
+    wp_sites: List[str] = field(default_factory=list)
     wp_plugins: List[Dict] = field(default_factory=list)
     wp_themes: List[Dict] = field(default_factory=list)
     wp_users: List[str] = field(default_factory=list)
     wp_vulns: List[Dict] = field(default_factory=list)
-    
+    wp_vulnerabilities: List[Dict] = field(default_factory=list)
+    wp_conditioned_findings: List[Dict] = field(default_factory=list)
+
     # Phase 7 - Exploit results
+    exploit_chains: List[Dict] = field(default_factory=list)
     exploit_results: List[Dict] = field(default_factory=list)
+    external_findings: List[Dict] = field(default_factory=list)
+    mutated_payloads: List[Any] = field(default_factory=list)
+    authenticated_sessions: List[Dict] = field(default_factory=list)
+    manual_validation_required: List[Dict] = field(default_factory=list)
+    manual_validation_completed: List[Dict] = field(default_factory=list)
+    manual_attack_playbook: List[Dict] = field(default_factory=list)
     
     # Meta
     current_phase: str = "init"
@@ -142,7 +157,7 @@ class StateManager:
             "live_hosts": len(s.live_hosts),
             "urls": len(s.urls),
             "endpoints": len(s.endpoints),
-            "vulnerabilities": len(s.vulnerabilities),
+            "vulnerabilities": len(s.confirmed_vulnerabilities or s.vulnerabilities),
             "exploit_results": len(s.exploit_results),
             "wordpress": s.wordpress_detected,
             "wp_plugins": len(s.wp_plugins),

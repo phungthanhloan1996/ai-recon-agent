@@ -27,6 +27,7 @@ class LiveHostEngine:
         self.http_client = HTTPClient()
         self.live_file = os.path.join(output_dir, "live_hosts.txt")
         self.results_file = os.path.join(output_dir, "live_hosts.json")
+        self.budget = (self.state.get("scan_metadata", {}) or {}).get("budget", {})
 
         # Common ports to probe
         self.ports = [80, 443, 8080, 8443, 8888, 3000, 5000, 4443, 9000]
@@ -53,33 +54,49 @@ class LiveHostEngine:
         logger.info(f"[LIVE] Probing {len(targets)} targets...")
 
         live_hosts = []
+        primary_limit = int(self.budget.get("live_primary_targets", 220))
+        secondary_limit = int(self.budget.get("live_secondary_targets", 90))
+        secondary_ports = self.ports[2: 2 + int(self.budget.get("live_ports_secondary", 4))]
+        timeout = int(self.budget.get("live_timeout", 6))
 
-        # Use thread pool for concurrent probing
-        with ThreadPoolExecutor(max_workers=20) as executor:
+        primary_targets = targets[:primary_limit]
+        if not primary_targets:
+            self._save_results([])
+            return []
+
+        # Queue 1: fast primary probing (80/443 only)
+        primary_candidates = []
+        with ThreadPoolExecutor(max_workers=30) as executor:
             futures = []
-
-            for target in targets:
-                # Probe both HTTP and HTTPS for each target
-                for port in [80, 443]:
-                    protocol = "https" if port == 443 else "http"
-                    url = f"{protocol}://{target}"
-
-                    futures.append(executor.submit(self.probe_host, url))
-
-                # Also probe alternative ports
-                for port in self.ports[2:]:  # Skip 80, 443 already done
-                    for protocol in ["http", "https"]:
-                        url = f"{protocol}://{target}:{port}"
-                        futures.append(executor.submit(self.probe_host, url))
-
-            # Collect results
+            for target in primary_targets:
+                futures.append(executor.submit(self.probe_host, f"https://{target}", timeout))
+                futures.append(executor.submit(self.probe_host, f"http://{target}", timeout))
             for future in as_completed(futures):
                 try:
                     result = future.result()
                     if result:
                         live_hosts.append(result)
+                        host = result["url"].split("://", 1)[-1].split(":", 1)[0].split("/", 1)[0]
+                        primary_candidates.append(host)
                 except Exception as e:
                     logger.debug(f"[LIVE] Probe error: {e}")
+
+        # Queue 2: deeper port probing only on hosts that were alive in queue 1.
+        secondary_hosts = list(dict.fromkeys(primary_candidates))[:secondary_limit]
+        if secondary_hosts and secondary_ports:
+            with ThreadPoolExecutor(max_workers=20) as executor:
+                futures = []
+                for host in secondary_hosts:
+                    for port in secondary_ports:
+                        futures.append(executor.submit(self.probe_host, f"http://{host}:{port}", timeout))
+                        futures.append(executor.submit(self.probe_host, f"https://{host}:{port}", timeout))
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        if result:
+                            live_hosts.append(result)
+                    except Exception as e:
+                        logger.debug(f"[LIVE] Secondary probe error: {e}")
 
         # Remove duplicates and sort
         unique_hosts = self._deduplicate_hosts(live_hosts)
@@ -90,15 +107,16 @@ class LiveHostEngine:
         logger.info(f"[LIVE] Found {len(unique_hosts)} live hosts")
         return unique_hosts
 
-    def probe_host(self, url: str) -> Dict[str, Any]:
+    def probe_host(self, url: str, timeout: int = 10) -> Dict[str, Any]:
         """Probe a single host URL"""
         try:
-            response = self.http_client.get(url, timeout=10, allow_redirects=True)
+            response = self.http_client.get(url, timeout=timeout, allow_redirects=True)
 
             if response.status_code < 400:  # Consider 2xx, 3xx as live
                 host_info = {
                     "url": url,
                     "status": response.status_code,
+                    "status_code": response.status_code,
                     "title": self._extract_title(response.text),
                     "tech": self._detect_technologies(response),
                     "content_length": len(response.text),
@@ -188,7 +206,8 @@ class LiveHostEngine:
         # Save text file
         with open(self.live_file, "w") as f:
             for host in hosts:
-                line = f"{host['url']} [{host['status']}] {host['title']}"
+                status = host.get("status_code", host.get("status", ""))
+                line = f"{host['url']} [{status}] {host['title']}"
                 f.write(line + "\n")
 
         logger.info(f"[LIVE] Saved {len(hosts)} live hosts → {self.live_file}")

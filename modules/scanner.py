@@ -19,6 +19,7 @@ from ai.payload_mutation import PayloadMutator
 from learning.learning_engine import LearningEngine
 from integrations.dalfox_runner import DalfoxRunner
 from integrations.nuclei_runner import NucleiRunner
+from core.executor import run_command, tool_available
 
 logger = logging.getLogger("recon.scanning")
 
@@ -49,7 +50,8 @@ class ScanningEngine:
         logger.info("[SCANNING] Starting AI-driven vulnerability scanning")
 
         prioritized_endpoints = self.state.get("prioritized_endpoints", [])
-        self.max_endpoints = self.state.get("max_endpoints", 100)
+        budget = (self.state.get("scan_metadata", {}) or {}).get("budget", {})
+        self.max_endpoints = int(self.state.get("max_endpoints", budget.get("scan_prioritized_endpoints", 140)))
 
         # Use parallel execution for scanning endpoints
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
@@ -80,6 +82,7 @@ class ScanningEngine:
         logger.debug(f"[SCANNING] Scanning {url} (categories: {categories})")
 
         responses = []
+        auth_contexts = self._get_auth_contexts()
 
         # Get baseline response (normal request without payload)
         baseline_response = self.get_baseline_response(url)
@@ -135,26 +138,29 @@ class ScanningEngine:
                         logger.warning(f"Skipping unknown payload type: {type(payload_item)}")
                         continue
 
-                    response = self.test_payload(url, payload, category, baseline_response)
-                    responses.append(response)
+                    for auth_ctx in auth_contexts:
+                        response = self.test_payload(url, payload, category, baseline_response, auth_ctx)
+                        response["auth_role"] = auth_ctx.get("role")
+                        responses.append(response)
 
-                    if response.get("vulnerable"):
-                        self.learning_engine.add_successful_payload(payload, category)
-                    else:
-                        # Mutate and retry on failure - using the original string value
-                        payload_value = payload.get("value", "")
-                        if not isinstance(payload_value, str):
-                            continue # Cannot mutate non-string value
+                        if response.get("vulnerable"):
+                            self.learning_engine.add_successful_payload(payload, category)
+                        else:
+                            # Mutate and retry on failure - using the original string value
+                            payload_value = payload.get("value", "")
+                            if not isinstance(payload_value, str):
+                                continue  # Cannot mutate non-string value
 
-                        mutated = self.payload_mutator.mutate_payloads([payload_value])
-                        for p_str in mutated[:2]:
-                            # Normalize again for testing
-                            p = {"value": p_str, "method": "GET", "params": {}}
-                            resp = self.test_payload(url, p, category, baseline_response)
-                            responses.append(resp)
-                            if resp.get("vulnerable"):
-                                self.learning_engine.add_successful_payload(p, category)
-                                break
+                            mutated = self.payload_mutator.mutate_payloads([payload_value])
+                            for p_str in mutated[:2]:
+                                # Normalize again for testing
+                                p = {"value": p_str, "method": "GET", "params": {}}
+                                resp = self.test_payload(url, p, category, baseline_response, auth_ctx)
+                                resp["auth_role"] = auth_ctx.get("role")
+                                responses.append(resp)
+                                if resp.get("vulnerable"):
+                                    self.learning_engine.add_successful_payload(p, category)
+                                    break
 
                     # Small delay to avoid overwhelming
                     time.sleep(0.1)
@@ -172,7 +178,7 @@ class ScanningEngine:
             # Detect tech stack
             tech_detected = self._detect_tech_stack(response)
             if tech_detected:
-                current_tech = self.state.get("tech_stack", set())
+                current_tech = set(self.state.get("tech_stack", []))
                 current_tech.update(tech_detected)
                 self.state.update(tech_stack=list(current_tech))
             
@@ -243,11 +249,21 @@ class ScanningEngine:
             return 20  # More payloads for high-risk categories
         return 10  # Default
 
-    def test_payload(self, url: str, payload: Dict[str, Any], category: str, baseline: Dict[str, Any]) -> Dict[str, Any]:
+    def test_payload(
+        self,
+        url: str,
+        payload: Dict[str, Any],
+        category: str,
+        baseline: Dict[str, Any],
+        auth_ctx: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
         """Test a single payload against an endpoint with baseline comparison and WAF bypass"""
         payload_value = payload.get("value", "")
         method = payload.get("method", "GET")
         params = payload.get("params", {})
+        auth_ctx = auth_ctx or {}
+        req_headers = auth_ctx.get("headers", {}) or {}
+        req_cookies = auth_ctx.get("cookies", {}) or {}
 
         max_retries = 3
         mutations = self.payload_mutator._apply_waf_bypass(payload_value)
@@ -261,17 +277,28 @@ class ScanningEngine:
                 try:
                     # Prepare request
                     if method == "GET":
-                        test_url = url
-                        if "?" in url:
-                            test_url += f"&{urllib.parse.quote(mutation)}"
+                        parsed = urllib.parse.urlparse(url)
+                        query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                        if query_pairs:
+                            first_key = query_pairs[0][0]
+                            query_pairs[0] = (first_key, mutation)
                         else:
-                            test_url += f"?{urllib.parse.quote(mutation)}"
-                        response = self.http_client.get(test_url, timeout=10)
+                            inject_key = next(iter(params.keys()), "q") if isinstance(params, dict) else "q"
+                            query_pairs.append((inject_key, mutation))
+                        new_query = urllib.parse.urlencode(query_pairs, doseq=True)
+                        test_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
+                        response = self.http_client.get(test_url, timeout=10, headers=req_headers, cookies=req_cookies)
                     elif method == "POST":
-                        response = self.http_client.post(url, data=params, timeout=10)
+                        post_data = dict(params) if isinstance(params, dict) else {}
+                        if post_data:
+                            first_key = next(iter(post_data.keys()))
+                            post_data[first_key] = mutation
+                        else:
+                            post_data = {"q": mutation}
+                        response = self.http_client.post(url, data=post_data, timeout=10, headers=req_headers, cookies=req_cookies)
                     else:
                         # Default to GET
-                        response = self.http_client.get(url, timeout=10)
+                        response = self.http_client.get(url, timeout=10, headers=req_headers, cookies=req_cookies)
 
                     # Check for WAF blocking
                     if self._is_waf_blocked(response):
@@ -286,7 +313,7 @@ class ScanningEngine:
                         logger.info(f"[WAF] Bypass successful with mutation for {url}")
 
                     # Analyze response with baseline comparison
-                    analysis = self.analyze_response(response, baseline, payload, category)
+                    analysis = self.analyze_response(response, baseline, {"value": mutation}, category)
 
                     if analysis.get("vulnerable"):
                         logger.info(f"[VULN] Potential {category} vulnerability detected on {url} (confidence: {analysis.get('confidence', 0)})")
@@ -538,15 +565,49 @@ class ScanningEngine:
 
     def _detect_sqli_potential(self, endpoint: Dict[str, Any]) -> bool:
         """Detect if endpoint is likely vulnerable to SQLi"""
-        url = endpoint.get("url", "")
         parameters = endpoint.get("parameters", [])
-        return len(parameters) > 0 and any(p.get("type") in ["query", "form"] for p in parameters)
+        if not parameters:
+            return False
+        dangerous = {"id", "user", "uid", "page", "item", "cat", "query", "search", "q"}
+        return any(str(p).lower() in dangerous for p in parameters)
 
     def _detect_xss_potential(self, endpoint: Dict[str, Any]) -> bool:
         """Detect if endpoint is likely vulnerable to XSS"""
-        url = endpoint.get("url", "")
         parameters = endpoint.get("parameters", [])
         return len(parameters) > 0
+
+    def _get_auth_contexts(self) -> List[Dict[str, Any]]:
+        """Return contexts for unauthenticated + authenticated role scans."""
+        contexts = [{"role": "anonymous", "cookies": {}, "headers": {}}]
+        sessions = self.state.get("authenticated_sessions", [])
+        for item in sessions:
+            if item.get("success"):
+                contexts.append(
+                    {
+                        "role": item.get("role", "unknown"),
+                        "cookies": item.get("cookies", {}) or {},
+                        "headers": item.get("headers", {}) or {},
+                    }
+                )
+            if len(contexts) >= 4:
+                break
+        return contexts
+
+    def _run_sqlmap(self, url: str, parameters: List[str]):
+        """Best-effort sqlmap execution for high-signal parameterized endpoints."""
+        if not tool_available("sqlmap"):
+            return
+        marker = parameters[0] if parameters else "id"
+        target = url if "?" in url else f"{url}?{marker}=1"
+        cmd = ["sqlmap", "-u", target, "--batch", "--level=2", "--risk=1", "--smart"]
+        ret, out, err = run_command(cmd, timeout=180)
+        if ret == 0 and out:
+            vuln = {"type": "sqli", "url": target, "tool": "sqlmap", "output": out[:2000]}
+            current_vulns = self.state.get("vulnerabilities", [])
+            current_vulns.append(vuln)
+            self.state.update(vulnerabilities=current_vulns)
+        elif ret not in (0, -1):
+            logger.debug(f"[SCANNING] sqlmap non-zero for {target}: {err[:120]}")
 
     def _detect_xss_context(self, response_text: str) -> str:
         """Detect XSS context from response"""

@@ -7,7 +7,7 @@ import json
 import os
 import logging
 import requests
-from typing import Dict
+from typing import Dict, Any
 
 logger = logging.getLogger("recon.session")
 
@@ -17,6 +17,7 @@ class SessionManager:
         self.session_file = os.path.join(output_dir, "session.json")
         self.cookies = {}
         self.headers = {}
+        self.roles = {}
 
     def login(self, login_url: str, credentials: Dict[str, str]) -> bool:
         """Attempt login and save session"""
@@ -41,9 +42,18 @@ class SessionManager:
         """Get cookies and headers for scanning"""
         return {"cookies": self.cookies, "headers": self.headers}
 
+    def set_role_session(self, role: str, cookies: Dict[str, Any], headers: Dict[str, Any]):
+        """Store authenticated session data for a role."""
+        self.roles[role] = {"cookies": cookies or {}, "headers": headers or {}}
+        self._save_session()
+
     def _save_session(self):
         with open(self.session_file, "w") as f:
-            json.dump({"cookies": self.cookies, "headers": self.headers}, f, indent=2)
+            json.dump(
+                {"cookies": self.cookies, "headers": self.headers, "roles": self.roles},
+                f,
+                indent=2
+            )
         logger.info(f"[SESSION] Saved session → {self.session_file}")
 
     def load_session(self):
@@ -53,18 +63,18 @@ class SessionManager:
                 data = json.load(f)
                 self.cookies = data.get("cookies", {})
                 self.headers = data.get("headers", {})
+                self.roles = data.get("roles", {})
             logger.info("[SESSION] Loaded existing session")
 
-    def update_from_response(self, response):
-        """Update session from HTTP response (cookies, etc.)"""
-        if hasattr(response, 'cookies') and response.cookies:
-            self.cookies.update(dict(response.cookies))
-            self._save_session()
-            logger.debug("[SESSION] Updated cookies from response")
-
-
-
     def update_from_response(self, response: requests.Response):
-        """Update cookies from response"""
-        if response.cookies:
-            self.cookies.update(dict(response.cookies))
+        """Update session cookies from an HTTP response."""
+        if hasattr(response, "cookies") and response.cookies:
+            incoming = dict(response.cookies)
+            changed = False
+            for key, value in incoming.items():
+                if self.cookies.get(key) != value:
+                    self.cookies[key] = value
+                    changed = True
+            if changed:
+                self._save_session()
+                logger.debug("[SESSION] Updated cookies from response")

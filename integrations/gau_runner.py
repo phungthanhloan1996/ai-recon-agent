@@ -47,7 +47,7 @@ class GAURunner:
         except Exception:
             return False
 
-    def fetch_urls(self, domain: str, max_urls: int = 10000) -> List[str]:
+    def fetch_urls(self, domain: str, max_urls: int = 10000, timeout: int = 120) -> List[str]:
         """
         Fetch archived URLs for a domain using GAU
 
@@ -70,7 +70,6 @@ class GAURunner:
             cmd = [
                 self.gau_path,
                 "--threads", "10",
-                "--verbose",
                 "--subs",  # Include subdomains
                 domain
             ]
@@ -80,7 +79,7 @@ class GAURunner:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=300  # 5 minute timeout
+                timeout=timeout
             )
 
             if result.returncode == 0:

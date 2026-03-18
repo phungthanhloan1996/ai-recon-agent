@@ -51,6 +51,29 @@ class LearningEngine:
         except Exception as e:
             logger.error(f"Failed to save {filepath}: {e}")
 
+    def add_successful_payload(self, payload: Dict[str, Any], vuln_type: str = ""):
+        """Record a successful payload from scanner/exploit engines."""
+        value = payload.get("value", "") if isinstance(payload, dict) else str(payload)
+        payload_category = payload.get("category", "") if isinstance(payload, dict) else ""
+        record = {
+            "payload": value,
+            "vuln_type": vuln_type or payload_category,
+            "timestamp": datetime.now().isoformat(),
+        }
+        self.successful_payloads.append(record)
+        self._save_payloads(self.successful_payloads, self.successful_payloads_file)
+
+    def add_failed_payload(self, payload: Dict[str, Any], reason: str = ""):
+        """Record a failed payload attempt."""
+        value = payload.get("value", "") if isinstance(payload, dict) else str(payload)
+        record = {
+            "payload": value,
+            "reason": reason or "failed_attempt",
+            "timestamp": datetime.now().isoformat(),
+        }
+        self.failed_payloads.append(record)
+        self._save_payloads(self.failed_payloads, self.failed_payloads_file)
+
     def learn_from_iteration(self, state):
         """Learn from the current iteration's results"""
         # Extract successful exploits

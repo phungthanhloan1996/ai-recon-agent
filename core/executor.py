@@ -46,12 +46,20 @@ def run_command(
     Returns (returncode, stdout, stderr)
     """
     tool = cmd[0]
-    
-    # Check tool availability
-    if not shutil.which(tool):
+    resolved_tool = shutil.which(tool)
+    if not resolved_tool:
+        for candidate in (
+            os.path.expanduser(f"~/go/bin/{tool}"),
+            os.path.expanduser(f"~/.local/bin/{tool}"),
+        ):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                resolved_tool = candidate
+                break
+    if not resolved_tool:
         msg = f"Tool not found: {tool} (install it or add to PATH)"
         logger.warning(f"[EXEC] {msg}")
         return -1, "", msg
+    cmd[0] = resolved_tool
 
     cmd_str = " ".join(str(c) for c in cmd)
     logger.info(f"[EXEC] Running: {cmd_str}")
@@ -96,7 +104,13 @@ def run_command(
 
 def tool_available(name: str) -> bool:
     """Check if a CLI tool is available"""
-    return shutil.which(name) is not None
+    if shutil.which(name) is not None:
+        return True
+    extra_candidates = [
+        os.path.expanduser(f"~/go/bin/{name}"),
+        os.path.expanduser(f"~/.local/bin/{name}"),
+    ]
+    return any(os.path.isfile(p) and os.access(p, os.X_OK) for p in extra_candidates)
 
 
 def check_tools(tools: List[str]) -> dict:

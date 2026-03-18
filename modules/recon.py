@@ -8,13 +8,15 @@ import os
 import logging
 import ssl
 import socket
+import time
+from urllib.parse import urlparse
 from urllib.parse import urljoin, quote
 import urllib.request
-from typing import List, Set, Dict
+from typing import List, Set, Dict, Callable, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.state_manager import StateManager
-from core.executor import check_tools, run_command
+from core.executor import check_tools, run_command, tool_available
 from integrations.subfinder_runner import SubfinderRunner
 from integrations.gau_runner import GAURunner
 from integrations.wayback_runner import WaybackRunner
@@ -48,26 +50,51 @@ class ReconEngine:
         self.subfinder = SubfinderRunner(output_dir)
         self.gau = GAURunner(output_dir)
         self.wayback = WaybackRunner()
+        self.budget = (self.state.get("scan_metadata", {}) or {}).get("budget", {})
+        self.cache_file = os.path.join(os.path.dirname(__file__), "../data/recon_cache.json")
 
-    def run(self):
+    def run(self, progress_cb: Optional[Callable[[str, str, str], None]] = None):
         """Execute full reconnaissance pipeline"""
         logger.info(f"[RECON] Starting reconnaissance for {self.target}")
+        if progress_cb:
+            progress_cb("recon", "subfinder+assetfinder+amass+crtsh", "running")
+        cache = self._load_recon_cache()
+        if cache:
+            subdomains = cache.get("subdomains", [])
+            archived_urls = cache.get("archived_urls", [])
+            self.state.update(subdomains=subdomains, archived_urls=archived_urls)
+            if progress_cb:
+                progress_cb("recon", "cache", "hit")
+        else:
+            # Multi-source subdomain discovery
+            subdomains = self.discover_subdomains()
+            self.state.update(subdomains=subdomains)
+            if progress_cb:
+                progress_cb("recon", "subfinder+assetfinder+amass+crtsh", "done")
+                progress_cb("recon", "wayback+gau+waybackurls", "running")
 
-        # Multi-source subdomain discovery
-        subdomains = self.discover_subdomains()
-        self.state.update(subdomains=subdomains)
-
-        # Archived URL discovery
-        archived_urls = self.discover_archived_urls()
-        self.state.update(archived_urls=archived_urls)
+            # Archived URL discovery
+            archived_urls = self.discover_archived_urls()
+            self.state.update(archived_urls=archived_urls)
+            self._save_recon_cache(subdomains, archived_urls)
+            if progress_cb:
+                progress_cb("recon", "wayback+gau+waybackurls", "done")
 
         # Merge and deduplicate
+        if progress_cb:
+            progress_cb("recon", "url-normalize", "running")
         all_urls = self.merge_url_sources(subdomains, archived_urls)
         self.state.update(urls=all_urls)
+        if progress_cb:
+            progress_cb("recon", "url-normalize", "done")
 
         # Validate live hosts
+        if progress_cb:
+            progress_cb("recon", "http-validate", "running")
         live_hosts = self.validate_live_hosts(all_urls)
         self.state.update(live_hosts=live_hosts)
+        if progress_cb:
+            progress_cb("recon", "http-validate", "done")
 
         # CRITICAL: Check if we have minimum data to continue
         min_subdomains = 1  # At least the main domain
@@ -120,15 +147,103 @@ class ReconEngine:
 
         logger.info(f"[RECON] Completed: {len(subdomains)} subdomains, {len(archived_urls)} archived URLs, {len(live_hosts)} live hosts")
 
+    def _load_recon_cache(self) -> Optional[Dict[str, List[str]]]:
+        ttl_hours = int(self.budget.get("recon_cache_ttl_hours", 24))
+        if ttl_hours <= 0 or not os.path.exists(self.cache_file):
+            return None
+        try:
+            with open(self.cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            entry = data.get(self.target)
+            if not entry:
+                return None
+            ts = float(entry.get("timestamp", 0))
+            if ts <= 0:
+                return None
+            age_hours = (time.time() - ts) / 3600.0
+            if age_hours > ttl_hours:
+                return None
+            subdomains = entry.get("subdomains", []) or []
+            archived_urls = entry.get("archived_urls", []) or []
+            if not subdomains and not archived_urls:
+                return None
+            logger.info(f"[RECON] Cache hit: subs={len(subdomains)} urls={len(archived_urls)} age={age_hours:.1f}h")
+            return {"subdomains": subdomains, "archived_urls": archived_urls}
+        except Exception as e:
+            logger.debug(f"[RECON] Cache read error: {e}")
+            return None
+
+    def _save_recon_cache(self, subdomains: List[str], archived_urls: List[str]):
+        try:
+            os.makedirs(os.path.dirname(self.cache_file), exist_ok=True)
+            data = {}
+            if os.path.exists(self.cache_file):
+                with open(self.cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            data[self.target] = {
+                "timestamp": time.time(),
+                "subdomains": list(dict.fromkeys(subdomains))[:5000],
+                "archived_urls": list(dict.fromkeys(archived_urls))[:8000],
+            }
+            with open(self.cache_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.debug(f"[RECON] Cache write error: {e}")
+
     def discover_subdomains(self) -> List[str]:
         """Discover subdomains using passive techniques"""
         logger.info("[RECON] Discovering subdomains")
 
-        subdomains = set()
+        subdomains: Set[str] = set()
+        source_map: Dict[str, Set[str]] = {}
 
         # Subfinder (passive sources)
         subfinder_subs = self.subfinder.discover_subdomains(self.target)
         subdomains.update(subfinder_subs)
+        for sub in subfinder_subs:
+            source_map.setdefault(sub.lower(), set()).add("subfinder")
+
+        # Assetfinder
+        if tool_available("assetfinder"):
+            rc, stdout, _ = run_command(["assetfinder", "--subs-only", self.target], timeout=120)
+            if rc == 0 and stdout:
+                assetfinder_subs = {
+                    s.strip().lower()
+                    for s in stdout.splitlines()
+                    if s.strip() and s.strip().lower().endswith(self.target)
+                }
+                subdomains.update(assetfinder_subs)
+                for sub in assetfinder_subs:
+                    source_map.setdefault(sub, set()).add("assetfinder")
+
+        # Amass passive
+        if tool_available("amass"):
+            amass_timeout = int(os.environ.get("AMASS_TIMEOUT", "45"))
+            rc, stdout, _ = run_command(
+                ["amass", "enum", "-passive", "-norecursive", "-noalts", "-d", self.target, "-silent"],
+                timeout=amass_timeout,
+            )
+            if rc == 0 and stdout:
+                amass_subs = {
+                    s.strip().lower()
+                    for s in stdout.splitlines()
+                    if s.strip() and s.strip().lower().endswith(self.target)
+                }
+                subdomains.update(amass_subs)
+                for sub in amass_subs:
+                    source_map.setdefault(sub, set()).add("amass")
+            elif rc == -2:
+                logger.warning(f"[RECON] Amass timed out after {amass_timeout}s; continuing with other sources")
+
+        # CRT.sh (small passive boost)
+        crt_subs = set(self.fallback_cert_transparency())
+        subdomains.update(crt_subs)
+        for sub in crt_subs:
+            source_map.setdefault(sub.lower(), set()).add("crtsh")
+
+        # DNS verification to improve accuracy while preserving breadth
+        verified = self._verify_subdomains_dns(list(subdomains), source_map)
+        subdomains = set(verified)
 
         # Could add more sources here (crt.sh, etc.)
 
@@ -136,6 +251,13 @@ class ReconEngine:
         subdomains_file = os.path.join(self.output_dir, "subdomains.txt")
         with open(subdomains_file, 'w') as f:
             f.write('\\n'.join(sorted(subdomains)))
+        score_file = os.path.join(self.output_dir, "subdomains_scored.json")
+        scored = []
+        for sub in sorted(subdomains):
+            sources = sorted(source_map.get(sub, set()))
+            scored.append({"subdomain": sub, "sources": sources, "source_count": len(sources)})
+        with open(score_file, "w") as f:
+            json.dump(scored, f, indent=2)
 
         logger.info(f"[RECON] Found {len(subdomains)} unique subdomains")
         return list(subdomains)
@@ -151,8 +273,20 @@ class ReconEngine:
         urls.update(wayback_urls)
 
         # GetAllURLs (GAU)
-        gau_urls = self.gau.fetch_urls(self.target, max_urls=2000)
+        gau_timeout = int(self.budget.get("recon_gau_timeout", 120))
+        gau_urls = self.gau.fetch_urls(self.target, max_urls=2000, timeout=gau_timeout)
         urls.update(gau_urls)
+
+        # waybackurls
+        if tool_available("waybackurls"):
+            rc, stdout, _ = run_command(["waybackurls"], timeout=120, stdin_data=f"{self.target}\n")
+            if rc == 0 and stdout:
+                wb_urls = {
+                    u.strip()
+                    for u in stdout.splitlines()
+                    if u.strip().startswith(("http://", "https://"))
+                }
+                urls.update(wb_urls)
 
         # Save to file
         archived_file = os.path.join(self.output_dir, "archived_urls.txt")
@@ -161,6 +295,42 @@ class ReconEngine:
 
         logger.info(f"[RECON] Found {len(urls)} archived URLs")
         return list(urls)
+
+    def _verify_subdomains_dns(self, subs: List[str], source_map: Dict[str, Set[str]]) -> List[str]:
+        """
+        Keep broad coverage but improve accuracy:
+        - include DNS-resolved subdomains
+        - include unresolved only when seen by >=2 independent sources
+        """
+        if not subs:
+            return []
+        limit = int(self.budget.get("recon_dns_verify_limit", 500))
+        sample = list(dict.fromkeys([s.lower() for s in subs]))[:limit]
+        resolved: Set[str] = set()
+
+        def resolve(sub: str) -> Optional[str]:
+            try:
+                socket.gethostbyname(sub)
+                return sub
+            except Exception:
+                return None
+
+        with ThreadPoolExecutor(max_workers=25) as executor:
+            futures = [executor.submit(resolve, sub) for sub in sample]
+            for future in as_completed(futures):
+                r = future.result()
+                if r:
+                    resolved.add(r)
+
+        high_conf_unresolved = {
+            sub for sub in sample
+            if sub not in resolved and len(source_map.get(sub, set())) >= 2
+        }
+        merged = sorted(resolved | high_conf_unresolved)
+        logger.info(
+            f"[RECON] DNS verify: resolved={len(resolved)} kept_unresolved={len(high_conf_unresolved)} total={len(merged)}"
+        )
+        return merged
 
     def merge_url_sources(self, subdomains: List[str], archived_urls: List[str]) -> List[str]:
         """Merge and deduplicate URLs from all sources"""
@@ -194,11 +364,12 @@ class ReconEngine:
         
         session = SessionManager(self.output_dir)
         http_client = HTTPClient(session)
+        http_client.min_delay = 0.0
 
         # Check URLs in parallel
         def check_url(url):
             try:
-                response = http_client.get(url, timeout=10)
+                response = http_client.get(url, timeout=timeout)
                 if response.status_code < 500:  # Consider 4xx as live too
                     return {
                         "url": url,
@@ -210,20 +381,26 @@ class ReconEngine:
                 pass
             return None
 
+        max_urls = int(self.budget.get("recon_validate_urls", 120))
+        timeout = int(self.budget.get("live_timeout", 6))
+        workers = int(self.budget.get("recon_validate_workers", 16))
+
         # Use ThreadPoolExecutor for parallel checking
-        with ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(check_url, url) for url in urls[:200]]  # Limit to 200 URLs
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            sample_urls = urls[:max_urls]
+            futures = [executor.submit(check_url, url) for url in sample_urls]
             for future in as_completed(futures):
                 result = future.result()
                 if result:
                     live_hosts.append(result)
 
-        logger.info(f"[RECON] Validated {len(live_hosts)} live hosts out of {len(urls[:200])} checked")
+        logger.info(f"[RECON] Validated {len(live_hosts)} live hosts out of {len(sample_urls)} checked")
         return live_hosts
 
     def fallback_direct_probing(self) -> List[str]:
         """Generate common paths for direct probing fallback"""
         logger.info(f"[RECON] Generating direct probe URLs for {self.target}")
+        urls = []
         common_paths = [
             '', '/', '/admin', '/login', '/wp-admin', '/administrator', '/dashboard',
             '/panel', '/cpanel', '/admin.php', '/login.php', '/index.php', '/sitemap.xml',

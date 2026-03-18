@@ -21,6 +21,7 @@ class SubfinderRunner:
     def __init__(self, output_dir: str):
         self.output_dir = output_dir
         self.subfinder_path = self._find_subfinder_binary()
+        self.default_timeout = int(os.environ.get("SUBFINDER_TIMEOUT", "180"))
 
     def _find_subfinder_binary(self) -> str:
         """Find Subfinder binary"""
@@ -78,8 +79,8 @@ class SubfinderRunner:
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True
-                # Removed timeout to let subfinder run until completion
+                text=True,
+                timeout=self.default_timeout
             )
 
             if result.returncode == 0 or os.path.exists(output_file):
@@ -108,7 +109,20 @@ class SubfinderRunner:
                 return []
 
         except subprocess.TimeoutExpired:
-            logger.warning("[SUBFINDER] Timeout expired")
+            logger.warning(f"[SUBFINDER] Timeout after {self.default_timeout}s, reading partial output if available")
+            partial = set()
+            if os.path.exists(output_file):
+                try:
+                    with open(output_file, "r", encoding="utf-8", errors="ignore") as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and "." in line:
+                                partial.add(line.lower())
+                except Exception as e:
+                    logger.debug(f"[SUBFINDER] Failed to read partial output: {e}")
+            if partial:
+                logger.info(f"[SUBFINDER] Returning {len(partial)} partial subdomains after timeout")
+                return list(partial)
             return []
         except Exception as e:
             logger.error(f"[SUBFINDER] Error: {e}")

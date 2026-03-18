@@ -6,7 +6,6 @@ Mutate payload để bypass WAF
 
 import logging
 import base64
-import re
 from typing import Dict, List
 
 logger = logging.getLogger("recon.payload_gen")
@@ -397,24 +396,6 @@ class PayloadGenerator:
         )
 
         return XMLRPC_PAYLOADS["multicall_brute"].format(calls=calls)
-
-    def _mutate_xss(self, payloads: List[str]) -> List[str]:
-        """Apply WAF bypass mutations to XSS payloads"""
-        mutated = []
-        for payload in payloads[:5]:
-            # HTML entity encoding
-            mutated.append(payload.replace("<", "&lt;").replace(">", "&gt;"))
-            # URL encoding
-            mutated.append(payload.replace("<", "%3C").replace(">", "%3E").replace(" ", "%20"))
-            # Mixed case
-            mutated.append(re.sub(r'script', lambda m: ''.join(
-                c.upper() if i % 2 else c for i, c in enumerate(m.group())
-            ), payload))
-            # Double encoding
-            mutated.append(payload.replace("<", "%253C").replace(">", "%253E"))
-            # Null byte injection
-            mutated.append(payload.replace("script", "scr\x00ipt"))
-        return mutated
 
     def mutate_for_waf_bypass(self, payload: str, payload_type: str) -> List[str]:
         """Generate WAF bypass variants of a payload"""

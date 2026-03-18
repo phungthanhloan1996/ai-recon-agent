@@ -64,12 +64,107 @@ class ChainPlanner:
         # Add pattern-based chains as fallback
         pattern_chains = self._detect_chain_patterns()
         chains.extend(pattern_chains)
+        chains.extend(self._build_conditioned_wp_chains())
         
         # Smart prioritization
         chains = self.smart_prioritize(chains)
         
         logger.info(f"[CHAIN] Planned {len(chains)} exploit chains from graph")
         return chains
+
+    def build_manual_playbook(self, chains: List[ExploitChain]) -> List[Dict]:
+        """
+        Build a human-executable validation playbook from planned chains.
+        Output is intentionally procedural for manual testers.
+        """
+        playbook: List[Dict] = []
+        vulnerabilities = self.state.get("confirmed_vulnerabilities", []) or []
+        prioritized = self.state.get("prioritized_endpoints", []) or []
+        target = self.state.get("target", "")
+
+        for idx, chain in enumerate(chains[:5], 1):
+            chain_steps = []
+            for s_idx, step in enumerate(chain.steps[:8], 1):
+                chain_steps.append(
+                    {
+                        "step": s_idx,
+                        "title": step.name,
+                        "action": step.action,
+                        "target": step.target,
+                        "tool": step.tool or "manual",
+                        "success_criteria": step.success_indicator or "observable response change",
+                        "notes": "Validate carefully and capture request/response evidence.",
+                    }
+                )
+            playbook.append(
+                {
+                    "id": f"CHAIN-{idx:02d}",
+                    "name": chain.name,
+                    "risk_level": chain.risk_level,
+                    "goal": chain.description,
+                    "estimated_time": chain.estimated_time,
+                    "preconditions": chain.preconditions or chain.prerequisites or ["target reachable"],
+                    "steps": chain_steps,
+                }
+            )
+
+        # Ensure at least one actionable chain for testers.
+        if not playbook:
+            seed_endpoint = ""
+            if vulnerabilities:
+                seed_endpoint = vulnerabilities[0].get("endpoint") or vulnerabilities[0].get("url", "")
+            if not seed_endpoint and prioritized:
+                seed_endpoint = prioritized[0].get("url", "")
+            playbook.append(
+                {
+                    "id": "CHAIN-01",
+                    "name": "Manual Verification Baseline Chain",
+                    "risk_level": "MEDIUM",
+                    "goal": f"Establish reproducible validation flow for {target}",
+                    "estimated_time": "20-40 min",
+                    "preconditions": ["target reachable", "authorized testing scope confirmed"],
+                    "steps": [
+                        {
+                            "step": 1,
+                            "title": "Reproduce endpoint behavior",
+                            "action": "baseline_request",
+                            "target": seed_endpoint or target,
+                            "tool": "browser+proxy",
+                            "success_criteria": "stable baseline response captured",
+                            "notes": "Capture request/response pair and timing.",
+                        },
+                        {
+                            "step": 2,
+                            "title": "Inject controlled test input",
+                            "action": "parameter_manipulation",
+                            "target": seed_endpoint or target,
+                            "tool": "repeater",
+                            "success_criteria": "input reflection or logic deviation observed",
+                            "notes": "Keep payloads non-destructive; compare against baseline.",
+                        },
+                        {
+                            "step": 3,
+                            "title": "Cross-check with second method",
+                            "action": "secondary_validation",
+                            "target": seed_endpoint or target,
+                            "tool": "alt-tool",
+                            "success_criteria": "same behavior reproduced independently",
+                            "notes": "Use another tool or role context to avoid false positives.",
+                        },
+                        {
+                            "step": 4,
+                            "title": "Document exploitability decision",
+                            "action": "manual_triage",
+                            "target": seed_endpoint or target,
+                            "tool": "reporting",
+                            "success_criteria": "clear pass/fail + evidence bundle",
+                            "notes": "Mark as confirmed/rejected with concrete artifacts.",
+                        },
+                    ],
+                }
+            )
+
+        return playbook
 
     def _build_chain_from_graph_path(self, chain_data: Dict, attack_graph) -> Optional[ExploitChain]:
         """Build an ExploitChain from a graph path"""
@@ -134,6 +229,7 @@ class ChainPlanner:
         # Detect patterns for chains
         pattern_chains = self._detect_chain_patterns()
         chains.extend(pattern_chains)
+        chains.extend(self._build_conditioned_wp_chains())
 
         vulns = self.state.get("vulnerabilities", [])
         wp_detected = self.state.get("wordpress_detected", False)
@@ -247,15 +343,81 @@ class ChainPlanner:
 
                 # nếu chain liên quan payload fail nhiều → giảm điểm
                 for f in failed[-50:]:
-                    if f.get("vuln_type") in chain.get("type", ""):
+                    if f.get("vuln_type") and f.get("vuln_type").lower() in chain.name.lower():
                         score -= 5
 
                 # nếu chain từng thành công → boost mạnh
                 for s in success:
-                    if s.get("vuln_type") in chain.get("type", ""):
+                    if s.get("vuln_type") and s.get("vuln_type").lower() in chain.name.lower():
                         score += 10
 
         return sorted(chains, key=lambda c: getattr(c, 'priority_score', 0), reverse=True)
+
+    def _build_conditioned_wp_chains(self) -> List[ExploitChain]:
+        """
+        Build chains from CVE-conditioned WP findings.
+        Only include high-confidence candidates.
+        """
+        out: List[ExploitChain] = []
+        conditioned = self.state.get("wp_conditioned_findings", []) or []
+        target = self.state.get("target", "")
+        for item in conditioned:
+            if not item.get("chain_candidate"):
+                continue
+            name = item.get("name", "component")
+            cves = item.get("cve", []) or []
+            cve_txt = ", ".join(cves[:3]) if cves else "known CVE"
+            vuln_type = item.get("vuln_type", "unknown")
+            auth_req = ((item.get("conditions", {}) or {}).get("auth_requirement", "unknown"))
+            endpoint = ((item.get("conditions", {}) or {}).get("candidate_endpoint", target))
+            confidence = int(item.get("confidence", 0) or 0)
+
+            chain = ExploitChain(
+                name=f"WP Conditioned Chain: {name}",
+                description=f"Version-matched {vuln_type} candidate ({cve_txt}) on {name}",
+                risk_level=item.get("severity", "HIGH"),
+                estimated_time="15-45 min",
+                prerequisites=[f"Component present: {name}", f"Auth requirement: {auth_req}"],
+                preconditions=["manual authorization confirmed", "proxy logging enabled"],
+                postconditions=["manual_verification_decision"],
+                steps=[
+                    ExploitStep(
+                        name="Version Confirmation",
+                        action="confirm_component_version",
+                        target=endpoint,
+                        tool="browser+proxy",
+                        success_indicator="version evidence captured",
+                        priority=10,
+                    ),
+                    ExploitStep(
+                        name="Condition Check",
+                        action="validate_exploit_preconditions",
+                        target=endpoint,
+                        tool="manual",
+                        success_indicator=f"preconditions for {cve_txt} satisfied",
+                        priority=9,
+                    ),
+                    ExploitStep(
+                        name="Controlled PoC Replay",
+                        action="replay_non_destructive_poc",
+                        target=endpoint,
+                        tool="repeater",
+                        success_indicator="behavioral indicator reproduced safely",
+                        priority=8,
+                    ),
+                    ExploitStep(
+                        name="Evidence & Triage",
+                        action="document_confirm_or_reject",
+                        target=endpoint,
+                        tool="reporting",
+                        success_indicator="finding marked confirmed/rejected with evidence",
+                        priority=7,
+                    ),
+                ],
+            )
+            chain.priority_score = max(getattr(chain, "priority_score", 0), confidence + 40)
+            out.append(chain)
+        return out
 
     def _calculate_impact_score(self, postconditions: List[str]) -> int:
         """Calculate impact score based on postconditions"""
@@ -344,9 +506,18 @@ class ChainPlanner:
     def _execute_step(self, step: ExploitStep) -> Dict[str, any]:
         """Execute a single step using appropriate tool"""
         result = {"success": False, "output": "", "error": ""}
+        raw_tool = (step.tool or "").strip().lower()
+        tool_alias = {
+            "wpscan/hydra": "wpscan",
+            "curl/browser": "curl",
+            "browser/curl": "curl",
+            "nc/python": "curl",
+            "custom_script": "curl",
+        }
+        tool = tool_alias.get(raw_tool, raw_tool.split("/", 1)[0] if "/" in raw_tool else raw_tool)
 
         try:
-            if step.tool == "sqlmap":
+            if tool == "sqlmap":
                 cmd = ["sqlmap", "-u", step.target, "--batch", "--level=5", "--risk=3"]
                 if step.payload:
                     cmd.extend(step.payload.split())
@@ -355,7 +526,7 @@ class ChainPlanner:
                 result["output"] = out
                 result["error"] = err
 
-            elif step.tool == "curl":
+            elif tool == "curl":
                 cmd = ["curl", "-s", step.target]
                 if step.payload:
                     cmd.extend(["-d", step.payload])
@@ -364,7 +535,7 @@ class ChainPlanner:
                 result["output"] = out
                 result["error"] = err
 
-            elif step.tool == "wpscan":
+            elif tool == "wpscan":
                 cmd = ["wpscan", "--url", step.target, "--enumerate", "u"]
                 if step.payload:
                     cmd.extend(step.payload.split())

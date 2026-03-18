@@ -1,6 +1,20 @@
 # AI Recon Agent - Python Dependencies
-# All standard library, no pip install needed for core functionality
-# External tools required (install separately):
+# Install with: pip install -r requirement.txt
+
+# Core HTTP / parsing
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+tqdm>=4.66.0
+urllib3>=2.0.0
+
+# Graph / analysis
+networkx>=3.1
+
+# Optional browser crawling (DiscoveryEngine Queue 2)
+playwright>=1.44.0
+
+# Optional quality / static tools
+pylint>=3.0.0
 
 # ═══════════════════════════════════════════════════════════════
 # REQUIRED EXTERNAL TOOLS (install via package manager or Go)
@@ -39,11 +53,6 @@
 #
 # ═══════════════════════════════════════════════════════════════
 
-# No pip packages required for core functionality
-# The agent uses Python standard library only:
-# - subprocess, os, sys, json, logging, re, urllib
-# - dataclasses, typing, datetime, time, argparse, base64
-#
 # ═══════════════════════════════════════════════════════════════
 # OPTIONAL ENV (tùy chỉnh để agent mạnh hơn)
 # ═══════════════════════════════════════════════════════════════
