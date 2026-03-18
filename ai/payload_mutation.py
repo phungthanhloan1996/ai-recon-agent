@@ -8,7 +8,6 @@ import logging
 import base64
 import urllib.parse
 from typing import List
-import random
 
 logger = logging.getLogger("recon.payload_mutation")
 
@@ -26,6 +25,7 @@ class PayloadMutator:
         self.encodings = [
             self._base64_encode,
             self._url_encode,
+            self._double_url_encode,
             self._html_encode,
             self._unicode_escape,
             self._hex_encode
@@ -39,6 +39,12 @@ class PayloadMutator:
             self._split_payload
         ]
 
+        self.waf_bypass = [
+            self._waf_case_mixing,
+            self._waf_add_spaces,
+            self._waf_replace_keywords
+        ]
+
     def mutate_payloads(self, payloads: List[str]) -> List[str]:
         """Generate mutated versions of input payloads"""
         mutated = []
@@ -47,6 +53,7 @@ class PayloadMutator:
             # Apply various mutations
             mutated.extend(self._apply_encodings(payload))
             mutated.extend(self._apply_mutations(payload))
+            mutated.extend(self._apply_waf_bypass(payload))
             mutated.extend(self._combine_transformations(payload))
 
         # Remove duplicates and original payloads
@@ -79,6 +86,17 @@ class PayloadMutator:
                 logger.debug(f"Mutation failed: {e}")
         return mutated
 
+    def _apply_waf_bypass(self, payload: str) -> List[str]:
+        """Apply WAF bypass transformations"""
+        bypassed = []
+        for bypass_func in self.waf_bypass:
+            try:
+                bypassed_payloads = bypass_func(payload)
+                bypassed.extend(bypassed_payloads)
+            except Exception as e:
+                logger.debug(f"WAF bypass failed: {e}")
+        return bypassed
+
     def _combine_transformations(self, payload: str) -> List[str]:
         """Combine multiple transformations"""
         combined = []
@@ -109,6 +127,10 @@ class PayloadMutator:
         """URL encode the payload"""
         return urllib.parse.quote(payload)
 
+    def _double_url_encode(self, payload: str) -> str:
+        """Double URL encode the payload"""
+        return urllib.parse.quote(urllib.parse.quote(payload))
+
     def _html_encode(self, payload: str) -> str:
         """HTML encode special characters"""
         return (payload.replace('&', '&amp;')
@@ -132,16 +154,17 @@ class PayloadMutator:
         variations.append(payload.upper())
         variations.append(payload.lower())
 
-        # Random case mixing for keywords
+        # Systematic case mixing for keywords
         keywords = ['union', 'select', 'script', 'alert', 'eval', 'exec', 'system']
         for keyword in keywords:
             if keyword in payload.lower():
-                # Mix case for this keyword
+                # Alternate case for this keyword
                 mixed = payload
                 for match in re.finditer(keyword, mixed, re.IGNORECASE):
+                    # Alternate upper/lower
                     replacement = ''.join(
-                        c.upper() if random.choice([True, False]) else c.lower()
-                        for c in match.group()
+                        c.upper() if i % 2 == 0 else c.lower()
+                        for i, c in enumerate(match.group())
                     )
                     mixed = mixed[:match.start()] + replacement + mixed[match.end():]
                 variations.append(mixed)
@@ -183,13 +206,13 @@ class PayloadMutator:
         """Add noise characters to evade detection"""
         variations = []
 
-        # Add random whitespace
-        noisy = re.sub(r'\s+', lambda m: m.group() + ' ' * random.randint(1, 3), payload)
+        # Add systematic whitespace
+        noisy = re.sub(r'\s+', '  ', payload)  # Double spaces
         variations.append(noisy)
 
-        # Add random comments
-        if random.choice([True, False]):
-            variations.extend(self._add_comments(payload))
+        # Add tabs
+        noisy_tab = re.sub(r'\s+', '\t', payload)
+        variations.append(noisy_tab)
 
         return variations
 
@@ -253,3 +276,27 @@ class PayloadMutator:
             mutated.append(f"|{payload}")
             mutated.append(f";{payload};")
         return mutated + self.mutate_payloads(payloads)
+
+    def _waf_case_mixing(self, payload: str) -> List[str]:
+        """Apply case mixing for WAF bypass"""
+        variations = []
+        # Convert to mixed case
+        mixed = ''.join(c.upper() if i % 2 == 0 else c.lower() for i, c in enumerate(payload))
+        variations.append(mixed)
+        return variations
+
+    def _waf_add_spaces(self, payload: str) -> List[str]:
+        """Add spaces between characters for WAF bypass"""
+        variations = []
+        spaced = ' '.join(payload)
+        variations.append(spaced)
+        return variations
+
+    def _waf_replace_keywords(self, payload: str) -> List[str]:
+        """Replace keywords with encoded or alternative versions"""
+        variations = []
+        # Replace 'script' with 'scr\x69pt'
+        variations.append(payload.replace('script', 'scr\x69pt'))
+        # Replace 'union' with 'uni\x6fn'
+        variations.append(payload.replace('union', 'uni\x6fn'))
+        return variations

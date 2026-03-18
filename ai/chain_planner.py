@@ -23,6 +23,8 @@ class ExploitStep:
     depends_on: List[str] = field(default_factory=list)
     success_indicator: str = ""
     priority: int = 5
+    preconditions: List[str] = field(default_factory=list)  # e.g., ["authenticated", "file_upload_available"]
+    postconditions: List[str] = field(default_factory=list)  # e.g., ["file_written", "code_executed"]
 
 
 @dataclass
@@ -33,6 +35,8 @@ class ExploitChain:
     risk_level: str = "HIGH"
     estimated_time: str = "unknown"
     prerequisites: List[str] = field(default_factory=list)
+    preconditions: List[str] = field(default_factory=list)  # Overall chain preconditions
+    postconditions: List[str] = field(default_factory=list)  # Overall chain outcomes
 
 
 class ChainPlanner:
@@ -41,8 +45,9 @@ class ChainPlanner:
     Prioritizes chains by impact and feasibility.
     """
 
-    def __init__(self, state_manager):
-        self.state = state_manager
+    def __init__(self, state, learning_engine=None):
+        self.state = state
+        self.learning_engine = learning_engine
 
     def plan_chains_from_graph(self, attack_graph) -> List[ExploitChain]:
         """Plan chains from attack graph analysis"""
@@ -200,14 +205,24 @@ class ChainPlanner:
         """AI-like prioritization based on impact, feasibility, and state data"""
         for chain in chains:
             score = 0
-            # Risk level
-            risk_scores = {"CRITICAL": 100, "HIGH": 70, "MEDIUM": 40, "LOW": 10}
+
+            # Impact score based on postconditions
+            impact_score = self._calculate_impact_score(chain.postconditions)
+            score += impact_score * 2  # Weight impact heavily
+
+            # Likelihood score based on prerequisites and state
+            likelihood_score = self._calculate_likelihood_score(chain.prerequisites, chain.preconditions)
+            score += likelihood_score
+
+            # Complexity penalty: more steps = harder
+            complexity_penalty = len(chain.steps) * 5
+            score -= complexity_penalty
+
+            # Risk level bonus
+            risk_scores = {"CRITICAL": 50, "HIGH": 30, "MEDIUM": 15, "LOW": 5}
             score += risk_scores.get(chain.risk_level, 0)
 
-            # Feasibility: more steps = harder
-            score -= len(chain.steps) * 5
-
-            # Target availability
+            # Target availability bonus
             targets = {s.target for s in chain.steps}
             available_targets = set()
             live_hosts = self.state.get("live_hosts", [])
@@ -215,7 +230,7 @@ class ChainPlanner:
                 available_targets.add(host.get("url", ""))
             score += len(targets & available_targets) * 10
 
-            # Vuln confirmation
+            # Vuln confirmation bonus
             vulns = self.state.get("vulnerabilities", [])
             vuln_types = {v.get("name", "").lower() for v in vulns}
             if any(vt in chain.name.lower() for vt in vuln_types):
@@ -223,7 +238,63 @@ class ChainPlanner:
 
             chain.priority_score = score
 
+            # === ADAPTIVE LEARNING PATCH ===
+            if self.learning_engine:
+                learning_data = self.learning_engine.export_learning_data()
+
+                failed = learning_data.get("failed_payloads", [])
+                success = learning_data.get("successful_payloads", [])
+
+                # nếu chain liên quan payload fail nhiều → giảm điểm
+                for f in failed[-50:]:
+                    if f.get("vuln_type") in chain.get("type", ""):
+                        score -= 5
+
+                # nếu chain từng thành công → boost mạnh
+                for s in success:
+                    if s.get("vuln_type") in chain.get("type", ""):
+                        score += 10
+
         return sorted(chains, key=lambda c: getattr(c, 'priority_score', 0), reverse=True)
+
+    def _calculate_impact_score(self, postconditions: List[str]) -> int:
+        """Calculate impact score based on postconditions"""
+        impact_map = {
+            "code_execution": 100,
+            "remote_shell": 100,
+            "privilege_escalation": 90,
+            "data_exfiltration": 80,
+            "file_write": 70,
+            "admin_access": 60,
+            "user_account_compromise": 50,
+            "information_disclosure": 30,
+            "denial_of_service": 20
+        }
+        return max([impact_map.get(pc, 0) for pc in postconditions], default=0)
+
+    def _calculate_likelihood_score(self, prerequisites: List[str], preconditions: List[str]) -> int:
+        """Calculate likelihood score based on prerequisites and preconditions"""
+        score = 50  # Base score
+
+        # Check prerequisites
+        for prereq in prerequisites + preconditions:
+            if "WordPress" in prereq and self.state.get("wordpress_detected"):
+                score += 20
+            elif "SQLi" in prereq:
+                vulns = self.state.get("vulnerabilities", [])
+                if any("sql" in v.get("name", "").lower() for v in vulns):
+                    score += 15
+            elif "authenticated" in prereq:
+                # Assume if we have session or login vulns, higher likelihood
+                vulns = self.state.get("vulnerabilities", [])
+                if any("auth" in v.get("name", "").lower() or "login" in v.get("name", "").lower() for v in vulns):
+                    score += 10
+            elif "file_upload" in prereq:
+                endpoints = self.state.get("prioritized_endpoints", [])
+                if any("upload" in ep.get("categories", []) for ep in endpoints):
+                    score += 15
+
+        return score
 
     def execute_chain(self, chain: ExploitChain) -> Dict[str, any]:
         """Execute an exploit chain step by step, respecting dependencies"""
@@ -322,6 +393,8 @@ class ChainPlanner:
             risk_level="CRITICAL",
             estimated_time="15-60 min",
             prerequisites=["WordPress detected", "Login page accessible"],
+            preconditions=["wp_users_enumerated"],
+            postconditions=["code_execution", "remote_shell", "admin_access"],
             steps=[
                 ExploitStep(
                     name="User Enumeration",
@@ -369,6 +442,7 @@ class ChainPlanner:
                     depends_on=["Plugin Upload"],
                     success_indicator="shell connection established",
                     priority=6,
+                    postconditions=["remote_shell"]
                 ),
             ]
         )
@@ -412,6 +486,8 @@ class ChainPlanner:
             risk_level="CRITICAL",
             estimated_time="10-30 min",
             prerequisites=["SQLi vulnerability found"],
+            preconditions=[],
+            postconditions=["data_exfiltration", "information_disclosure"],
             steps=[
                 ExploitStep(
                     name="Confirm SQLi",
@@ -450,6 +526,7 @@ class ChainPlanner:
                     depends_on=["Dump Credentials"],
                     success_indicator="authenticated successfully",
                     priority=7,
+                    postconditions=["admin_access"]
                 ),
             ]
         )

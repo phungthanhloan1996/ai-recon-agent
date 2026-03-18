@@ -326,6 +326,38 @@ class PayloadGenerator:
             return shells["php_obf"]
         return shells.get(language, shells["php"])
 
+    def generate_for_category(self, category: str, parameters: List[str] = None) -> List[Dict]:
+        """Generate payloads for a specific vulnerability category"""
+        if parameters is None:
+            parameters = []
+        
+        payloads = []
+        
+        if category.lower() == "xss":
+            strings = self.generate_xss(count=10)
+        elif category.lower() == "sqli" or category.lower() == "sql_injection":
+            strings = self.generate_sqli()
+        elif category.lower() == "rce" or category.lower() == "command_injection":
+            strings = self.generate_rce()
+        elif category.lower() == "lfi" or category.lower() == "file_inclusion":
+            strings = self.generate_lfi()
+        elif category.lower() == "file_upload":
+            # For upload, return webshell content
+            strings = [self.generate_webshell()]
+        else:
+            # Default to XSS
+            strings = self.generate_xss(count=5)
+        
+        # Convert to dict format expected by scanner
+        for payload_str in strings:
+            payloads.append({
+                "value": payload_str,
+                "method": "GET",
+                "params": {}
+            })
+        
+        return payloads
+
     def generate_xmlrpc_brute(self, username: str, passwords: List[str]) -> List[str]:
         """Generate XML-RPC bruteforce payloads"""
         payloads = []

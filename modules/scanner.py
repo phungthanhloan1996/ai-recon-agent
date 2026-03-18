@@ -8,6 +8,9 @@ import os
 import logging
 from typing import Dict, List, Any
 import time
+import base64
+import concurrent.futures
+import urllib.parse
 
 from core.state_manager import StateManager
 from core.http_engine import HTTPClient
@@ -39,22 +42,27 @@ class ScanningEngine:
         logger.info("[SCANNING] Starting AI-driven vulnerability scanning")
 
         prioritized_endpoints = self.state.get("prioritized_endpoints", [])
-        scan_responses = []
+        self.max_endpoints = self.state.get("max_endpoints", 100)
 
-        for endpoint in prioritized_endpoints[:50]:  # Increased limit
-            try:
-                responses = self.scan_endpoint(endpoint)
-                scan_responses.extend(responses)
-            except Exception as e:
-                logger.debug(f"[SCANNING] Failed to scan endpoint {endpoint}: {e}")
+        # Use parallel execution for scanning endpoints
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(self.scan_endpoint, endpoint) for endpoint in prioritized_endpoints[:self.max_endpoints]]
+            for future in concurrent.futures.as_completed(futures, timeout=300):  # 5 min timeout per endpoint
+                try:
+                    self.process_endpoint_results(future.result())
+                except concurrent.futures.TimeoutError:
+                    logger.error("[SCANNING] Endpoint scan timed out")
+                except Exception as e:
+                    logger.error(f"[SCANNING] Failed to scan endpoint: {e}")
 
-        self.state.update(scan_responses=scan_responses)
+        logger.info("[SCANNING] Completed scanning - results streamed to file")
 
-        # Save results
-        with open(self.scan_results_file, 'w') as f:
-            json.dump(scan_responses, f, indent=2)
-
-        logger.info(f"[SCANNING] Completed scanning: {len(scan_responses)} responses collected")
+    def process_endpoint_results(self, responses: List[Dict[str, Any]]):
+        """Process and stream endpoint results to file"""
+        with open(self.scan_results_file, 'a') as f:
+            for response in responses:
+                json.dump(response, f)
+                f.write('\n')  # JSONL format
 
     def scan_endpoint(self, endpoint: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Scan a single endpoint with AI-generated payloads"""
@@ -66,6 +74,12 @@ class ScanningEngine:
 
         responses = []
 
+        # Get baseline response (normal request without payload)
+        baseline_response = self.get_baseline_response(url)
+        if not baseline_response:
+            logger.debug(f"[SCANNING] Failed to get baseline for {url}")
+            return responses
+
         # Generate payloads based on endpoint type
         for category in categories:
             payloads = self.payload_gen.generate_for_category(category, parameters)
@@ -73,115 +87,391 @@ class ScanningEngine:
             # Apply mutations
             mutated_payloads = self.payload_mutator.mutate_payloads(payloads)
 
+            # Determine payload count based on category risk
+            max_payloads = self.get_max_payloads_for_category(category)
+
             # Test payloads
-            for payload in mutated_payloads[:5]:  # Limit per category
+            for payload in mutated_payloads[:max_payloads]:
                 try:
-                    response = self.test_payload(url, payload, category)
+                    response = self.test_payload(url, payload, category, baseline_response)
                     responses.append(response)
 
                     # Small delay to avoid overwhelming
                     time.sleep(0.1)
 
                 except Exception as e:
-                    logger.debug(f"[SCANNING] Payload test failed: {e}")
+                    logger.error(f"[PAYLOAD] Failed to test payload on {url}: {e} (payload: {payload_value})")
 
         return responses
 
-    def test_payload(self, url: str, payload: Dict[str, Any], category: str) -> Dict[str, Any]:
-        """Test a single payload against an endpoint"""
+    def get_baseline_response(self, url: str) -> Dict[str, Any]:
+        """Get baseline response for comparison and tech fingerprinting"""
+        try:
+            response = self.http_client.get(url, timeout=10)
+            
+            # Detect tech stack
+            tech_detected = self._detect_tech_stack(response)
+            if tech_detected:
+                current_tech = self.state.get("tech_stack", set())
+                current_tech.update(tech_detected)
+                self.state.update(tech_stack=list(current_tech))
+            
+            return {
+                "status_code": response.status_code,
+                "content_length": len(response.text),
+                "response_time": response.elapsed.total_seconds() if hasattr(response, 'elapsed') else 0,
+                "content": response.text,
+                "headers": dict(response.headers),
+                "tech": tech_detected
+            }
+        except Exception as e:
+            logger.debug(f"[SCANNING] Baseline request failed for {url}: {e}")
+            return None
+
+    def _detect_tech_stack(self, response) -> set:
+        """Detect technology stack from response"""
+        tech = set()
+        headers = response.headers
+        body = response.text.lower()
+        
+        # Server headers
+        server = headers.get('server', '').lower()
+        if 'apache' in server:
+            tech.add('apache')
+        if 'nginx' in server:
+            tech.add('nginx')
+        if 'iis' in server:
+            tech.add('iis')
+        
+        # Powered by
+        powered_by = headers.get('x-powered-by', '').lower()
+        if 'php' in powered_by:
+            tech.add('php')
+        if 'asp.net' in powered_by:
+            tech.add('asp.net')
+        if 'nodejs' in powered_by or 'node' in powered_by:
+            tech.add('nodejs')
+        
+        # Body patterns
+        if 'wp-content' in body or 'wordpress' in body:
+            tech.add('wordpress')
+        if 'laravel' in body or 'csrf-token' in body:
+            tech.add('laravel')
+        if 'jquery' in body:
+            tech.add('jquery')
+        if 'bootstrap' in body:
+            tech.add('bootstrap')
+        if 'react' in body:
+            tech.add('react')
+        if 'vue' in body:
+            tech.add('vue')
+        if 'angular' in body:
+            tech.add('angular')
+        
+        # API patterns
+        if '/api/' in body or 'swagger' in body:
+            tech.add('api')
+        if 'graphql' in body:
+            tech.add('graphql')
+        
+        return tech
+
+    def get_max_payloads_for_category(self, category: str) -> int:
+        """Determine maximum payloads to test based on category risk"""
+        high_risk = ['sql_injection', 'command_injection', 'xss', 'file_inclusion']
+        if category in high_risk:
+            return 20  # More payloads for high-risk categories
+        return 10  # Default
+
+    def test_payload(self, url: str, payload: Dict[str, Any], category: str, baseline: Dict[str, Any]) -> Dict[str, Any]:
+        """Test a single payload against an endpoint with baseline comparison and WAF bypass"""
         payload_value = payload.get("value", "")
         method = payload.get("method", "GET")
         params = payload.get("params", {})
 
-        # Prepare request
-        if method == "GET":
-            test_url = url
-            if "?" in url:
-                test_url += f"&{payload_value}"
-            else:
-                test_url += f"?{payload_value}"
-            response = self.http_client.get(test_url, timeout=5)
-        elif method == "POST":
-            response = self.http_client.post(url, data=params, timeout=5)
-        else:
-            # Default to GET
-            response = self.http_client.get(url, timeout=5)
+        max_retries = 3
+        mutations = self._apply_waf_bypass(payload_value, category)
+        import random
+        random.shuffle(mutations)  # Randomize order
+        
+        for mutation in [payload_value] + mutations:  # Try original first, then mutations
+            waf_bypass_attempted = mutation != payload_value
+            
+            for attempt in range(max_retries):
+                try:
+                    # Prepare request
+                    if method == "GET":
+                        test_url = url
+                        if "?" in url:
+                            test_url += f"&{urllib.parse.quote(mutation)}"
+                        else:
+                            test_url += f"?{urllib.parse.quote(mutation)}"
+                        response = self.http_client.get(test_url, timeout=10)
+                    elif method == "POST":
+                        response = self.http_client.post(url, data=params, timeout=10)
+                    else:
+                        # Default to GET
+                        response = self.http_client.get(url, timeout=10)
 
-        # Analyze response
-        analysis = self.analyze_response(response, payload, category)
+                    # Check for WAF blocking
+                    if self._is_waf_blocked(response):
+                        if not waf_bypass_attempted:
+                            break  # Try next mutation
+                        else:
+                            logger.debug(f"[WAF] Bypass failed for {url}")
+                            continue  # Try next attempt
+                    
+                    # If we reach here, WAF bypassed or no WAF
+                    if waf_bypass_attempted:
+                        logger.info(f"[WAF] Bypass successful with mutation for {url}")
 
+                    # Analyze response with baseline comparison
+                    analysis = self.analyze_response(response, baseline, payload, category)
+
+                    if analysis.get("vulnerable"):
+                        logger.info(f"[VULN] Potential {category} vulnerability detected on {url} (confidence: {analysis.get('confidence', 0)})")
+
+                    return {
+                        "endpoint": url,
+                        "payload": mutation,
+                        "method": method,
+                        "status_code": response.status_code,
+                        "content_length": len(response.text),
+                        "response_time": response.elapsed.total_seconds() if hasattr(response, 'elapsed') else 0,
+                        "baseline_status": baseline["status_code"],
+                        "baseline_length": baseline["content_length"],
+                        "baseline_time": baseline["response_time"],
+                        "category": category,
+                        "vulnerable": analysis.get("vulnerable", False),
+                        "confidence": analysis.get("confidence", 0),
+                        "reason": analysis.get("reason", ""),
+                        "timestamp": time.time()
+                    }
+                except Exception as e:
+                    if attempt == max_retries - 1:
+                        logger.debug(f"[SCANNING] Payload test failed after {max_retries} attempts: {e}")
+                        # Return a failed result
+                        return {
+                            "endpoint": url,
+                            "payload": mutation,
+                            "method": method,
+                            "status_code": 0,
+                            "content_length": 0,
+                            "response_time": 0,
+                            "baseline_status": baseline["status_code"],
+                            "baseline_length": baseline["content_length"],
+                            "baseline_time": baseline["response_time"],
+                            "category": category,
+                            "vulnerable": False,
+                            "confidence": 0,
+                            "reason": "Request failed",
+                            "timestamp": time.time()
+                        }
+                    time.sleep(1)  # Wait before retry
+            
+            # If all retries failed for this mutation, try next
+            if waf_bypass_attempted:
+                continue
+        
+        # All mutations failed
         return {
             "endpoint": url,
             "payload": payload_value,
             "method": method,
-            "status_code": response.status_code,
-            "content_length": len(response.text),
-            "response_time": response.elapsed.total_seconds() if hasattr(response, 'elapsed') else 0,
+            "status_code": 0,
+            "content_length": 0,
+            "response_time": 0,
+            "baseline_status": baseline["status_code"],
+            "baseline_length": baseline["content_length"],
+            "baseline_time": baseline["response_time"],
             "category": category,
-            "vulnerable": analysis.get("vulnerable", False),
-            "confidence": analysis.get("confidence", 0),
-            "reason": analysis.get("reason", ""),
+            "vulnerable": False,
+            "confidence": 0,
+            "reason": "All WAF bypass attempts failed",
             "timestamp": time.time()
         }
 
-    def analyze_response(self, response, payload: Dict, category: str) -> Dict[str, Any]:
-        """Analyze response for vulnerability indicators"""
-        content = response.text.lower()
-        status = response.status_code
+    def _is_waf_blocked(self, response) -> bool:
+        """Detect if response indicates WAF blocking"""
+        if response.status_code == 403:
+            return True
+        body = response.text.lower()
+        waf_indicators = [
+            "waf", "blocked", "forbidden", "access denied", "cloudflare",
+            "akamai", "imperva", "sucuri", "mod_security", "firewall"
+        ]
+        return any(indicator in body for indicator in waf_indicators)
+
+    def _apply_waf_bypass(self, payload: str, category: str) -> List[str]:
+        """Apply multiple WAF bypass mutations"""
+        mutations = []
+        
+        if category in ["sqli", "sql_injection"]:
+            mutations = [
+                payload.replace(" ", "/**/"),
+                payload.replace("UNION", "UN/**/ION"),
+                payload.replace("SELECT", "SEL/**/ECT"),
+                payload.replace("'", "''"),
+                payload.upper(),
+                payload.replace(" ", "%20"),
+                payload.replace(" ", "%0a"),
+            ]
+        elif category in ["xss"]:
+            mutations = [
+                payload.replace("<script>", "<scr<script>ipt>"),
+                payload.replace("alert", "\\u0061lert"),
+                base64.b64encode(payload.encode()).decode(),
+                payload.replace("script", "ScRiPt"),
+                payload.replace("<", "&lt;").replace(">", "&gt;"),
+            ]
+        elif category in ["rce", "command_injection"]:
+            mutations = [
+                payload.replace(" ", "${IFS}"),
+                payload.replace(";", "`"),
+                payload.replace("cat", "c\\at"),
+                payload.replace(" ", "%20"),
+            ]
+        
+        return mutations
+
+    def analyze_response(self, response, baseline: Dict[str, Any], payload: Dict, category: str) -> Dict[str, Any]:
+        """Analyze response for vulnerability indicators using baseline comparison and content analysis"""
+        test_status = response.status_code
+        test_length = len(response.text)
+        test_time = response.elapsed.total_seconds() if hasattr(response, 'elapsed') else 0
+        response_text = response.text.lower()
+
+        base_status = baseline["status_code"]
+        base_length = baseline["content_length"]
+        base_time = baseline["response_time"]
+        payload_value = payload.get("value", "").lower()
 
         analysis = {
             "vulnerable": False,
             "confidence": 0.0,
-            "reason": "No vulnerability detected"
+            "reason": "No indicators detected"
         }
 
-        # Load vulnerability patterns
-        try:
-            with open("rules/vulnerability_patterns.json", 'r') as f:
-                patterns = json.load(f)
-        except Exception:
-            patterns = {}
+        # 1. Keyword-based error detection
+        error_keywords = {
+            "sql_injection": [
+                "sql syntax", "mysql", "ora-", "syntax error", "database error",
+                "sqlite", "postgresql", "you have an error in your sql",
+                "unclosed quotation mark", "invalid sql statement"
+            ],
+            "command_injection": [
+                "command not found", "permission denied", "access denied",
+                "/bin/sh", "/bin/bash", "exec", "system()"
+            ],
+            "file_inclusion": [
+                "failed to open stream", "no such file", "include_once",
+                "require_once", "root:", "boot.ini", "etc/passwd"
+            ],
+            "general": [
+                "warning", "fatal error", "parse error", "exception",
+                "stack trace", "unexpected token", "uncaught exception",
+                "error 500", "internal server error"
+            ]
+        }
 
-        vuln_patterns = patterns.get("patterns", {}).get(category, {})
+        keyword_score = 0.0
+        detected_errors = []
 
-        # Check for error indicators
-        error_indicators = vuln_patterns.get("error_messages", [])
-        for indicator in error_indicators:
-            if indicator.lower() in content:
-                analysis.update({
-                    "vulnerable": True,
-                    "confidence": 0.8,
-                    "reason": f"Error message detected: {indicator}"
-                })
-                break
+        # Check category-specific keywords
+        for kw in error_keywords.get(category, []):
+            if kw in response_text:
+                keyword_score += 0.3
+                detected_errors.append(kw)
 
-        # Check for success indicators
-        if not analysis["vulnerable"]:
-            success_indicators = vuln_patterns.get("success_indicators", [])
-            for indicator in success_indicators:
-                if indicator.lower() in content:
-                    analysis.update({
-                        "vulnerable": True,
-                        "confidence": 0.7,
-                        "reason": f"Success indicator detected: {indicator}"
-                    })
-                    break
+        # Check general error keywords
+        for kw in error_keywords["general"]:
+            if kw in response_text:
+                keyword_score += 0.2
+                detected_errors.append(kw)
 
-        # Check response anomalies
-        if status in [500, 502, 503]:  # Server errors
-            analysis.update({
-                "vulnerable": True,
-                "confidence": 0.6,
-                "reason": f"Server error response: {status}"
-            })
+        if detected_errors:
+            analysis["confidence"] += keyword_score
+            analysis["reason"] = f"Error keywords detected: {', '.join(detected_errors[:3])}"
 
-        # Check for reflected input
-        payload_value = payload.get("value", "").lower()
-        if payload_value and payload_value in content:
-            analysis.update({
-                "vulnerable": True,
-                "confidence": 0.5,
-                "reason": "Payload reflected in response"
-            })
+        # 2. Reflection detection (for XSS and similar)
+        reflection_score = 0.0
+        if payload_value and len(payload_value) > 3:  # Avoid false positives with short payloads
+            if payload_value in response_text:
+                if category in ["xss", "html_injection"]:
+                    reflection_score = 0.5
+                    analysis["reason"] += f" (payload reflected in response)"
+                else:
+                    reflection_score = 0.2  # Less confident for other categories
+
+        analysis["confidence"] += reflection_score
+
+        # 3. Status code anomaly
+        status_score = 0.0
+        if test_status != base_status:
+            if test_status in [500, 502, 503] and base_status == 200:
+                status_score = 0.8
+                analysis["reason"] = f"Status code changed from {base_status} to {test_status} (server error)"
+            elif test_status == 200 and base_status != 200:
+                status_score = 0.6
+                analysis["reason"] = f"Status code changed from {base_status} to {test_status}"
+            elif test_status >= 400 and base_status < 400:
+                status_score = 0.4
+                analysis["reason"] = f"Status code changed from {base_status} to {test_status} (client/server error)"
+
+        analysis["confidence"] += status_score
+
+        # 4. Content length anomaly
+        length_score = 0.0
+        if not analysis["vulnerable"]:  # Only if not already high confidence
+            length_diff = abs(test_length - base_length)
+            length_ratio = length_diff / max(base_length, 1)
+            if length_ratio > 0.5:  # More than 50% difference
+                length_score = 0.7
+                analysis["reason"] = f"Content length changed significantly ({base_length} -> {test_length})"
+            elif length_ratio > 0.2:  # More than 20% difference
+                length_score = 0.3
+
+        analysis["confidence"] += length_score
+
+        # 5. Timing anomaly (for blind injections) - enhanced detection
+        timing_score = 0.0
+        time_diff = test_time - base_time
+        
+        # Different timing thresholds based on vulnerability type
+        if category in ["sql_injection", "sqli"]:
+            # SQL timing attacks (SLEEP, BENCHMARK, etc.)
+            if test_time > 3 and base_time < 1:  # Strong indicator
+                timing_score = 0.8
+                analysis["reason"] = f"SQL timing attack detected ({base_time:.2f}s -> {test_time:.2f}s)"
+            elif time_diff > 2:  # Moderate delay
+                timing_score = 0.5
+                analysis["reason"] = f"Response delayed by {time_diff:.2f}s (possible SQL injection)"
+                
+        elif category in ["command_injection", "rce"]:
+            # Command execution timing
+            if test_time > 2 and base_time < 0.5:  # Command execution delay
+                timing_score = 0.7
+                analysis["reason"] = f"Command execution delay detected ({base_time:.2f}s -> {test_time:.2f}s)"
+            elif time_diff > 1:  # Moderate command delay
+                timing_score = 0.4
+                
+        else:
+            # General timing anomaly
+            if test_time > 5 and base_time < 2:  # Significant delay
+                timing_score = 0.6
+                analysis["reason"] = f"Response time increased significantly ({base_time:.2f}s -> {test_time:.2f}s)"
+            elif test_time > base_time * 2:  # Doubled time
+                timing_score = 0.4
+
+        analysis["confidence"] += timing_score
+
+        # Determine if vulnerable based on confidence threshold
+        if analysis["confidence"] >= 0.5:
+            analysis["vulnerable"] = True
+        elif analysis["confidence"] >= 0.3 and (keyword_score > 0 or reflection_score > 0):
+            analysis["vulnerable"] = True  # Lower threshold for direct indicators
+
+        # Cap confidence at 1.0
+        analysis["confidence"] = min(analysis["confidence"], 1.0)
 
         return analysis
