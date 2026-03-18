@@ -70,22 +70,20 @@ class SubfinderRunner:
             cmd = [
                 self.subfinder_path,
                 "-d", domain,
-                "-silent",  # Silent mode
                 "-o", output_file,  # Output to file
                 "-t", "50",  # Threads
-                "-timeout", "30"  # Timeout per source
             ]
 
             logger.info(f"[SUBFINDER] Discovering subdomains for {domain}")
             result = subprocess.run(
                 cmd,
                 capture_output=True,
-                text=True,
-                timeout=300  # 5 minute timeout
+                text=True
+                # Removed timeout to let subfinder run until completion
             )
 
-            if result.returncode == 0:
-                # Read results from file
+            if result.returncode == 0 or os.path.exists(output_file):
+                # Read results from file even if returncode != 0
                 if os.path.exists(output_file):
                     with open(output_file, 'r') as f:
                         for line in f:
@@ -97,7 +95,16 @@ class SubfinderRunner:
                 return list(subdomains)
 
             else:
-                logger.error(f"[SUBFINDER] Failed: {result.stderr}")
+                logger.error(f"[SUBFINDER] Failed with returncode {result.returncode}: {result.stderr}")
+                if os.path.exists(output_file):
+                    logger.info(f"[SUBFINDER] Output file exists, reading anyway")
+                    with open(output_file, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line and '.' in line:
+                                subdomains.add(line.lower())
+                    return list(subdomains)
+                return []
                 return []
 
         except subprocess.TimeoutExpired:

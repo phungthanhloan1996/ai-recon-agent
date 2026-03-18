@@ -566,9 +566,9 @@ class ReconAgent:
         self.recon_engine = ReconEngine(self.state, output_dir)
         self.live_host_engine = LiveHostEngine(self.state, output_dir)
         self.discovery_engine = DiscoveryEngine(self.state, output_dir)
-        self.scanning_engine = ScanningEngine(self.state, output_dir, self.payload_gen, self.payload_mutator)
-        self.exploit_engine = ExploitTestEngine(self.state, output_dir)
-        self.wp_scanner = WordPressScannerEngine(self.state, output_dir)
+        self.scanning_engine = ScanningEngine(self.state, output_dir, self.payload_gen, self.payload_mutator, self.learning_engine)
+        self.exploit_engine = ExploitTestEngine(self.state, output_dir, self.learning_engine)
+        self.wp_scanner = WordPressScannerEngine(self.state, output_dir, self.wps_token)
         
         self.logger = logging.getLogger("recon.agent")
         self.iteration_count = 0

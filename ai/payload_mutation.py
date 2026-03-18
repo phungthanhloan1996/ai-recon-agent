@@ -42,7 +42,10 @@ class PayloadMutator:
         self.waf_bypass = [
             self._waf_case_mixing,
             self._waf_add_spaces,
-            self._waf_replace_keywords
+            self._waf_replace_keywords,
+            self._random_case,
+            self._keyword_split,
+            self._comment_injection
         ]
 
     def mutate_payloads(self, payloads: List[str]) -> List[str]:
@@ -59,6 +62,11 @@ class PayloadMutator:
         # Remove duplicates and original payloads
         mutated = list(set(mutated))
         mutated = [p for p in mutated if p not in payloads]
+
+        # Limit total mutations to 30 to avoid excessive scanning
+        if len(mutated) > 30:
+            import random
+            mutated = random.sample(mutated, 30)
 
         logger.info(f"[MUTATION] Generated {len(mutated)} mutated payloads from {len(payloads)} originals")
         return mutated
@@ -140,8 +148,7 @@ class PayloadMutator:
                       .replace("'", '&#x27;'))
 
     def _unicode_escape(self, payload: str) -> str:
-        """Unicode escape the payload"""
-        return payload.encode().decode('unicode_escape')
+        return ''.join(f'\\u{ord(c):04x}' for c in payload)
 
     def _hex_encode(self, payload: str) -> str:
         """Hex encode the payload"""
@@ -293,8 +300,47 @@ class PayloadMutator:
         return variations
 
     def _waf_replace_keywords(self, payload: str) -> List[str]:
-        """Replace keywords with encoded or alternative versions"""
         variations = []
+        replacements = {
+            'UNION': '/**/UNION/**/',
+            'SELECT': 'SE/**/LECT',
+            'SCRIPT': 'SCR/**/IPT',
+            'ALERT': 'AL/**/ERT'
+        }
+
+        for k, v in replacements.items():
+            variations.append(re.sub(rf'\b{k}\b', v, payload, flags=re.IGNORECASE))
+
+        return variations
+
+    def _random_case(self, payload: str) -> List[str]:
+        """Random case variation for WAF bypass"""
+        import random
+        variations = []
+        random_cased = ''.join(c.upper() if random.choice([True, False]) else c.lower() for c in payload)
+        variations.append(random_cased)
+        return variations
+
+
+
+    def _keyword_split(self, payload: str) -> List[str]:
+        variations = []
+        keywords = ['UNION', 'SELECT', 'SCRIPT', 'ALERT', 'EVAL']
+
+        for keyword in keywords:
+            pattern = re.compile(keyword, re.IGNORECASE)
+            if pattern.search(payload):
+                split = keyword[:2] + '/**/' + keyword[2:]
+                variations.append(pattern.sub(split, payload))
+
+        return variations
+
+    def _comment_injection(self, payload: str) -> List[str]:
+        """Inject comments into payload for WAF bypass"""
+        variations = []
+        # Inject /**/ between characters
+        commented = '/**/'.join(payload)
+        variations.append(commented)
         # Replace 'script' with 'scr\x69pt'
         variations.append(payload.replace('script', 'scr\x69pt'))
         # Replace 'union' with 'uni\x6fn'

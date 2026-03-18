@@ -138,9 +138,10 @@ class WordPressScannerEngine:
     Uses HTTP probing and rules instead of external tools.
     """
 
-    def __init__(self, state: StateManager, output_dir: str):
+    def __init__(self, state: StateManager, output_dir: str, wps_token: str = ""):
         self.state = state
         self.output_dir = output_dir
+        self.wps_token = wps_token
         self.http_client = HTTPClient()
         self.results_file = os.path.join(output_dir, "wordpress_scan.json")
 
@@ -400,6 +401,86 @@ class WordPressScannerEngine:
                 continue
 
         return list(set(users))  # Remove duplicates
+
+    def _run_wpscan(self, url: str) -> Dict[str, Any]:
+        """Run WPScan on the target URL"""
+        if not tool_available("wpscan"):
+            logger.debug("WPScan not available")
+            return {}
+
+        cmd = ["wpscan", "--url", url, "--format", "json"]
+
+        if self.wps_token:
+            cmd.extend(["--api-token", self.wps_token])
+
+        try:
+            result = run_command(cmd, timeout=300)
+            if result["success"]:
+                # Parse JSON output
+                import json
+                try:
+                    data = json.loads(result["output"])
+                    return data
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse WPScan JSON output")
+                    return {}
+            else:
+                logger.error(f"WPScan failed: {result['error']}")
+                return {}
+        except Exception as e:
+            logger.error(f"WPScan execution error: {e}")
+            return {}
+
+    def _scan_wordpress_site(self, url: str) -> Dict[str, Any]:
+        """Scan a WordPress site using WPScan and HTTP checks"""
+        site_info = {
+            "url": url,
+            "version": self._detect_version(url),
+            "plugins": self._enumerate_plugins(url),
+            "themes": self._enumerate_themes(url),
+            "users": self._enumerate_users(url),
+            "vulnerabilities": []
+        }
+
+        # Run WPScan if available
+        wpscan_data = self._run_wpscan(url)
+        if wpscan_data:
+            # Merge WPScan results
+            if "version" in wpscan_data:
+                site_info["version"] = wpscan_data["version"].get("number", site_info["version"])
+            if "plugins" in wpscan_data:
+                # Merge plugins
+                wpscan_plugins = []
+                for plugin_data in wpscan_data["plugins"]:
+                    wpscan_plugins.append({
+                        "name": plugin_data.get("name", ""),
+                        "version": plugin_data.get("version", "unknown"),
+                        "vulnerabilities": plugin_data.get("vulnerabilities", [])
+                    })
+                site_info["plugins"].extend(wpscan_plugins)
+            if "themes" in wpscan_data:
+                wpscan_themes = []
+                for theme_data in wpscan_data["themes"]:
+                    wpscan_themes.append({
+                        "name": theme_data.get("name", ""),
+                        "version": theme_data.get("version", "unknown"),
+                        "vulnerabilities": theme_data.get("vulnerabilities", [])
+                    })
+                site_info["themes"].extend(wpscan_themes)
+            if "vulnerabilities" in wpscan_data:
+                site_info["vulnerabilities"].extend(wpscan_data["vulnerabilities"])
+
+        # Run HTTP-based vulnerability checks
+        for check in self.vuln_checks:
+            vuln = self._run_vuln_check(url, check)
+            if vuln:
+                site_info["vulnerabilities"].append(vuln)
+
+        # Check for known vulnerabilities in plugins/themes
+        known_vulns = self._check_known_vulnerabilities(url, site_info)
+        site_info["vulnerabilities"].extend(known_vulns)
+
+        return site_info
 
     def _run_vuln_check(self, url: str, check: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Run a single vulnerability check"""

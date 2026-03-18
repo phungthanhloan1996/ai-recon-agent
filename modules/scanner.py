@@ -16,6 +16,9 @@ from core.state_manager import StateManager
 from core.http_engine import HTTPClient
 from ai.payload_gen import PayloadGenerator
 from ai.payload_mutation import PayloadMutator
+from learning.learning_engine import LearningEngine
+from integrations.dalfox_runner import DalfoxRunner
+from integrations.nuclei_runner import NucleiRunner
 
 logger = logging.getLogger("recon.scanning")
 
@@ -27,13 +30,17 @@ class ScanningEngine:
     """
 
     def __init__(self, state: StateManager, output_dir: str,
-                 payload_gen: PayloadGenerator, payload_mutator: PayloadMutator):
+                 payload_gen: PayloadGenerator, payload_mutator: PayloadMutator,
+                 learning_engine: LearningEngine):
         self.state = state
         self.output_dir = output_dir
         self.target = state.get("target")
         self.http_client = HTTPClient()
         self.payload_gen = payload_gen
         self.payload_mutator = payload_mutator
+        self.learning_engine = learning_engine
+        self.dalfox_runner = DalfoxRunner(output_dir)
+        self.nuclei_runner = NucleiRunner(output_dir)
 
         self.scan_results_file = os.path.join(output_dir, "scan_results.json")
 
@@ -80,9 +87,34 @@ class ScanningEngine:
             logger.debug(f"[SCANNING] Failed to get baseline for {url}")
             return responses
 
+        # Decision logic: auto-detect and call external tools
+        if parameters:
+            if self._detect_sqli_potential(endpoint):
+                self._run_sqlmap(url, parameters)
+            if self._detect_xss_potential(endpoint):
+                dalfox_result = self.dalfox_runner.run(url)
+                if dalfox_result.get("success"):
+                    vuln = {"type": "xss", "url": url, "tool": "dalfox", "output": dalfox_result["output"]}
+                    current_vulns = self.state.get("vulnerabilities", [])
+                    current_vulns.append(vuln)
+                    self.state.update(vulnerabilities=current_vulns)
+
+        # Run nuclei for general scan
+        if parameters or any(kw in url for kw in ["admin", "login", "api"]):
+            nuclei_result = self.nuclei_runner.run(url)
+            if nuclei_result.get("success"):
+                vuln = {"type": "general", "url": url, "tool": "nuclei", "output": nuclei_result["output"]}
+                current_vulns = self.state.get("vulnerabilities", [])
+                current_vulns.append(vuln)
+                self.state.update(vulnerabilities=current_vulns)
+
         # Generate payloads based on endpoint type
         for category in categories:
-            payloads = self.payload_gen.generate_for_category(category, parameters)
+            if category == "xss":
+                context = self._detect_xss_context(baseline_response.get("content", ""))
+                payloads = self.payload_gen.generate_xss(context, self.get_max_payloads_for_category(category))
+            else:
+                payloads = self.payload_gen.generate_for_category(category, parameters)
 
             # Apply mutations
             mutated_payloads = self.payload_mutator.mutate_payloads(payloads)
@@ -91,16 +123,44 @@ class ScanningEngine:
             max_payloads = self.get_max_payloads_for_category(category)
 
             # Test payloads
-            for payload in mutated_payloads[:max_payloads]:
+            for payload_item in mutated_payloads[:max_payloads]:
+                payload = {}
                 try:
+                    # Normalize payload to dictionary format
+                    if isinstance(payload_item, str):
+                        payload = {"value": payload_item, "method": "GET", "params": {}}
+                    elif isinstance(payload_item, dict):
+                        payload = payload_item
+                    else:
+                        logger.warning(f"Skipping unknown payload type: {type(payload_item)}")
+                        continue
+
                     response = self.test_payload(url, payload, category, baseline_response)
                     responses.append(response)
+
+                    if response.get("vulnerable"):
+                        self.learning_engine.add_successful_payload(payload, category)
+                    else:
+                        # Mutate and retry on failure - using the original string value
+                        payload_value = payload.get("value", "")
+                        if not isinstance(payload_value, str):
+                            continue # Cannot mutate non-string value
+
+                        mutated = self.payload_mutator.mutate_payloads([payload_value])
+                        for p_str in mutated[:2]:
+                            # Normalize again for testing
+                            p = {"value": p_str, "method": "GET", "params": {}}
+                            resp = self.test_payload(url, p, category, baseline_response)
+                            responses.append(resp)
+                            if resp.get("vulnerable"):
+                                self.learning_engine.add_successful_payload(p, category)
+                                break
 
                     # Small delay to avoid overwhelming
                     time.sleep(0.1)
 
                 except Exception as e:
-                    logger.error(f"[PAYLOAD] Failed to test payload on {url}: {e} (payload: {payload_value})")
+                    logger.error(f"[PAYLOAD] Failed to test payload on {url}: {e} (payload: {payload})")
 
         return responses
 
@@ -190,7 +250,7 @@ class ScanningEngine:
         params = payload.get("params", {})
 
         max_retries = 3
-        mutations = self._apply_waf_bypass(payload_value, category)
+        mutations = self.payload_mutator._apply_waf_bypass(payload_value)
         import random
         random.shuffle(mutations)  # Randomize order
         
@@ -475,3 +535,24 @@ class ScanningEngine:
         analysis["confidence"] = min(analysis["confidence"], 1.0)
 
         return analysis
+
+    def _detect_sqli_potential(self, endpoint: Dict[str, Any]) -> bool:
+        """Detect if endpoint is likely vulnerable to SQLi"""
+        url = endpoint.get("url", "")
+        parameters = endpoint.get("parameters", [])
+        return len(parameters) > 0 and any(p.get("type") in ["query", "form"] for p in parameters)
+
+    def _detect_xss_potential(self, endpoint: Dict[str, Any]) -> bool:
+        """Detect if endpoint is likely vulnerable to XSS"""
+        url = endpoint.get("url", "")
+        parameters = endpoint.get("parameters", [])
+        return len(parameters) > 0
+
+    def _detect_xss_context(self, response_text: str) -> str:
+        """Detect XSS context from response"""
+        if '<script' in response_text.lower():
+            return "javascript"
+        elif 'href=' in response_text or 'src=' in response_text:
+            return "attribute"
+        else:
+            return "html"
