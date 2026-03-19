@@ -1642,7 +1642,7 @@ def main():
         "skip_toolkit": args.skip_toolkit,
         "skip_exploit": args.no_exploit,
         "verbose": args.verbose,
-        "aggressive": True,
+        "aggressive": True
     }
 
     if args.target:
