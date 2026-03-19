@@ -355,6 +355,8 @@ class BatchDisplay:
                     chains = data.get('chains', [])
                     toolkit_m = data.get('toolkit_metrics', {})
                     phase = data.get('phase', 'init')
+                    phase_detail = data.get('phase_detail', '')
+                    phase_tool = data.get('phase_tool', '')
                     iter_info = f"{data.get('iter', 1)}/{data.get('max_iter', 5)}"
                     
                     print(f"│  │                                                                                                  │")
@@ -365,14 +367,30 @@ class BatchDisplay:
                         subs = stats.get('subs', 0)
                         live = stats.get('live', 0)
                         print(f"│  │  ├─ 📋 Recon: {subs:>4} subdomains | {live:>4} live hosts                                          │")
+                        
+                        # Show which tools running
+                        if phase_tool:
+                            tools = phase_tool.split('+')[:3]
+                            tools_str = " → ".join([t.strip()[:15] for t in tools])
+                            print(f"│  │  ├─   • {tools_str:<55}         │")
+                        
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
                     
                     elif phase == 'live':
                         live = stats.get('live', 0)
                         print(f"│  │  ├─ 🌐 Live Hosts: {live:>4}                                                                │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
                     
                     elif phase in ['crawl', 'discovery']:
                         eps = stats.get('eps', 0)
                         print(f"│  │  ├─ 📁 Endpoints: {eps:>5} discovered                                                          │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
                     
                     elif phase == 'toolkit':
                         toolkit_items = []
@@ -390,11 +408,29 @@ class BatchDisplay:
                         if toolkit_items:
                             toolkit_str = " | ".join(toolkit_items)
                             print(f"│  │  ├─ 🛠️  {toolkit_str:<50}    │")
+                        
+                        # Show current tool
+                        if phase_tool:
+                            print(f"│  │  ├─   • {phase_tool[:58]:<58} │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
                     
                     elif phase in ['scan', 'classify', 'rank']:
                         vulns = stats.get('vulns', 0)
                         eps = stats.get('eps', 0)
                         print(f"│  │  ├─ ⚡ Scan: {eps:>5} endpoints | {vulns:>3} vulns found                                           │")
+                        
+                        # Payload testing info
+                        payloads_tested = stats.get('payloads_tested', 0)
+                        total_payloads = stats.get('total_payloads', 100)
+                        if total_payloads > 0:
+                            pct = int(payloads_tested * 100 / total_payloads)
+                            print(f"│  │  ├─   • Payloads: {payloads_tested:>3}/{total_payloads} ({pct:>2}%)                                              │")
+                        
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
                     
                     elif phase in ['chain', 'graph']:
                         if chains:
@@ -402,6 +438,10 @@ class BatchDisplay:
                             print(f"│  │  ├─ 🔗 Chains: {len(chains):>3} total | {exploited:>2} exploited                                          │")
                         else:
                             print(f"│  │  ├─ 🔗 Chains: analyzing...                                                                │")
+                        
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
                     
                     elif phase == 'exploit':
                         exploited = stats.get('exploited', 0)
@@ -411,19 +451,71 @@ class BatchDisplay:
                             print(f"│  │  ├─ 💥 Exploit: {exploited:>2} exploited | {total_chains:>3} chains tested                                  │")
                         else:
                             print(f"│  │  ├─ 💥 Exploit: {exploited:>2} exploited                                                    │")
+                        
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
                     
                     # Progress/iteration
                     print(f"│  │  ├─ 📊 Progress: Iteration {iter_info}                                                         │")
                     
                     # Phase & Tool info
-                    phase_tool = data.get('phase_tool', '') or 'n/a'
                     phase_status = data.get('phase_status', 'idle')
-                    print(f"│  │  ├─ ⚙️  Phase: {phase:<10} | Tool: {phase_tool[:35]:<35}    │")
+                    status_icon = '▶️' if phase_status == 'running' else '⏸️' if phase_status == 'paused' else '✓' if phase_status == 'done' else '⚙️'
+                    print(f"│  │  ├─ {status_icon} Phase: {phase:<10} | Status: {phase_status:<15}        │")
                     
                     last_action = data.get('last_action', '')
                     if last_action and last_action != 'starting...':
                         last_action = last_action[:60]
                         print(f"│  │  └─ ⏱️  {last_action:<66}│")
+                
+                print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────┘")
+            
+            # Current Activity section - show what each tool is doing
+            if active_count > 0:
+                print("│                                                                                                      │")
+                print("│  ┌─ CURRENT ACTIVITY ──────────────────────────────────────────────────────────────────────────────┐")
+                
+                for idx, (domain, data) in enumerate(list(self.domains.items())[:2], 1):
+                    phase_tool = data.get('phase_tool', '')
+                    phase_detail = data.get('phase_detail', '')
+                    stats = data.get('stats', {})
+                    phase = data.get('phase', 'init')
+                    
+                    print(f"│  │                                                                                                  │")
+                    print(f"│  │  {domain}:                                                                                             │")
+                    
+                    # Parse tools and show individual task status
+                    if phase_tool:
+                        tools = [t.strip() for t in phase_tool.split('+')]
+                        for tool_name in tools[:4]:  # Show max 4 tools
+                            tool_short = tool_name[:20]
+                            
+                            # Determine status icon and message
+                            if phase_detail and tool_short.lower() in phase_detail.lower():
+                                icon = '▶️'
+                                msg = f"{tool_short[:18]:.<18} {phase_detail[:35]}"
+                            else:
+                                icon = '⏳' if 'running' in str(data.get('phase_status', '')).lower() else '✓'
+                                
+                                # Show relevant counter
+                                if 'subfinder' in tool_short.lower() or 'assetfinder' in tool_short.lower():
+                                    msg = f"{tool_short[:18]:.<18} {stats.get('subs', 0):>4} subdomains found"
+                                elif 'naabu' in tool_short.lower() or 'nmap' in tool_short.lower():
+                                    msg = f"{tool_short[:18]:.<18} {stats.get('live', 0):>4} hosts scanned"
+                                elif 'gau' in tool_short.lower() or 'wayback' in tool_short.lower():
+                                    msg = f"{tool_short[:18]:.<18} {stats.get('eps', 0):>4} endpoints found"
+                                elif 'nuclei' in tool_short.lower() or 'nikto' in tool_short.lower():
+                                    msg = f"{tool_short[:18]:.<18} {stats.get('vulns', 0):>4} vulns detected"
+                                else:
+                                    msg = f"{tool_short[:18]:.<18} processing..."
+                            
+                            print(f"│  │  {icon} {msg:<52}                      │")
+                    
+                    # Show real-time detail
+                    if phase_detail and len(phase_detail) > 0:
+                        detail_line = f"ℹ️  {phase_detail[:60]}"
+                        print(f"│  │  └─ {detail_line:<62}│")
                 
                 print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────┘")
             
