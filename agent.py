@@ -354,6 +354,7 @@ class BatchDisplay:
                     stats = data.get('stats', {})
                     chains = data.get('chains', [])
                     vulns = stats.get('vulns', 0)
+                    toolkit_m = data.get('toolkit_metrics', {})
                     
                     print(f"│  │                                                                                                  │")
                     print(f"│  │  {domain}:                                                                                             │")
@@ -368,6 +369,24 @@ class BatchDisplay:
                     if data.get('endpoints'):
                         eps = data.get('endpoints', {})
                         print(f"│  │  ├─ 📁 Endpoints: {eps.get('total', 0)} total, API:{eps.get('api', 0)} Admin:{eps.get('admin', 0)}              │")
+                    
+                    # Toolkit metrics
+                    toolkit_items = []
+                    if toolkit_m.get('tech', 0) > 0:
+                        toolkit_items.append(f"Tech:{toolkit_m['tech']}")
+                    if toolkit_m.get('ports', 0) > 0:
+                        toolkit_items.append(f"Ports:{toolkit_m['ports']}")
+                    if toolkit_m.get('dirs', 0) > 0:
+                        toolkit_items.append(f"Dirs:{toolkit_m['dirs']}")
+                    if toolkit_m.get('api', 0) > 0:
+                        toolkit_items.append(f"API:{toolkit_m['api']}")
+                    if toolkit_m.get('vulns', 0) > 0:
+                        toolkit_items.append(f"CVEs:{toolkit_m['vulns']}")
+                    
+                    if toolkit_items:
+                        toolkit_str = " | ".join(toolkit_items)
+                        print(f"│  │  ├─ 🛠️  Toolkit: {toolkit_str:<40}           │")
+                    
                     phase = data.get('phase', 'init')
                     phase_tool = data.get('phase_tool', '') or 'n/a'
                     phase_status = data.get('phase_status', 'idle')
