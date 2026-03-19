@@ -353,48 +353,77 @@ class BatchDisplay:
                 for idx, (domain, data) in enumerate(list(self.domains.items())[:2], 1):
                     stats = data.get('stats', {})
                     chains = data.get('chains', [])
-                    vulns = stats.get('vulns', 0)
                     toolkit_m = data.get('toolkit_metrics', {})
+                    phase = data.get('phase', 'init')
+                    iter_info = f"{data.get('iter', 1)}/{data.get('max_iter', 5)}"
                     
                     print(f"│  │                                                                                                  │")
                     print(f"│  │  {domain}:                                                                                             │")
                     
-                    if vulns > 0:
-                        print(f"│  │  ├─ 🐞 Found: {vulns} vulnerabilities                                                          │")
+                    # Phase-specific stats
+                    if phase in ['recon', 'init']:
+                        subs = stats.get('subs', 0)
+                        live = stats.get('live', 0)
+                        print(f"│  │  ├─ 📋 Recon: {subs:>4} subdomains | {live:>4} live hosts                                          │")
                     
-                    if chains:
-                        exploited = sum(1 for c in chains if c.get('exploited'))
-                        print(f"│  │  ├─ 🔗 Chains: {len(chains)} total, {exploited} exploited                                       │")
+                    elif phase == 'live':
+                        live = stats.get('live', 0)
+                        print(f"│  │  ├─ 🌐 Live Hosts: {live:>4}                                                                │")
                     
-                    if data.get('endpoints'):
-                        eps = data.get('endpoints', {})
-                        print(f"│  │  ├─ 📁 Endpoints: {eps.get('total', 0)} total, API:{eps.get('api', 0)} Admin:{eps.get('admin', 0)}              │")
+                    elif phase in ['crawl', 'discovery']:
+                        eps = stats.get('eps', 0)
+                        print(f"│  │  ├─ 📁 Endpoints: {eps:>5} discovered                                                          │")
                     
-                    # Toolkit metrics
-                    toolkit_items = []
-                    if toolkit_m.get('tech', 0) > 0:
-                        toolkit_items.append(f"Tech:{toolkit_m['tech']}")
-                    if toolkit_m.get('ports', 0) > 0:
-                        toolkit_items.append(f"Ports:{toolkit_m['ports']}")
-                    if toolkit_m.get('dirs', 0) > 0:
-                        toolkit_items.append(f"Dirs:{toolkit_m['dirs']}")
-                    if toolkit_m.get('api', 0) > 0:
-                        toolkit_items.append(f"API:{toolkit_m['api']}")
-                    if toolkit_m.get('vulns', 0) > 0:
-                        toolkit_items.append(f"CVEs:{toolkit_m['vulns']}")
+                    elif phase == 'toolkit':
+                        toolkit_items = []
+                        if toolkit_m.get('tech', 0) > 0:
+                            toolkit_items.append(f"Tech:{toolkit_m['tech']}")
+                        if toolkit_m.get('ports', 0) > 0:
+                            toolkit_items.append(f"Ports:{toolkit_m['ports']}")
+                        if toolkit_m.get('dirs', 0) > 0:
+                            toolkit_items.append(f"Dirs:{toolkit_m['dirs']}")
+                        if toolkit_m.get('api', 0) > 0:
+                            toolkit_items.append(f"API:{toolkit_m['api']}")
+                        if toolkit_m.get('vulns', 0) > 0:
+                            toolkit_items.append(f"CVEs:{toolkit_m['vulns']}")
+                        
+                        if toolkit_items:
+                            toolkit_str = " | ".join(toolkit_items)
+                            print(f"│  │  ├─ 🛠️  {toolkit_str:<50}    │")
                     
-                    if toolkit_items:
-                        toolkit_str = " | ".join(toolkit_items)
-                        print(f"│  │  ├─ 🛠️  Toolkit: {toolkit_str:<40}           │")
+                    elif phase in ['scan', 'classify', 'rank']:
+                        vulns = stats.get('vulns', 0)
+                        eps = stats.get('eps', 0)
+                        print(f"│  │  ├─ ⚡ Scan: {eps:>5} endpoints | {vulns:>3} vulns found                                           │")
                     
-                    phase = data.get('phase', 'init')
+                    elif phase in ['chain', 'graph']:
+                        if chains:
+                            exploited = sum(1 for c in chains if c.get('exploited'))
+                            print(f"│  │  ├─ 🔗 Chains: {len(chains):>3} total | {exploited:>2} exploited                                          │")
+                        else:
+                            print(f"│  │  ├─ 🔗 Chains: analyzing...                                                                │")
+                    
+                    elif phase == 'exploit':
+                        exploited = stats.get('exploited', 0)
+                        chains = data.get('chains', [])
+                        if chains:
+                            total_chains = len(chains)
+                            print(f"│  │  ├─ 💥 Exploit: {exploited:>2} exploited | {total_chains:>3} chains tested                                  │")
+                        else:
+                            print(f"│  │  ├─ 💥 Exploit: {exploited:>2} exploited                                                    │")
+                    
+                    # Progress/iteration
+                    print(f"│  │  ├─ 📊 Progress: Iteration {iter_info}                                                         │")
+                    
+                    # Phase & Tool info
                     phase_tool = data.get('phase_tool', '') or 'n/a'
                     phase_status = data.get('phase_status', 'idle')
-                    print(f"│  │  ├─ ⚙️  Phase: {phase:<10} Tool: {phase_tool[:28]:<28} Status: {phase_status:<10} │")
+                    print(f"│  │  ├─ ⚙️  Phase: {phase:<10} | Tool: {phase_tool[:35]:<35}    │")
                     
-                    last_action = data.get('last_action', '')[:50]
-                    if last_action:
-                        print(f"│  │  └─ ⏱️  {last_action}                                                    │")
+                    last_action = data.get('last_action', '')
+                    if last_action and last_action != 'starting...':
+                        last_action = last_action[:60]
+                        print(f"│  │  └─ ⏱️  {last_action:<66}│")
                 
                 print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────┘")
             
