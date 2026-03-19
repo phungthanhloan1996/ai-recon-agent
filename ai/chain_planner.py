@@ -61,11 +61,9 @@ class ChainPlanner:
             if chain:
                 chains.append(chain)
         
-        # Add pattern-based chains as fallback
-        pattern_chains = self._detect_chain_patterns()
-        chains.extend(pattern_chains)
-        chains.extend(self._build_conditioned_wp_chains())
-        
+        # Add fallback heuristics (WordPress / pattern chains)
+        chains.extend(self.plan_chains())
+
         # Smart prioritization
         chains = self.smart_prioritize(chains)
         

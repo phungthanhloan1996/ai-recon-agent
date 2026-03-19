@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from glob import glob
 import threading
 from collections import defaultdict, deque
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 # ─── Suppress DEBUG logs from libraries ────────────────────────────────────
 logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -408,7 +408,7 @@ class DomainDisplay:
             'phase': 'init',
             'iter': 1,
             'max_iter': 5,
-            'stats': {'subs': 0, 'live': 0, 'eps': 0, 'vulns': 0, 'exploited': 0, 'wp': 0},
+            'stats': {'subs': 0, 'live': 0, 'eps': 0, 'vulns': 0, 'exploited': 0, 'wp': 0, 'tech_detected': 0},
             'chains': [],
             'last_action': 'initializing...',
             'phase_detail': '',
@@ -417,7 +417,8 @@ class DomainDisplay:
             'tech': {},
             'endpoints': {'api': 0, 'admin': 0, 'upload': 0, 'total': 0},
             'vuln_types': defaultdict(int),
-            'learning': {'mutated': 0, 'confidence': 0.0}
+            'learning': {'mutated': 0, 'confidence': 0.0},
+            'toolkit_metrics': {'tech': 0, 'ports': 0, 'dirs': 0, 'api': 0, 'vulns': 0}
         }
         self.running = True
         
@@ -500,6 +501,22 @@ class DomainDisplay:
             print(f"│  └─ {tech_str:<70} │")
         else:
             print(f"│  └─ Tech: detecting...                                                     │")
+        
+        # Toolkit Metrics
+        toolkit_m = d.get('toolkit_metrics', {})
+        if any([toolkit_m.get(k, 0) > 0 for k in ['tech', 'ports', 'dirs', 'api', 'vulns']]):
+            print("│                                                                              │")
+            print("│  🛠️ TOOLKIT SCAN RESULTS                                                    │")
+            if toolkit_m.get('tech', 0) > 0:
+                print(f"│  ├─ Technologies: {toolkit_m.get('tech', 0):<3}                                        │")
+            if toolkit_m.get('ports', 0) > 0:
+                print(f"│  ├─ Ports Open  : {toolkit_m.get('ports', 0):<3}                                        │")
+            if toolkit_m.get('dirs', 0) > 0:
+                print(f"│  ├─ Directories : {toolkit_m.get('dirs', 0):<3}                                        │")
+            if toolkit_m.get('api', 0) > 0:
+                print(f"│  ├─ API Endpoints: {toolkit_m.get('api', 0):<3}                                        │")
+            if toolkit_m.get('vulns', 0) > 0:
+                print(f"│  └─ CVEs Found : {toolkit_m.get('vulns', 0):<3}                                        │")
         
         # Endpoints
         eps = d['endpoints']
@@ -669,6 +686,7 @@ class ReconAgent:
         self.phase_tool = ""
         self.phase_status = "idle"
         self.learning_stats = {'mutated': 0, 'confidence': 0.0}
+        self.toolkit_metrics = {'tech': 0, 'ports': 0, 'dirs': 0, 'api': 0, 'vulns': 0}
         scan_meta = self.state.get("scan_metadata", {}) or {}
         self.completed_phases = set(scan_meta.get("completed_phases", []) or [])
         if self.resumed_from_state:
@@ -690,6 +708,7 @@ class ReconAgent:
                 'chains': self.chains_data,
                 'tech': self.tech_stack.copy(),
                 'endpoints': self.endpoint_stats.copy(),
+                'toolkit_metrics': self.toolkit_metrics.copy(),
                 'last_action': self.last_action,
                 'start_time': self.scan_start_time
             })
@@ -707,6 +726,7 @@ class ReconAgent:
                     endpoints=self.endpoint_stats.copy(),
                     tech=self.tech_stack.copy(),
                     learning=self.learning_stats.copy(),
+                    toolkit_metrics=self.toolkit_metrics.copy(),
                     last_action=self.last_action
                 )
 
@@ -1081,18 +1101,163 @@ class ReconAgent:
         self._mark_phase_done("wordpress")
 
     def _run_toolkit_phase(self):
+        """Enhanced toolkit scanning with detailed tracking of all sub-modules"""
         live_hosts = self._select_live_hosts_for_deep_scan(limit=30)
+        
+        if not live_hosts:
+            self.last_action = "toolkit: no live hosts for scanning"
+            self._mark_phase_done("toolkit")
+            return
+        
         self._set_activity("kali-toolkit", "running", "kali-tools")
+        self.logger.info(f"[TOOLKIT] Starting comprehensive scan on {len(live_hosts)} hosts")
+        
+        # Run toolkit with progress tracking
         findings = self.toolkit.run(live_hosts, progress_cb=self._progress_callback)
+        self._set_activity("kali-toolkit", "processing", "kali-tools")
+        
+        # Process and aggregate findings
+        toolkit_metrics = self._process_toolkit_findings(findings)
+        
+        # Store metrics for display update
+        self.toolkit_metrics = {
+            'tech': toolkit_metrics.get('tech_count', 0),
+            'ports': toolkit_metrics.get('ports_count', 0),
+            'dirs': toolkit_metrics.get('directories_count', 0),
+            'api': toolkit_metrics.get('api_count', 0),
+            'vulns': len(toolkit_metrics.get('vulnerabilities', []))
+        }
+        
         self._set_activity("kali-toolkit", "done", "kali-tools")
-        if findings:
-            self.last_action = f"toolkit: {len(findings)} findings"
+        self.logger.info(f"[TOOLKIT] Scan complete: {toolkit_metrics['summary']}")
+        
+        # Update display with detailed metrics
+        if toolkit_metrics['total'] > 0:
+            self.last_action = f"toolkit: {toolkit_metrics['summary']}"
             if self.batch_display:
-                self.batch_display._add_to_feed("🛠️", "Toolkit", self.target, f"{len(findings)} findings")
+                detail_msg = f"Tech: {toolkit_metrics['tech_count']} | Ports: {toolkit_metrics['ports_count']} | API: {toolkit_metrics['api_count']}"
+                self.batch_display._add_to_feed("🛠️", "Toolkit", self.target, detail_msg)
         else:
             self.last_action = "toolkit: no findings"
+        
         self._update_display()
         self._mark_phase_done("toolkit")
+
+    def _process_toolkit_findings(self, findings: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Process and aggregate toolkit findings into metrics"""
+        metrics = {
+            'total': len(findings),
+            'tech_count': 0,
+            'tech_list': set(),
+            'ports_count': 0,
+            'directories_count': 0,
+            'api_count': 0,
+            'vulnerabilities': [],
+            'summary': ''
+        }
+        
+        for finding in findings:
+            tool_name = finding.get('tool', 'unknown')
+            
+            if tool_name == 'whatweb':
+                data = finding.get('data', {})
+                techs = data.get('technologies', [])
+                metrics['tech_count'] += len(techs)
+                metrics['tech_list'].update([t.get('name', '') for t in techs])
+                
+                vulns = data.get('vulnerabilities', [])
+                metrics['vulnerabilities'].extend(vulns)
+                
+                self.logger.info(f"[WHATWEB] {finding.get('url')}: {len(techs)} techs, {len(vulns)} CVEs")
+                
+            elif tool_name == 'naabu':
+                data = finding.get('data', {})
+                ports = data.get('ports', [])
+                metrics['ports_count'] += len(ports)
+                services = data.get('services', {})
+                
+                self.logger.info(f"[NAABU] {finding.get('host')}: {len(ports)} ports open")
+                for port, service_info in services.items():
+                    self.logger.debug(f"  ├─ {port}: {service_info.get('service', 'unknown')}")
+                
+            elif tool_name == 'dirbusting':
+                data = finding.get('data', {})
+                dirs = data.get('directories', [])
+                files = data.get('files', [])
+                suspicious = data.get('suspicious', [])
+                metrics['directories_count'] += len(dirs) + len(files)
+                
+                self.logger.info(f"[DIRBUSTING] {finding.get('url')}: {len(dirs)} dirs, {len(files)} files, {len(suspicious)} suspicious")
+                
+            elif tool_name == 'api_scanner':
+                data = finding.get('data', {})
+                rest_endpoints = data.get('rest_endpoints', [])
+                graphql_endpoints = data.get('graphql_endpoints', [])
+                api_docs = data.get('api_docs', [])
+                api_total = len(rest_endpoints) + len(graphql_endpoints) + len(api_docs)
+                metrics['api_count'] += api_total
+                
+                self.logger.info(f"[API-SCANNER] {finding.get('url')}: {len(rest_endpoints)} REST, {len(graphql_endpoints)} GraphQL, {len(api_docs)} docs")
+                
+                vulns = data.get('vulnerabilities', [])
+                metrics['vulnerabilities'].extend(vulns)
+                for vuln in vulns:
+                    self.logger.warning(f"[API-VULN] {vuln.get('type')}: {finding.get('url')}")
+            
+            elif tool_name == 'wafw00f':
+                self.logger.info(f"[WAFW00F] WAF detection: {finding.get('severity')}")
+            
+            elif tool_name == 'nikto':
+                self.logger.info(f"[NIKTO] Scan completed: {finding.get('url')}")
+            
+            elif tool_name == 'nmap':
+                self.logger.info(f"[NMAP] Port scan completed: {finding.get('host')}")
+        
+        # Build summary
+        summary_parts = []
+        if metrics['tech_count'] > 0:
+            summary_parts.append(f"{metrics['tech_count']} tech")
+        if metrics['ports_count'] > 0:
+            summary_parts.append(f"{metrics['ports_count']} ports")
+        if metrics['directories_count'] > 0:
+            summary_parts.append(f"{metrics['directories_count']} dirs")
+        if metrics['api_count'] > 0:
+            summary_parts.append(f"{metrics['api_count']} API")
+        if metrics['vulnerabilities']:
+            summary_parts.append(f"{len(metrics['vulnerabilities'])} vulns")
+        
+        metrics['summary'] = ' | '.join(summary_parts) if summary_parts else 'no data'
+        
+        # Update state with discovered data
+        self._merge_toolkit_data_into_state(metrics)
+        
+        return metrics
+
+    def _merge_toolkit_data_into_state(self, metrics: Dict[str, Any]):
+        """Merge toolkit findings into state manager"""
+        # Update technologies
+        if metrics['tech_list']:
+            current_tech = self.state.get('technologies', {}) or {}
+            for tech in metrics['tech_list']:
+                if tech and tech not in current_tech:
+                    current_tech[tech] = {'detected': True}
+            self.state.update(technologies=current_tech)
+        
+        # Update stats
+        if metrics['tech_count'] > 0:
+            current_stats = self.stats.copy()
+            current_stats['tech_detected'] = metrics['tech_count']
+            self.stats = current_stats
+        
+        # Update vulnerabilities
+        if metrics['vulnerabilities']:
+            current_vulns = self.state.get('vulnerabilities', []) or []
+            for vuln in metrics['vulnerabilities']:
+                if vuln not in current_vulns:
+                    current_vulns.append(vuln)
+            self.state.update(vulnerabilities=current_vulns)
+            self.stats['vulns'] = len(current_vulns)
+
 
     def _run_discovery_phase(self):
         before = len(self.state.get("endpoints", []))
