@@ -71,7 +71,8 @@ class ReportGenerator:
                     "pending": self.state.get("manual_validation_required", []),
                     "completed": self.state.get("manual_validation_completed", [])
                 },
-                "manual_attack_playbook": self.state.get("manual_attack_playbook", [])
+                "manual_attack_playbook": self.state.get("manual_attack_playbook", []),
+                "wordpress_advanced_scan": self.state.get("technical_details", {}).get("wordpress_advanced_scan", {})
             }
         }
 

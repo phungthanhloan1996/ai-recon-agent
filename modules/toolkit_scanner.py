@@ -115,26 +115,26 @@ class ToolkitScanner:
         out: List[Dict[str, Any]] = []
         jobs: List[tuple[str, Callable]] = []
         
-        # Whatweb - advanced technology detection with CVE matching
-        jobs.append(("whatweb", lambda: self._scan_whatweb(url, progress_cb)))
+        # Whatweb - advanced technology detection with CVE matching (increased timeout)
+        jobs.append(("whatweb", lambda: self._scan_whatweb(url, progress_cb, timeout=120)))
         
         # Wappalyzer - comprehensive tech fingerprinting
         jobs.append(("wappalyzer", lambda: self._scan_wappalyzer(url, progress_cb)))
         
         # WAF detection
         if tool_available("wafw00f"):
-            jobs.append(("wafw00f", lambda: self._scan_wafw00f(url, progress_cb)))
+            jobs.append(("wafw00f", lambda: self._scan_wafw00f(url, progress_cb, timeout=120)))
         
         # Nikto - web server vulnerability scanner
         if tool_available("nikto"):
-            jobs.append(("nikto", lambda: self._scan_nikto(url, progress_cb)))
+            jobs.append(("nikto", lambda: self._scan_nikto(url, progress_cb, timeout=180)))
         
         # Naabu - fast port scanning (if naabu is available)
         if tool_available("naabu"):
-            jobs.append(("naabu", lambda: self._scan_naabu(host, progress_cb)))
+            jobs.append(("naabu", lambda: self._scan_naabu(host, progress_cb, timeout=180)))
         elif tool_available("nmap"):
-            # Fallback to nmap
-            jobs.append(("nmap", lambda: self._scan_nmap(host, progress_cb)))
+            # Fallback to nmap with increased timeout
+            jobs.append(("nmap", lambda: self._scan_nmap(host, progress_cb, timeout=180)))
         
         workers = int(self.budget.get("toolkit_parallel_tools", 4))
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -191,14 +191,15 @@ class ToolkitScanner:
     def _scan_whatweb(
         self,
         url: str,
-        progress_cb: Optional[Callable[[str, str, str], None]] = None
+        progress_cb: Optional[Callable[[str, str, str], None]] = None,
+        timeout: int = 60
     ) -> Optional[Dict[str, Any]]:
         """Run whatweb scanner"""
         if progress_cb:
             progress_cb("toolkit", "whatweb", "running")
         
         try:
-            result = self.whatweb_runner.run(url, timeout=60)
+            result = self.whatweb_runner.run(url, timeout=timeout)
             if progress_cb:
                 progress_cb("toolkit", "whatweb", "done" if result.get("success") else "failed")
             
@@ -218,8 +219,25 @@ class ToolkitScanner:
                     "success": True,
                     "data": result
                 }
+            else:
+                # Return partial success with error info
+                logger.warning(f"[WHATWEB] No data for {url}: {result.get('error')}")
+                return {
+                    "tool": "whatweb",
+                    "url": url,
+                    "severity": "INFO",
+                    "success": False,
+                    "data": result
+                }
         except Exception as e:
             logger.error(f"Whatweb error: {e}")
+            return {
+                "tool": "whatweb",
+                "url": url,
+                "severity": "LOW",
+                "success": False,
+                "error": str(e)
+            }
         
         return None
 
@@ -256,14 +274,15 @@ class ToolkitScanner:
     def _scan_wafw00f(
         self,
         url: str,
-        progress_cb: Optional[Callable[[str, str, str], None]] = None
+        progress_cb: Optional[Callable[[str, str, str], None]] = None,
+        timeout: int = 90
     ) -> Optional[Dict[str, Any]]:
         """Run WAF detection"""
         if progress_cb:
             progress_cb("toolkit", "wafw00f", "running")
         
         try:
-            ret, stdout, _ = run_command(["wafw00f", "-a", url], timeout=90)
+            ret, stdout, _ = run_command(["wafw00f", "-a", url], timeout=timeout)
             if progress_cb:
                 progress_cb("toolkit", "wafw00f", "done" if ret == 0 else "failed")
             
@@ -274,10 +293,27 @@ class ToolkitScanner:
                     "tool": "wafw00f",
                     "url": url,
                     "severity": severity,
-                    "output": stdout[:2000]
+                    "output": stdout[:2000],
+                    "success": True
+                }
+            else:
+                logger.warning(f"[WAFW00F] Scan incomplete for {url} (return code: {ret})")
+                return {
+                    "tool": "wafw00f",
+                    "url": url,
+                    "severity": "LOW",
+                    "output": stdout[:1000] if stdout else stderr[:1000] if _ else "",
+                    "success": False
                 }
         except Exception as e:
             logger.error(f"WAF detection error: {e}")
+            return {
+                "tool": "wafw00f",
+                "url": url,
+                "severity": "LOW",
+                "success": False,
+                "error": str(e)
+            }
         
         return None
 
@@ -291,20 +327,23 @@ class ToolkitScanner:
             progress_cb("toolkit", "nikto", "running")
         
         try:
+            # Prepare output file path
+            output_file = os.path.join(self.output_dir, f"nikto_{url.replace(':', '_').replace('/', '_')}.json")
+            
             ret, stdout, _ = run_command(
-                ["nikto", "-host", url, "-maxtime", "2m", "-Format", "json"],
+                ["nikto", "-host", url, "-maxtime", "2m", "-Format", "json", "-o", output_file],
                 timeout=180
             )
             if progress_cb:
                 progress_cb("toolkit", "nikto", "done" if ret == 0 else "failed")
             
-            if ret == 0 and stdout:
-                logger.info(f"[NIKTO] Scan completed on {url}")
+            if ret == 0 and os.path.exists(output_file):
+                logger.info(f"[NIKTO] Scan completed on {url}, saved to {output_file}")
                 return {
                     "tool": "nikto",
                     "url": url,
                     "severity": "MEDIUM",
-                    "output": stdout[:3000]
+                    "output_file": output_file
                 }
         except Exception as e:
             logger.error(f"Nikto error: {e}")
@@ -314,14 +353,15 @@ class ToolkitScanner:
     def _scan_naabu(
         self,
         host: str,
-        progress_cb: Optional[Callable[[str, str, str], None]] = None
+        progress_cb: Optional[Callable[[str, str, str], None]] = None,
+        timeout: int = 120
     ) -> Optional[Dict[str, Any]]:
         """Run naabu for fast port scanning"""
         if progress_cb:
             progress_cb("toolkit", "naabu", "running")
         
         try:
-            result = self.naabu_runner.run(host, timeout=120)
+            result = self.naabu_runner.run(host, timeout=timeout)
             if progress_cb:
                 progress_cb("toolkit", "naabu", "done" if result.get("success") else "failed")
             
@@ -335,40 +375,104 @@ class ToolkitScanner:
                     "tool": "naabu",
                     "host": host,
                     "severity": "INFO",
-                    "data": result
+                    "data": result,
+                    "success": True
+                }
+            else:
+                logger.warning(f"[NAABU] No ports found or failed for {host}: {result.get('error')}")
+                return {
+                    "tool": "naabu",
+                    "host": host,
+                    "severity": "INFO",
+                    "data": result,
+                    "success": False
                 }
         except Exception as e:
             logger.error(f"Naabu error: {e}")
+            return {
+                "tool": "naabu",
+                "host": host,
+                "severity": "LOW",
+                "success": False,
+                "error": str(e)
+            }
         
         return None
 
     def _scan_nmap(
         self,
         host: str,
-        progress_cb: Optional[Callable[[str, str, str], None]] = None
+        progress_cb: Optional[Callable[[str, str, str], None]] = None,
+        timeout: int = 120
     ) -> Optional[Dict[str, Any]]:
-        """Run nmap for port scanning (fallback)"""
+        """Run nmap for port scanning (fallback) - optimized"""
         if progress_cb:
             progress_cb("toolkit", "nmap", "running")
         
         try:
-            ret, stdout, _ = run_command(
-                ["nmap", "-sV", "-Pn", "--top-ports", "100", "--open", host],
-                timeout=180
-            )
+            # Optimized: fewer ports, faster timing
+            cmd = ["nmap", "-Pn", "--top-ports", "50", "--open", host]
+            
+            # Add timing - local hosts get faster settings
+            if host in ["localhost", "127.0.0.1", "::1"]:
+                cmd.extend(["-sV", "-T5"])
+            else:
+                cmd.append("-T4")
+            
+            ret, stdout, stderr = run_command(cmd, timeout=timeout)
             if progress_cb:
                 progress_cb("toolkit", "nmap", "done" if ret == 0 else "failed")
             
             if ret == 0 and stdout:
-                logger.info(f"[NMAP] Port scan completed on {host}")
+                open_ports = stdout.count("/tcp open") if stdout else 0
+                logger.info(f"[NMAP] Port scan completed on {host}: {open_ports} ports open")
                 return {
                     "tool": "nmap",
                     "host": host,
                     "severity": "INFO",
-                    "output": stdout[:2000]
+                    "output": stdout[:2000],
+                    "success": True,
+                    "ports_found": open_ports
                 }
+            elif stdout:
+                # Partial results
+                open_ports = stdout.count("/tcp open") if stdout else 0
+                logger.warning(f"[NMAP] Partial {host}: {open_ports} ports")
+                return {
+                    "tool": "nmap",
+                    "host": host,
+                    "severity": "INFO",
+                    "output": stdout[:1000],
+                    "success": True if open_ports > 0 else False,
+                    "ports_found": open_ports
+                }
+            else:
+                logger.warning(f"[NMAP] Failed for {host}")
+                return {
+                    "tool": "nmap",
+                    "host": host,
+                    "severity": "INFO",
+                    "output": stderr[:500] if stderr else "[NO OUTPUT]",
+                    "success": False
+                }
+        except subprocess.TimeoutExpired:
+            logger.warning(f"[NMAP] Timeout on {host}")
+            return {
+                "tool": "nmap",
+                "host": host,
+                "severity": "INFO",
+                "output": "[TIMEOUT]",
+                "success": False
+            }
         except Exception as e:
             logger.error(f"Nmap error: {e}")
+            return {
+                "tool": "nmap",
+                "host": host,
+                "severity": "LOW",
+                "success": False,
+                "error": str(e)
+            }
         
         return None
 

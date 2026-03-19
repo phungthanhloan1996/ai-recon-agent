@@ -26,6 +26,14 @@ from core.response_analyzer import ResponseAnalyzer
 from core.attack_graph import AttackGraph
 from core.session_manager import SessionManager
 from core.scan_budget import ScanBudget
+from core.url_normalizer_enhanced import URLNormalizer
+from core.endpoint_analyzer import EndpointAnalyzer
+from core.exploit_executor import ExploitExecutor
+from core.error_recovery import ErrorRecovery, ConditionalPlaybook
+from core.wordlist_generator import WordlistGenerator
+
+# ─── Integration Components ─────────────────────────────────────────────────
+from integrations.wp_advanced_scan import WordPressAdvancedScan
 
 # ─── AI Components ───────────────────────────────────────────────────────────
 from ai.endpoint_classifier import EndpointClassifier
@@ -269,7 +277,7 @@ class BatchDisplay:
             print(f"│  API: {api_line:<92} │")
             
             # Config
-            print(f"│  Config: max-workers={self.max_workers} | scan-depth=5 | timeout=30s                                    │")
+            print(f"│  Config: max-workers={self.max_workers} | iterations=3 | timeout=30s | self-healing=ON                 │")
             
             # Targets file info
             print(f"│  Targets file: {self.targets_file} ({self.total_domains} domains total)                                │")
@@ -393,25 +401,13 @@ class BatchDisplay:
                             print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
                     
                     elif phase == 'toolkit':
-                        toolkit_items = []
-                        if toolkit_m.get('tech', 0) > 0:
-                            toolkit_items.append(f"Tech:{toolkit_m['tech']}")
-                        if toolkit_m.get('ports', 0) > 0:
-                            toolkit_items.append(f"Ports:{toolkit_m['ports']}")
-                        if toolkit_m.get('dirs', 0) > 0:
-                            toolkit_items.append(f"Dirs:{toolkit_m['dirs']}")
-                        if toolkit_m.get('api', 0) > 0:
-                            toolkit_items.append(f"API:{toolkit_m['api']}")
-                        if toolkit_m.get('vulns', 0) > 0:
-                            toolkit_items.append(f"CVEs:{toolkit_m['vulns']}")
-                        
-                        if toolkit_items:
-                            toolkit_str = " | ".join(toolkit_items)
-                            print(f"│  │  ├─ 🛠️  {toolkit_str:<50}    │")
+                        # Always show toolkit metrics
+                        toolkit_str = f"Tech:{toolkit_m.get('tech', 0)} | Ports:{toolkit_m.get('ports', 0)} | Dirs:{toolkit_m.get('dirs', 0)} | API:{toolkit_m.get('api', 0)}"
+                        print(f"│  │  ├─ 🛠️  {toolkit_str:<50}    │")
                         
                         # Show current tool
                         if phase_tool:
-                            print(f"│  │  ├─   • {phase_tool[:58]:<58} │")
+                            print(f"│  │  ├─   • Running: {phase_tool[:50]:<50} │")
                         if phase_detail:
                             detail_short = phase_detail[:60]
                             print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
@@ -456,6 +452,39 @@ class BatchDisplay:
                             detail_short = phase_detail[:60]
                             print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
                     
+                    # Detailed findings section
+                    findings = data.get('findings', {})
+                    if findings:
+                        findings_count = 0
+                        if findings.get('plugins'):
+                            plugin_list = findings['plugins'][:3]
+                            plugins_str = ", ".join([f"{p['name']}:{p['version']}" for p in plugin_list[:2]])
+                            print(f"│  │  ├─ 🔌 Plugins: {plugins_str:<50}│")
+                            findings_count += 1
+                        
+                        if findings.get('themes'):
+                            theme_list = findings['themes'][:2]
+                            themes_str = ", ".join([f"{t['name']}:{t['version']}" for t in theme_list[:1]])
+                            print(f"│  │  ├─ 🎨 Theme: {themes_str:<55}     │")
+                            findings_count += 1
+                        
+                        if findings.get('cms_version'):
+                            print(f"│  │  ├─ 📦 CMS: {findings.get('cms_version', 'N/A'):<60}  │")
+                            findings_count += 1
+                        
+                        if findings.get('php_version'):
+                            print(f"│  │  ├─ 🐘 PHP: {findings.get('php_version', 'N/A'):<60}  │")
+                            findings_count += 1
+                        
+                        if findings.get('waf'):
+                            print(f"│  │  ├─ 🛡️  WAF: {findings.get('waf', 'N/A'):<60}  │")
+                            findings_count += 1
+                        
+                        if findings.get('users'):
+                            users_str = ", ".join(findings.get('users', [])[:2])
+                            print(f"│  │  ├─ 👤 Users: {users_str:<58}   │")
+                            findings_count += 1
+                    
                     # Progress/iteration
                     print(f"│  │  ├─ 📊 Progress: Iteration {iter_info}                                                         │")
                     
@@ -480,42 +509,86 @@ class BatchDisplay:
                     phase_tool = data.get('phase_tool', '')
                     phase_detail = data.get('phase_detail', '')
                     stats = data.get('stats', {})
+                    toolkit_m = data.get('toolkit_metrics', {})
                     phase = data.get('phase', 'init')
                     
                     print(f"│  │                                                                                                  │")
                     print(f"│  │  {domain}:                                                                                             │")
                     
-                    # Parse tools and show individual task status
+                    # Parse phase_detail for tool info
+                    def extract_tool_activity(detail_str, tool_name):
+                        """Extract activity info for specific tool from phase_detail"""
+                        tool_lower = tool_name.lower()
+                        
+                        # Check if tool is mentioned in detail
+                        if '[' in detail_str and ']' in detail_str:
+                            parts = detail_str.split('[')
+                            for part in parts[1:]:
+                                tool_tag = part.split(']')[0].upper()
+                                if tool_lower in tool_tag.lower():
+                                    activity = part.split(']')[1].strip() if ']' in part else ""
+                                    return ('▶️', activity[:50] if activity else f"Processing...")
+                        
+                        return ('⏳', None)
+                    
+                    # Show tools with phase-specific parsing
                     if phase_tool:
                         tools = [t.strip() for t in phase_tool.split('+')]
-                        for tool_name in tools[:4]:  # Show max 4 tools
-                            tool_short = tool_name[:20]
+                        for tool_name in tools[:5]:
+                            tool_short = tool_name[:18]
                             
-                            # Determine status icon and message
-                            if phase_detail and tool_short.lower() in phase_detail.lower():
-                                icon = '▶️'
-                                msg = f"{tool_short[:18]:.<18} {phase_detail[:35]}"
+                            # Try to extract activity from phase_detail
+                            icon, activity = extract_tool_activity(phase_detail or '', tool_name)
+                            
+                            if activity:
+                                msg = f"{tool_short:<18} {activity}"
                             else:
+                                # Fallback to counter-based display
                                 icon = '⏳' if 'running' in str(data.get('phase_status', '')).lower() else '✓'
                                 
-                                # Show relevant counter
-                                if 'subfinder' in tool_short.lower() or 'assetfinder' in tool_short.lower():
-                                    msg = f"{tool_short[:18]:.<18} {stats.get('subs', 0):>4} subdomains found"
-                                elif 'naabu' in tool_short.lower() or 'nmap' in tool_short.lower():
-                                    msg = f"{tool_short[:18]:.<18} {stats.get('live', 0):>4} hosts scanned"
-                                elif 'gau' in tool_short.lower() or 'wayback' in tool_short.lower():
-                                    msg = f"{tool_short[:18]:.<18} {stats.get('eps', 0):>4} endpoints found"
-                                elif 'nuclei' in tool_short.lower() or 'nikto' in tool_short.lower():
-                                    msg = f"{tool_short[:18]:.<18} {stats.get('vulns', 0):>4} vulns detected"
+                                if phase == 'recon' or phase == 'init':
+                                    if 'subfinder' in tool_short.lower() or 'assetfinder' in tool_short.lower() or 'amass' in tool_short.lower():
+                                        msg = f"{tool_short:<18} {stats.get('subs', 0):>4} subdomains"
+                                    elif 'gau' in tool_short.lower() or 'wayback' in tool_short.lower():
+                                        msg = f"{tool_short:<18} {stats.get('eps', 0):>4} URLs"
+                                    else:
+                                        msg = f"{tool_short:<18} processing..."
+                                
+                                elif phase == 'live':
+                                    if 'httpx' in tool_short.lower() or 'naabu' in tool_short.lower():
+                                        msg = f"{tool_short:<18} {stats.get('live', 0):>4} hosts"
+                                    else:
+                                        msg = f"{tool_short:<18} processing..."
+                                
+                                elif phase in ['crawl', 'discovery']:
+                                    if 'crawler' in tool_short.lower() or 'ffuf' in tool_short.lower():
+                                        msg = f"{tool_short:<18} {stats.get('eps', 0):>4} endpoints"
+                                    else:
+                                        msg = f"{tool_short:<18} processing..."
+                                
+                                elif phase in ['scan', 'classify', 'rank']:
+                                    if 'nuclei' in tool_short.lower() or 'nikto' in tool_short.lower():
+                                        msg = f"{tool_short:<18} {stats.get('vulns', 0):>4} vulns"
+                                    else:
+                                        msg = f"{tool_short:<18} processing..."
+                                
+                                elif phase in ['chain', 'graph']:
+                                    chains_count = len(data.get('chains', []))
+                                    msg = f"{tool_short:<18} {chains_count:>4} chains"
+                                
+                                elif phase == 'exploit':
+                                    exploited = stats.get('exploited', 0)
+                                    msg = f"{tool_short:<18} {exploited:>4} exploited"
+                                
                                 else:
-                                    msg = f"{tool_short[:18]:.<18} processing..."
+                                    msg = f"{tool_short:<18} processing..."
                             
-                            print(f"│  │  {icon} {msg:<52}                      │")
+                            print(f"│  │  {icon} {msg:<52}              │")
                     
-                    # Show real-time detail
+                    # Show real-time detail at bottom
                     if phase_detail and len(phase_detail) > 0:
-                        detail_line = f"ℹ️  {phase_detail[:60]}"
-                        print(f"│  │  └─ {detail_line:<62}│")
+                        detail_short = phase_detail[:62]
+                        print(f"│  │  └─ ℹ️  {detail_short:<60}│")
                 
                 print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────┘")
             
@@ -547,7 +620,7 @@ class DomainDisplay:
         self.data = {
             'phase': 'init',
             'iter': 1,
-            'max_iter': 5,
+            'max_iter': 3,
             'stats': {'subs': 0, 'live': 0, 'eps': 0, 'vulns': 0, 'exploited': 0, 'wp': 0, 'tech_detected': 0},
             'chains': [],
             'last_action': 'initializing...',
@@ -693,6 +766,30 @@ class DomainDisplay:
             print("│  🧠 LEARNING                                                                 │")
             print(f"│  ├─ Mutated: {learning['mutated']} payloads                                            │")
         
+        # Current activity detail
+        phase_detail = d.get('phase_detail', '')
+        if phase_detail:
+            print("│                                                                              │")
+            print("│  📍 CURRENT ACTIVITY                                                        │")
+            # Split detail into multiple lines if needed
+            if len(phase_detail) > 75:
+                words = phase_detail.split()
+                lines = []
+                current_line = []
+                for word in words:
+                    if len(" ".join(current_line + [word])) <= 75:
+                        current_line.append(word)
+                    else:
+                        if current_line:
+                            lines.append(" ".join(current_line))
+                        current_line = [word]
+                if current_line:
+                    lines.append(" ".join(current_line))
+                for line in lines[:2]:  # Show max 2 lines
+                    print(f"│  ├─ {line:<75} │")
+            else:
+                print(f"│  ├─ {phase_detail:<75} │")
+        
         # Current action
         print("│                                                                              │")
         print(f"│  ⚡ {d['last_action']:<77} │")
@@ -786,6 +883,14 @@ class ReconAgent:
         self.response_analyzer = ResponseAnalyzer()
         self.learning_engine = LearningEngine(output_dir)
         
+        # NEW: Enhanced modules for exploitation & recovery
+        self.error_recovery = ErrorRecovery()
+        self.playbook = ConditionalPlaybook()
+        self.wordlist_gen = WordlistGenerator()
+        self.url_normalizer = URLNormalizer()
+        self.endpoint_analyzer = EndpointAnalyzer()
+        self.exploit_executor = ExploitExecutor(self.http_client, self.state, output_dir)
+        
         groq_key = os.environ.get("GROQ_API_KEY", "") or os.environ.get("GROQ_APIKEY", "")
         self.endpoint_classifier = EndpointClassifier()
         self.payload_gen = PayloadGenerator(groq_key)
@@ -807,8 +912,11 @@ class ReconAgent:
         
         self.logger = logging.getLogger("recon.agent")
         self.iteration_count = 0
-        self.max_iterations = 5
+        self.max_iterations = 3
         self.confidence_threshold = 0.8
+        self.reflection_history = []  # Self-reflection loop
+        self.phase_errors = defaultdict(int)  # Track errors per phase
+        self.playbook_state = {}  # Conditional playbook state
         
         self.stats = {
             'subs': 0, 'live': 0, 'eps': 0, 'vulns': 0, 
@@ -820,6 +928,10 @@ class ReconAgent:
         self.vuln_types = defaultdict(int)
         self.endpoint_stats = {'api': 0, 'admin': 0, 'upload': 0, 'total': 0}
         self.tech_stack = {}
+        self.findings = {
+            'plugins': [], 'themes': [], 'cms_version': '', 'php_version': '',
+            'waf': '', 'users': [], 'technologies': []
+        }
         self.last_action = "starting..."
         self.current_phase = "init"
         self.phase_detail = ""
@@ -849,6 +961,7 @@ class ReconAgent:
                 'tech': self.tech_stack.copy(),
                 'endpoints': self.endpoint_stats.copy(),
                 'toolkit_metrics': self.toolkit_metrics.copy(),
+                'findings': self.findings.copy(),
                 'last_action': self.last_action,
                 'start_time': self.scan_start_time
             })
@@ -886,6 +999,22 @@ class ReconAgent:
     def run(self):
         self._update_display()
         self.logger.info(f"Target: {self.target} | Output: {self.output_dir}")
+
+        # IMPROVED: Normalize URL first
+        normalized, is_valid, error_msg = self.url_normalizer.normalize(self.target)
+        if not is_valid:
+            self.last_action = f"URL error: {error_msg}"
+            self.error_recovery.log_error("init", "url_normalizer", error_msg)
+            self._update_display()
+            self.logger.error(f"URL normalization failed: {error_msg}")
+            if self.batch_display:
+                self.batch_display.mark_failed(self.target, error_msg)
+            return
+        
+        # Update target with normalized URL
+        self.target = normalized
+        self.last_action = f"URL normalized: {self.target}"
+        self._update_display()
 
         self._load_manual_inputs()
 
@@ -1149,12 +1278,16 @@ class ReconAgent:
 
     def _run_recon_phase(self):
         before = len(self.state.get("subdomains", []))
-        self._set_activity("subfinder", "running", "enum")
+        self._set_activity("subfinder+assetfinder+amass", "running", "enum")
+        self.phase_detail = "[SUBFINDER] Enumerating subdomains..."
+        self._update_display()
         self.recon_engine.run(progress_cb=self._progress_callback)
         self._set_activity("recon-engine", "done", "enum")
         after = len(self.state.get("subdomains", []))
         if after > before:
             self.stats['subs'] = after
+            self.phase_detail = f"[RECON] Found {after} total subdomains"
+            self._update_display()
             self.last_action = f"recon: +{after-before} subdomains"
             if self.batch_display:
                 self.batch_display._add_to_feed("➕", "Subdomain", self.target, f"Found {after-before} new")
@@ -1166,16 +1299,21 @@ class ReconAgent:
         if before >= int((self.budget.to_dict() if hasattr(self, "budget") else {}).get("live_secondary_targets", 90)):
             self.last_action = f"live hosts: reused {before} from recon cache"
             self.phase_status = "done"
+            self.phase_detail = f"[CACHE] Reusing {before} live hosts"
             self._update_display()
             self._mark_phase_done("live_hosts")
             return
         self._set_activity("live-host-detector", "running", "detect")
+        self.phase_detail = "[HTTPX] Testing connectivity to hosts..."
+        self._update_display()
         self.stats['total_hosts'] = len(self.state.get("subdomains", []))
         self.live_host_engine.detect_live_hosts(self.state.get("subdomains", []))
         self._set_activity("live-host-detector", "done", "detect")
         after = len(self.state.get("live_hosts", []))
         if after > before:
             self.stats['live'] = after
+            self.phase_detail = f"[LIVE] Found {after} live hosts"
+            self._update_display()
             self.last_action = f"live hosts: +{after-before} live"
             if self.batch_display:
                 self.batch_display._add_to_feed("🌐", "Live", self.target, f"Found {after-before} live")
@@ -1234,8 +1372,77 @@ class ReconAgent:
             if wp_sites:
                 self.stats['wp'] = len(wp_sites)
                 self.last_action = f"wordpress: {len(wp_sites)} sites"
+                
+                # Extract findings from WordPress scan
+                all_plugins = []
+                all_themes = []
+                all_users = []
+                wp_versions = []
+                
+                for site_url, site_data in wp_sites.items():
+                    if site_data.get('plugins'):
+                        all_plugins.extend(site_data['plugins'][:5])
+                    if site_data.get('themes'):
+                        all_themes.extend(site_data['themes'][:3])
+                    if site_data.get('users'):
+                        all_users.extend(site_data['users'][:5])
+                    if site_data.get('version'):
+                        wp_versions.append(site_data['version'])
+                
+                # Store findings for display
+                self.findings['plugins'] = list({(p['name'], p['version']): p for p in all_plugins}.values())[:10]
+                self.findings['themes'] = list({(t['name'], t['version']): t for t in all_themes}.values())[:5]
+                self.findings['users'] = list(set(all_users))[:5]
+                if wp_versions:
+                    self.findings['cms_version'] = f"WordPress {wp_versions[0]}"
+                
                 if self.batch_display:
                     self.batch_display._add_to_feed("🎯", "WordPress", self.target, f"Found {len(wp_sites)} sites")
+                
+                # ─── INTEGRATION: Advanced WordPress Security Scan (wp_scan_cve) ───
+                self.logger.debug("[WORDPRESS] Running advanced security scan on detected targets...")
+                for site_url in target_urls:
+                    try:
+                        self.phase_detail = f"[ADVANCED SCAN] Analyzing {site_url.split('://')[-1][:30]}..."
+                        self._update_display()
+                        
+                        advanced_scan = WordPressAdvancedScan(site_url, timeout_per_check=8)
+                        scan_data = advanced_scan.run_data_collection()
+                        
+                        # Merge results into state
+                        self.state = WordPressAdvancedScan.merge_into_state(self.state, scan_data)
+                        
+                        # Log findings for display
+                        if scan_data.get("version_detection"):
+                            wp_ver = scan_data["version_detection"].get("wp_version")
+                            is_eol = scan_data["version_detection"].get("eol", False)
+                            self.logger.info(f"[WORDPRESS] Version: {wp_ver} {'(EOL)' if is_eol else ''}")
+                        
+                        if scan_data.get("php_analysis"):
+                            php_ver = scan_data["php_analysis"].get("php_version")
+                            is_outdated = scan_data["php_analysis"].get("outdated", False)
+                            self.logger.info(f"[PHP] Version: {php_ver} {'(OUTDATED)' if is_outdated else ''}")
+                        
+                        if scan_data.get("wordpress_api", {}).get("user_enumeration_possible"):
+                            self.logger.warning(f"[SECURITY] User enumeration possible via REST API")
+                        
+                        if scan_data.get("vulnerabilities"):
+                            vuln_count = len(scan_data["vulnerabilities"])
+                            self.logger.info(f"[SECURITY] Found {vuln_count} security observations")
+                            
+                            if self.batch_display:
+                                for vuln in scan_data.get("vulnerabilities", []):
+                                    icon = "⚠️"
+                                    self.batch_display._add_to_feed(
+                                        icon, 
+                                        vuln.get("type", "OBSERVATION"), 
+                                        site_url.split('://')[-1][:20],
+                                        vuln.get("description", "")[:40]
+                                    )
+                        
+                        time.sleep(1.5)  # Rate limiting
+                    except Exception as e:
+                        self.logger.debug(f"[ADVANCED SCAN] Error for {site_url}: {str(e)[:60]}")
         self._set_activity("wpscan+wp-fingerprint", "done", "scan")
         self._update_stats()
         self._mark_phase_done("wordpress")
@@ -1305,9 +1512,20 @@ class ReconAgent:
                 metrics['tech_count'] += len(techs)
                 metrics['tech_list'].update([t.get('name', '') for t in techs])
                 
+                # Extract PHP version and WAF
+                for tech in techs:
+                    tech_name = tech.get('name', '').lower()
+                    if 'php' in tech_name and not self.findings.get('php_version'):
+                        self.findings['php_version'] = tech.get('name', '')
+                    if 'waf' in tech_name or 'firewall' in tech_name:
+                        if not self.findings.get('waf'):
+                            self.findings['waf'] = tech.get('name', '')
+                
                 vulns = data.get('vulnerabilities', [])
                 metrics['vulnerabilities'].extend(vulns)
                 
+                self.phase_detail = f"[WHATWEB] Found {len(techs)} tech, {len(vulns)} CVEs"
+                self._update_display()
                 self.logger.info(f"[WHATWEB] {finding.get('url')}: {len(techs)} techs, {len(vulns)} CVEs")
                 
             elif tool_name == 'naabu':
@@ -1316,6 +1534,8 @@ class ReconAgent:
                 metrics['ports_count'] += len(ports)
                 services = data.get('services', {})
                 
+                self.phase_detail = f"[NAABU] Found {len(ports)} ports on {finding.get('host')}"
+                self._update_display()
                 self.logger.info(f"[NAABU] {finding.get('host')}: {len(ports)} ports open")
                 for port, service_info in services.items():
                     self.logger.debug(f"  ├─ {port}: {service_info.get('service', 'unknown')}")
@@ -1327,6 +1547,8 @@ class ReconAgent:
                 suspicious = data.get('suspicious', [])
                 metrics['directories_count'] += len(dirs) + len(files)
                 
+                self.phase_detail = f"[DIRBUSTING] {len(dirs)} dirs | {len(files)} files | {len(suspicious)} suspicious"
+                self._update_display()
                 self.logger.info(f"[DIRBUSTING] {finding.get('url')}: {len(dirs)} dirs, {len(files)} files, {len(suspicious)} suspicious")
                 
             elif tool_name == 'api_scanner':
@@ -1337,6 +1559,8 @@ class ReconAgent:
                 api_total = len(rest_endpoints) + len(graphql_endpoints) + len(api_docs)
                 metrics['api_count'] += api_total
                 
+                self.phase_detail = f"[API-SCANNER] {len(rest_endpoints)} REST | {len(graphql_endpoints)} GraphQL | {len(api_docs)} docs"
+                self._update_display()
                 self.logger.info(f"[API-SCANNER] {finding.get('url')}: {len(rest_endpoints)} REST, {len(graphql_endpoints)} GraphQL, {len(api_docs)} docs")
                 
                 vulns = data.get('vulnerabilities', [])
@@ -1345,12 +1569,18 @@ class ReconAgent:
                     self.logger.warning(f"[API-VULN] {vuln.get('type')}: {finding.get('url')}")
             
             elif tool_name == 'wafw00f':
+                self.phase_detail = f"[WAFW00F] WAF detection: {finding.get('severity')}"
+                self._update_display()
                 self.logger.info(f"[WAFW00F] WAF detection: {finding.get('severity')}")
             
             elif tool_name == 'nikto':
+                self.phase_detail = f"[NIKTO] Scanning {finding.get('url')}"
+                self._update_display()
                 self.logger.info(f"[NIKTO] Scan completed: {finding.get('url')}")
             
             elif tool_name == 'nmap':
+                self.phase_detail = f"[NMAP] Scanning {finding.get('host')}"
+                self._update_display()
                 self.logger.info(f"[NMAP] Port scan completed: {finding.get('host')}")
         
         # Build summary
@@ -1402,6 +1632,8 @@ class ReconAgent:
     def _run_discovery_phase(self):
         before = len(self.state.get("endpoints", []))
         self._set_activity("crawler", "running", "spider")
+        self.phase_detail = "[CRAWLER] Discovering endpoints..."
+        self._update_display()
         prioritized_hosts = [h.get("url", "") for h in self._select_live_hosts_for_deep_scan(limit=80) if h.get("url")]
         if prioritized_hosts:
             merged_urls = list(dict.fromkeys(prioritized_hosts + self.state.get("urls", [])))
@@ -1412,6 +1644,8 @@ class ReconAgent:
         if after > before:
             self.endpoint_stats['total'] = after
             self.stats['eps'] = after
+            self.phase_detail = f"[DISCOVERY] Found {after} total endpoints"
+            self._update_display()
             self.last_action = f"crawl: +{after-before} endpoints"
             if self.batch_display:
                 self.batch_display._add_to_feed("📁", "Endpoint", self.target, f"Found {after-before} new")
@@ -1420,16 +1654,21 @@ class ReconAgent:
 
     def _run_auth_phase(self):
         self._set_activity("session-bootstrap", "running", "roles")
+        self.phase_detail = "[AUTH] Testing session authentication..."
+        self._update_display()
         results = self.auth_engine.run(self.auth_file)
         self._set_activity("session-bootstrap", "done", "roles")
         success = sum(1 for r in results if r.get("success"))
         self.last_action = f"auth: {success}/{len(results)} roles authenticated"
+        self.phase_detail = f"[AUTH] Authenticated {success}/{len(results)} sessions"
+        self._update_display()
         if self.batch_display:
             self.batch_display._add_to_feed("🔐", "Auth", self.target, self.last_action)
-        self._update_display()
         self._mark_phase_done("auth")
 
     def _run_classification_phase(self):
+        self.phase_detail = "[CLASSIFY] Analyzing endpoint types..."
+        self._update_display()
         endpoints = self.state.get("endpoints", [])
         if endpoints:
             api_count = sum(1 for e in endpoints if 'api' in e.get('url', ''))
@@ -1443,20 +1682,39 @@ class ReconAgent:
             })
             
             self.last_action = f"classified {len(endpoints)} endpoints"
+            self.phase_detail = f"[CLASSIFY] Found {api_count} API, {admin_count} Admin, {upload_count} Upload endpoints"
+            self._update_display()
         self.phase_status = "done"
         self._update_stats()
         self._mark_phase_done("classify")
 
     def _run_prioritization_phase(self):
-        self._run_endpoint_ranking()
-        self.phase_status = "done"
+        self.phase_detail = "[RANK] Prioritizing high-risk endpoints..."
         self._update_display()
+        self._run_endpoint_ranking()
+        prioritized = len(self.state.get("prioritized_endpoints", []))
+        self.phase_detail = f"[RANK] Prioritized {prioritized} high-risk endpoints"
+        self._update_display()
+        self.phase_status = "done"
         self._mark_phase_done("rank")
 
     def _run_scanning_phase(self):
         before = len(self.state.get("confirmed_vulnerabilities", []))
         self._set_activity("nuclei/sqlmap/dalfox", "running", "active")
-        self.scanning_engine.run()
+        self.phase_detail = "[NUCLEI] Testing with active scanning..."
+        self._update_display()
+        
+        # IMPROVED: Wrap scanning with error recovery
+        try:
+            self.scanning_engine.run()
+            self.error_recovery.log_success("scan", "nuclei")
+        except Exception as e:
+            error_msg = str(e)[:80]
+            self.error_recovery.log_error("scan", "nuclei", error_msg)
+            recovery = self.error_recovery.suggest_recovery("scan", "nuclei", error_msg)
+            self.phase_detail = f"[SCAN] Error - {recovery['recommended_action']}"
+            self.logger.warning(f"Scanning phase error: {error_msg}")
+        
         self._set_activity("nuclei/sqlmap/dalfox", "done", "active")
         after = len(self.state.get("confirmed_vulnerabilities", []))
         
@@ -1465,6 +1723,8 @@ class ReconAgent:
         if after > before:
             self.stats['vulns'] = after
             new_vulns = after - before
+            self.phase_detail = f"[SCAN] Found {after} vulnerabilities"
+            self._update_display()
             self.last_action = f"scan: +{new_vulns} vulns found"
             
             vulns = self.state.get("confirmed_vulnerabilities", [])
@@ -1492,6 +1752,8 @@ class ReconAgent:
         self._mark_phase_done("scan")
 
     def _run_analysis_phase(self):
+        self.phase_detail = "[ANALYSIS] Processing scan results..."
+        self._update_display()
         responses = self.state.get("scan_responses", [])
         vulnerabilities = []
         manual_queue = []
@@ -1540,6 +1802,8 @@ class ReconAgent:
         self._mark_phase_done("analyze")
 
     def _run_attack_graph_phase(self, attack_graph: AttackGraph):
+        self.phase_detail = "[GRAPH] Building attack graph from vulnerabilities..."
+        self._update_display()
         confirmed = self.state.get("confirmed_vulnerabilities", [])
         wp_vulns = self.state.get("wp_vulnerabilities", []) or []
 
@@ -1559,11 +1823,14 @@ class ReconAgent:
             graph_file = os.path.join(self.output_dir, "attack_graph.json")
             attack_graph.save_to_file(graph_file)
             self.last_action = f"graph: built from {len(vulnerabilities)} vulns"
+            self.phase_detail = f"[GRAPH] Built attack graph with {len(vulnerabilities)} vulnerability nodes"
+            self._update_display()
         self.phase_status = "done"
-        self._update_display()
         self._mark_phase_done("graph")
 
     def _run_chain_planning_phase(self, attack_graph: AttackGraph):
+        self.phase_detail = "[CHAINS] Planning attack chains from graph..."
+        self._update_display()
         chains = self.chain_planner.plan_chains_from_graph(attack_graph)
         manual_playbook = self.chain_planner.build_manual_playbook(chains)
         
@@ -1625,19 +1892,25 @@ class ReconAgent:
             json.dump(manual_playbook, f, indent=2)
         if chains:
             self.last_action = f"chains: {len(chains)} attack paths"
+            self.phase_detail = f"[CHAINS] Generated {len(chains)} attack chain(s)"
         else:
             self.last_action = "chains: generated manual playbook"
-        self.phase_status = "done"
+            self.phase_detail = "[CHAINS] Generated manual attack playbook"
         self._update_display()
+        self.phase_status = "done"
         self._mark_phase_done("chain")
 
     def _run_exploit_phase(self):
+        self.phase_detail = "[EXPLOIT] Testing attack chains for exploitation..."
+        self._update_display()
         chains = self.state.get("exploit_chains", [])
         if chains:
             results = []
             exploited_count = 0
             
             for i, chain in enumerate(chains[:3]):
+                self.phase_detail = f"[EXPLOIT] Testing chain {i+1}/{min(3, len(chains))}..."
+                self._update_display()
                 result = self.exploit_engine.test_chain(chain)
                 results.append(result)
                 
@@ -1659,19 +1932,24 @@ class ReconAgent:
             
             if exploited_count > 0:
                 self.last_action = f"exploit: {exploited_count} chains successful"
+                self.phase_detail = f"[EXPLOIT] Successfully exploited {exploited_count} chain(s)"
             else:
                 self.last_action = "exploit: no success"
-            self.phase_status = "done"
+                self.phase_detail = "[EXPLOIT] No successful exploitations"
             self._update_display()
+        self.phase_status = "done"
         self._mark_phase_done("exploit")
 
     def _run_learning_phase(self):
+        self.phase_detail = "[LEARN] Analyzing results and updating patterns..."
+        self._update_display()
         self.learning_engine.learn_from_iteration(self.state)
         
         failed_payloads = self.learning_engine.get_failed_payloads()
         self.learning_stats['mutated'] = len(failed_payloads)
-        self.phase_status = "done"
+        self.phase_detail = f"[LEARN] Analyzed {len(failed_payloads)} failed payloads"
         self._update_display()
+        self.phase_status = "done"
         self._mark_phase_done("learn")
 
     def _select_live_hosts_for_deep_scan(self, limit: int = 50) -> List[Dict]:
@@ -1739,6 +2017,147 @@ class ReconAgent:
     def _generate_final_report(self):
         report_gen = ReportGenerator(self.state, self.output_dir)
         report_gen.generate()
+
+    # ─── NEW: Enhanced Methods for 10 Critical Improvements ─────────────────────────────
+
+    def _analyze_and_classify_endpoints(self):
+        """
+        IMPROVEMENT #3: Classify endpoints before attacking
+        - Send HEAD/GET request  
+        - Analyze Content-Type
+        - Detect forms
+        - Classify into: static, html, json, api, upload
+        """
+        self.current_phase = "classify"
+        self.phase_detail = "[CLASSIFY] Analyzing endpoints..."
+        self.phase_tool = "endpoint-analyzer"
+        self._update_display()
+        
+        endpoints = self.state.get("endpoints", [])
+        classified = []
+        upload_endpoints = []
+        
+        for endpoint in endpoints[:100]:
+            ep_url = endpoint.get('full_url') or endpoint.get('url')
+            if not ep_url:
+                continue
+            
+            try:
+                analysis = self.endpoint_analyzer.analyze(ep_url, timeout=5)
+                
+                if analysis['reachable']:
+                    endpoint['type'] = analysis['endpoint_type']
+                    endpoint['content_type'] = analysis['content_type']
+                    endpoint['has_form'] = analysis['has_form']
+                    endpoint['forms'] = analysis.get('forms', [])
+                    endpoint['is_upload'] = analysis['is_upload']
+                    
+                    if analysis['is_upload']:
+                        upload_endpoints.append(endpoint)
+                    
+                    classified.append(endpoint)
+            except Exception as e:
+                self.error_recovery.log_error("classify", "endpoint-analyzer", str(e)[:50])
+                continue
+        
+        self.state.update(endpoints=classified, upload_endpoints=upload_endpoints)
+        self.last_action = f"classified {len(classified)} endpoints"
+        self._update_display()
+        self._mark_phase_done("classify")
+
+    def _generate_smart_wordlists(self, company_name: str = "") -> Dict:
+        """
+        IMPROVEMENT #5: Generate smart context-aware wordlists
+        """
+        if not company_name:
+            company_name = self.target.replace(".com", "").replace(".net", "").replace(".org", "")
+        
+        self.wordlist_gen.set_context(
+            company_name=company_name,
+            domain_name=self.target,
+            discovered_users=self.state.get('enumerated_users', [])
+        )
+        
+        usernames = self.wordlist_gen.generate_usernames(100)
+        passwords = self.wordlist_gen.generate_passwords(usernames, 500)
+        directories = self.wordlist_gen.generate_dirs(100)
+        parameters = self.wordlist_gen.generate_parameter_names(50)
+        
+        return {
+            'usernames': usernames,
+            'passwords': passwords,
+            'directories': directories,
+            'parameters': parameters
+        }
+
+    def _execute_real_exploit_attacks(self) -> bool:
+        """
+        IMPROVEMENT #4 & #6: Execute real attacks with recovery
+        Tests actual vulnerabilities, not just detection
+        """
+        self.current_phase = "exploit"
+        self.phase_detail = "[EXPLOIT] Testing real vulnerabilities..."
+        self.phase_tool = "exploit-executor"
+        self._update_display()
+        
+        exploit_count = 0
+        success_count = 0
+        
+        try:
+            # Execute conditional playbook
+            findings = {
+                'found_wordpress': self.stats.get('wp', 0) > 0,
+                'plugins': self.state.get('plugins', []),
+                'has_upload_form': len(self.state.get('upload_endpoints', [])) > 0,
+                'users': self.state.get('enumerated_users', []),
+            }
+            
+            actions = self.playbook.execute_playbook(findings)
+            
+            for action in actions[:5]:
+                try:
+                    if action == 'test_file_upload':
+                        upload_eps = self.state.get('upload_endpoints', [])
+                        for upload_ep in upload_eps[:2]:
+                            forms = upload_ep.get('forms', [])
+                            for form in forms[:1]:
+                                success, msg = self.exploit_executor.execute_upload_exploit(
+                                    self.target, form
+                                )
+                                exploit_count += 1
+                                if success:
+                                    success_count += 1
+                                    self.stats['exploited'] += 1
+                                    self.phase_detail = f"[EXPLOIT] {msg}"
+                    
+                    elif action == 'wp_plugin_exploit':
+                        wp_info = {'plugins': self.state.get('plugins', [])}
+                        success, msg = self.exploit_executor.execute_wordpress_exploit(
+                            self.target, wp_info
+                        )
+                        exploit_count += 1
+                        if success:
+                            success_count += 1
+                            self.stats['exploited'] += 1
+                    
+                    self._update_display()
+                    
+                except Exception as e:
+                    self.error_recovery.log_error("exploit", action, str(e)[:50])
+                    continue
+            
+            self.last_action = f"exploit: {success_count}/{exploit_count} successful"
+            self._update_display()
+            self._mark_phase_done("exploit")
+            
+            return success_count > 0
+            
+        except Exception as e:
+            recovery = self.error_recovery.suggest_recovery("exploit", "executor", str(e)[:80])
+            self.last_action = f"exploit error: {recovery['recommended_action']}"
+            self.error_recovery.log_error("exploit", "executor", str(e)[:50])
+            self._update_display()
+            return False
 
 
 # ─── CLI ───────────────────────────────────────────────────────────────────

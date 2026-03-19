@@ -20,7 +20,6 @@ class ShadowStrikeV13:
         self.processed_hosts = set() # Chống quét trùng lặp
         self.found_vulns = []
         self.lock = Lock()
-        self.file_lock = Lock()  # Lock riêng cho file operations
         self.session = requests.Session()
         self.session.max_redirects = 3
         self.user_agents = [
@@ -28,35 +27,28 @@ class ShadowStrikeV13:
             'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)'
         ]
         self.targets_file = "targets.txt"
-        # Không cần load existing_domains từ đầu nữa, sẽ kiểm tra trực tiếp file mỗi lần
+        self.existing_domains = self.load_existing_domains()
+
+    def load_existing_domains(self):
+        if os.path.exists(self.targets_file):
+            with open(self.targets_file, 'r') as f:
+                return set(line.strip().lower() for line in f if line.strip())
+        return set()
 
     def append_new_domains(self, domains):
-        """Thêm domain mới vào file targets.txt - thread-safe"""
-        with self.file_lock:  # Đảm bảo chỉ một thread ghi file tại một thời điểm
+        new_domains = [d for d in domains if d.lower() not in self.existing_domains]
+        if new_domains:
+            print(f"{G}[+] Adding domains: {', '.join(new_domains)}{W}")
             try:
-                # Đọc các domain hiện có từ file
-                existing = set()
-                if os.path.exists(self.targets_file):
-                    with open(self.targets_file, 'r') as f:
-                        existing = set(line.strip().lower() for line in f if line.strip())
-                
-                # Lọc domain mới
-                new_domains = [d for d in domains if d.lower() not in existing]
-                
-                if new_domains:
-                    # Ghi domain mới vào file
-                    with open(self.targets_file, 'a') as f:
-                        for domain in new_domains:
-                            f.write(domain + '\n')
-                            f.flush()  # Đảm bảo ghi ngay lập tức
-                    
-                    print(f"{G}[+] Added to targets.txt: {', '.join(new_domains)}{W}")
-                    
-                    # Optional: thông báo cho app khác nếu cần
-                    # os.system(f'touch {self.targets_file}')  # Để trigger file watcher nếu có
-                    
+                with open(self.targets_file, 'a') as f:
+                    for domain in new_domains:
+                        f.write(domain + '\n')
+                self.existing_domains.update(d.lower() for d in new_domains)
+                print(f"{G}[+] Successfully added {len(new_domains)} new domains to {self.targets_file}{W}")
             except Exception as e:
-                print(f"{R}[!] Error writing to {self.targets_file}: {e}{W}")
+                print(f"{R}[!] Error appending to {self.targets_file}: {e}{W}")
+        else:
+            print(f"{Y}[+] No new domains to add{W}")
 
     # =========================================================
     # PHASE 1: DISCOVERY (VÉT SEED)
@@ -149,16 +141,14 @@ class ShadowStrikeV13:
             if weak_score >= 4 or any("CRITICAL" in f for f in findings):
                 with self.lock:
                     self.found_vulns.append({'url': final_url, 'ver': ver, 'findings': findings})
-                    
-                    # Thêm domain vào targets.txt NGAY LẬP TỨC
-                    domain_to_add = urlparse(final_url).netloc
-                    self.append_new_domains([domain_to_add])  # Gọi hàm ghi file
-                    
-                    # In kết quả
+                    print(f"{G}[DEBUG] Added to found_vulns: {urlparse(final_url).netloc}{W}")
+                    # Append immediately when found
+                    domain_to_add = [urlparse(final_url).netloc]
+                    self.append_new_domains(domain_to_add)
+                    # In kết quả ngay lập tức không cần đợi
                     print(f"\n{G}[🎯] TARGET FOUND: {final_url} (Ver: {ver}){W}")
-                    for f in findings: 
-                        print(f"  |-- {f}")
-                    print(W, end='', flush=True)
+                    for f in findings: print(f"  |-- {f}")
+                    print(W, end='', flush=True)  # Reset color and flush
 
         except: pass
         finally:
@@ -195,6 +185,7 @@ class ShadowStrikeV13:
                 self.processed_hosts.clear()
                 self.found_vulns.clear()
                 self.run_once(threads)
+                # No need to append here, already appended in process_one_domain
                 print(f"{Y}[*] Waiting {interval} seconds before next hunt...{W}")
                 time.sleep(interval)
             except KeyboardInterrupt:
@@ -202,7 +193,7 @@ class ShadowStrikeV13:
                 break
             except Exception as e:
                 print(f"{R}[!] Error: {e}{W}")
-                time.sleep(60)
+                time.sleep(60)  # Wait 1 minute on error
 
     def save_final_report(self):
         with open("V13_FINAL_RESULTS.txt", "w") as f:
@@ -214,6 +205,6 @@ class ShadowStrikeV13:
 if __name__ == "__main__":
     try:
         hunter = ShadowStrikeV13()
-        hunter.run_continuous(threads=150)
+        hunter.run_continuous(threads=150)  # Continuous hunting
     except KeyboardInterrupt:
         print(f"\n{R}[!] Đã dừng bởi người dùng.{W}")
