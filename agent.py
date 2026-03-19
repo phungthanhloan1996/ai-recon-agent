@@ -1235,7 +1235,20 @@ class ReconAgent:
         self._mark_phase_done("analyze")
 
     def _run_attack_graph_phase(self, attack_graph: AttackGraph):
-        vulnerabilities = self.state.get("confirmed_vulnerabilities", [])
+        confirmed = self.state.get("confirmed_vulnerabilities", [])
+        wp_vulns = self.state.get("wp_vulnerabilities", []) or []
+
+        vulnerabilities = list(confirmed)
+        for wp_vuln in wp_vulns:
+            vulnerabilities.append({
+                "name": wp_vuln.get("type", "wordpress"),
+                "endpoint": wp_vuln.get("url", "wordpress"),
+                "severity": wp_vuln.get("severity", "MEDIUM"),
+                "type": f"wordpress_{wp_vuln.get('type', 'issue')}",
+                "confidence": wp_vuln.get("confidence", 0.5),
+                "prerequisites": ["WordPress detected"],
+                "consequences": [wp_vuln.get("type", "")],
+            })
         if vulnerabilities:
             attack_graph.build_from_vulnerabilities(vulnerabilities)
             graph_file = os.path.join(self.output_dir, "attack_graph.json")
