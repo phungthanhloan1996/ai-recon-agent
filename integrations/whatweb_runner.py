@@ -40,7 +40,7 @@ class WhatwebRunner:
             logger.warning(f"Failed to load CVE patterns: {e}")
         return cve_patterns
 
-    def run(self, url: str, timeout: int = 60, max_retries: int = 2) -> Dict[str, Any]:
+    def run(self, url: str, timeout: int = 30, max_retries: int = 1) -> Dict[str, Any]:
         """Run whatweb on URL with retry logic and comprehensive parsing"""
         result = {
             "url": url,

@@ -62,11 +62,6 @@ class ToolkitScanner:
             u = h.get("url", "")
             if not u:
                 continue
-            # Skip URLs với file extension
-            from urllib.parse import urlparse as _up
-            _path = _up(u).path
-            if '.' in _path.split('/')[-1]:
-                continue
             s = 0
             st = int(h.get("status_code", 0) or 0)
             if st == 200:
@@ -307,7 +302,7 @@ class ToolkitScanner:
                     "tool": "wafw00f",
                     "url": url,
                     "severity": "LOW",
-                    "output": stdout[:1000] if stdout else _[:1000] if _ else "",
+                    "output": stdout[:1000] if stdout else stderr[:1000] if _ else "",
                     "success": False
                 }
         except Exception as e:
@@ -325,8 +320,7 @@ class ToolkitScanner:
     def _scan_nikto(
         self,
         url: str,
-        progress_cb: Optional[Callable[[str, str, str], None]] = None,
-        timeout: int = 180
+        progress_cb: Optional[Callable[[str, str, str], None]] = None
     ) -> Optional[Dict[str, Any]]:
         """Run nikto vulnerability scanner"""
         if progress_cb:

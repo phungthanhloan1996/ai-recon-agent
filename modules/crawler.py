@@ -512,27 +512,55 @@ class DiscoveryEngine:
     def classify_endpoints(self, endpoints: List[Dict]) -> List[Dict]:
         """Add classification metadata to endpoints"""
         classified = []
-
+        
+        # 🔥 FIX: Mở rộng patterns
+        endpoint_patterns = {
+            "admin": re.compile(r"/admin|/administrator|/wp-admin|/manager|/console|/dashboard|/panel", re.IGNORECASE),
+            "upload": re.compile(r"/upload|/file|/attachment|/media|/wp-content/uploads", re.IGNORECASE),
+            "api": re.compile(r"/api/|/v\d+/|/graphql|/rest/|/wp-json", re.IGNORECASE),
+            "auth": re.compile(r"/login|/signin|/auth|/register|/password|/wp-login", re.IGNORECASE),
+            "backup": re.compile(r"\.bak$|\.sql$|\.tar$|\.zip$|backup", re.IGNORECASE),
+            "config": re.compile(r"\.env$|config\.|settings\.|\.ini$|\.cfg$|wp-config", re.IGNORECASE),
+            "wordpress": re.compile(r"wp-content|wp-includes|xmlrpc\.php|wp-json|wp-login", re.IGNORECASE),
+            "git": re.compile(r"\.git/|\.svn/|\.htaccess", re.IGNORECASE),
+            "rpc": re.compile(r"xmlrpc|soap|rpc", re.IGNORECASE),  # 🔥 THÊM
+            "params": re.compile(r"\?.*=", re.IGNORECASE)
+        }
+        
         for ep in endpoints:
             url = ep.get('url', '')
             categories = []
-
-            # Classify based on patterns
-            for category, pattern in self.endpoint_patterns.items():
+            
+            # 🔥 FIX: Check từng pattern
+            for category, pattern in endpoint_patterns.items():
                 if pattern.search(url):
                     categories.append(category)
-
+            
+            # 🔥 FIX: Nếu không có category nào, gán mặc định
+            if not categories:
+                url_lower = url.lower()
+                if 'wp' in url_lower or 'wordpress' in url_lower:
+                    categories.append('wordpress')
+                elif 'api' in url_lower:
+                    categories.append('api')
+                else:
+                    categories.append('general')
+            
             # Extract parameters
             parsed = urlparse(url)
             params = list(parse_qs(parsed.query).keys()) if parsed.query else []
-
+            
+            # 🔥 FIX: Nếu không có params nhưng URL có dấu ?, thêm parameter mặc định
+            if not params and '?' in url:
+                params = ['q']
+            
             ep.update({
                 "categories": categories,
                 "parameters": params,
                 "path": parsed.path,
                 "query": parsed.query
             })
-
+            
             classified.append(ep)
-
+        
         return classified

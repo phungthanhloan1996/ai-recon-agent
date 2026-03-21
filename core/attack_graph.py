@@ -57,14 +57,17 @@ class AttackGraph:
 
     def add_vulnerability(self, vuln_data: Dict[str, Any]) -> str:
         """Add a vulnerability node to the graph"""
-        vuln_id = f"{vuln_data['endpoint']}_{vuln_data['type']}_{hash(str(vuln_data))}"
+        # Use safe dictionary access to prevent KeyError
+        endpoint = vuln_data.get('endpoint', 'unknown_endpoint')
+        vuln_type = vuln_data.get('type', 'unknown_type')
+        vuln_id = f"{endpoint}_{vuln_type}_{hash(str(vuln_data))}"
 
         node = VulnerabilityNode(
             id=vuln_id,
             name=vuln_data.get('name', 'Unknown'),
             severity=vuln_data.get('severity', 'MEDIUM'),
-            endpoint=vuln_data.get('endpoint', ''),
-            vuln_type=vuln_data.get('type', 'unknown'),
+            endpoint=endpoint,
+            vuln_type=vuln_type,
             confidence=vuln_data.get('confidence', 0.5),
             prerequisites=vuln_data.get('prerequisites', []),
             consequences=vuln_data.get('consequences', [])

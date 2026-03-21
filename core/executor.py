@@ -15,14 +15,23 @@ logger = logging.getLogger("recon.executor")
 
 
 def add_evasion(cmd: List[str]) -> List[str]:
-    """Add evasion techniques: random delay, user-agent"""
-    # Random delay 1-5 seconds
-    delay = random.randint(1, 5)
-    time.sleep(delay)
-    logger.debug(f"[EVASION] Slept {delay}s")
+    """Add evasion techniques: random delay, user-agent
+    
+    BUG 13 FIX: Only apply evasion delay to active-attack tools, not passive recon/scanning
+    """
+    # Active-attack tools that need evasion (trigger WAF/IDS)
+    EVASION_TOOLS = {"sqlmap", "dalfox", "nuclei", "ffuf"}
+    
+    tool_name = cmd[0] if cmd else ""
+    
+    # Only apply delay for active-attack tools
+    if tool_name in EVASION_TOOLS:
+        delay = random.randint(1, 3)
+        time.sleep(delay)
+        logger.debug(f"[EVASION] Applied {delay}s delay for {tool_name}")
 
-    # Add user-agent if curl
-    if cmd[0] == "curl":
+    # Add user-agent if curl (for passive tools too)
+    if tool_name == "curl":
         ua = random.choice([
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.114 Safari/537.36",

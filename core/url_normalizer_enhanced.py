@@ -68,18 +68,22 @@ class URLNormalizer:
         # Step 5: Normalize to base URL (domain + scheme only)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
 
-        # Step 6: Follow redirects if requested
-        if follow_redirects:
+        # Skip redirect/alive checks for development/local URLs
+        is_local = URLNormalizer._is_local_url(base_url)
+
+        # Step 6: Follow redirects if requested (skip for local URLs)
+        if follow_redirects and not is_local:
             final_url, redirect_chain = URLNormalizer._follow_redirects(base_url, timeout)
             if final_url:
                 base_url = final_url
                 if len(redirect_chain) > 1:
                     logger.info(f"Followed {len(redirect_chain)-1} redirect(s): {' -> '.join(redirect_chain[:3])}")
 
-        # Step 7: Validate final URL works
-        is_alive = URLNormalizer._check_url_alive(base_url, timeout)
-        if not is_alive:
-            return "", False, f"URL does not respond: {base_url}"
+        # Step 7: Validate final URL works (skip for local URLs)
+        if not is_local:
+            is_alive = URLNormalizer._check_url_alive(base_url, timeout)
+            if not is_alive:
+                return "", False, f"URL does not respond: {base_url}"
 
         return base_url, True, ""
 
@@ -103,9 +107,32 @@ class URLNormalizer:
 
     @staticmethod
     def _looks_like_domain(text: str) -> bool:
-        """Check if text looks like a valid domain"""
+        """Check if text looks like a valid domain, IP, or localhost"""
         # Remove common schemes if present
         text = text.replace('http://', '').replace('https://', '').strip()
+        
+        # Remove port if present (e.g., localhost:8080 -> localhost)
+        if ':' in text:
+            text = text.split(':')[0].strip()
+        
+        # Accept localhost
+        if text == 'localhost':
+            return True
+        
+        # Accept IPv4 addresses (simple check)
+        ipv4_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
+        if re.match(ipv4_pattern, text):
+            # Validate each octet is 0-255
+            try:
+                octets = [int(x) for x in text.split('.')]
+                if all(0 <= o <= 255 for o in octets):
+                    return True
+            except ValueError:
+                pass
+        
+        # Accept IPv6 (basic check)
+        if ':' in text and '::' in text or text.count(':') > 1:
+            return True
         
         # Basic domain pattern: name.tld or subdomain.name.tld
         domain_pattern = r'^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*\.[a-z]{2,}$'
@@ -123,6 +150,38 @@ class URLNormalizer:
             return True
         
         return False
+
+    @staticmethod
+    def _is_local_url(url: str) -> bool:
+        """
+        Check if URL is a local/development URL (localhost, 127.*, 192.168.*, etc.)
+        These should skip alive/redirect checks
+        """
+        if not url:
+            return False
+        
+        # Extract hostname from URL
+        try:
+            parsed = urlparse(url)
+            netloc = parsed.netloc.split(':')[0].lower()  # Remove port
+        except Exception:
+            return False
+        
+        # Local/development patterns
+        local_patterns = [
+            'localhost',
+            '127.',  # 127.0.0.1, etc
+            '192.168.',  # Private network
+            '10.',  # Private network
+            '172.16.', '172.17.', '172.18.', '172.19.', '172.20.', '172.21.', '172.22.', '172.23.',
+            '172.24.', '172.25.', '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.',  # 172.16-31.*
+            '.local',  # mDNS
+            '.internal',  # Internal domain
+            '.dev',  # Development domain
+            '::1',  # IPv6 localhost
+        ]
+        
+        return any(netloc.startswith(pattern) or netloc.endswith(pattern) for pattern in local_patterns)
 
     @staticmethod
     def _follow_redirects(url: str, timeout: int = 5, max_redirects: int = 5) -> Tuple[str, list]:

@@ -33,6 +33,15 @@ class EndpointClassifier:
         params = endpoint_data.get('parameters', [])
         context = endpoint_data.get('context', '').lower()
 
+        # RULE: Block static files completely
+        if self._is_static_file(path):
+            return {
+                'categories': ['static_file'],
+                'risk_level': 'INFO',
+                'confidence': 0,
+                'reasoning': 'Static file - excluded from scanning'
+            }
+
         categories = self._determine_categories(url, path, params, context)
         risk_level = self._calculate_risk_level(categories, params)
         confidence = self._calculate_confidence(categories, params)
@@ -48,21 +57,23 @@ class EndpointClassifier:
         """Determine vulnerability categories based on rules"""
         categories = []
 
-        # Dynamic endpoint if has parameters
-        if params:
+        # STRICT RULE: admin/auth ONLY for wp-admin or specific endpoints
+        # NOT for files with parameters that happen to have "ver=" 
+        if '/wp-admin' in path:
+            categories.append('admin_panel')
+        elif any(keyword in path for keyword in ['wp-login.php', 'login.php', 'admin.php']) and not self._is_static_file(path):
+            if 'login' in path:
+                categories.append('authentication')
+            else:
+                categories.append('admin_panel')
+
+        # Dynamic endpoint if has parameters (but not static files with ver=)
+        if params and not self._is_static_file(path):
             categories.append('dynamic_endpoint')
 
         # File upload
-        if any(keyword in path for keyword in ['upload', 'file', 'image', 'attachment']):
+        if any(keyword in path for keyword in ['upload', 'file', 'image', 'attachment']) and not self._is_static_file(path):
             categories.append('file_upload')
-
-        # Authentication/Login
-        if any(keyword in path for keyword in ['login', 'auth', 'signin', 'authenticate', 'session']):
-            categories.append('authentication')
-
-        # Admin/High value
-        if any(keyword in path for keyword in ['admin', 'dashboard', 'manage', 'control', 'config']):
-            categories.append('admin_panel')
 
         # API endpoints
         if 'api' in path or any(param in ['api', 'json', 'xml'] for param in params):
@@ -80,24 +91,20 @@ class EndpointClassifier:
         if any(keyword in path for keyword in ['profile', 'user', 'account']):
             categories.append('user_data')
 
-        # Potential SQL injection
-        if params and any(keyword in path for keyword in ['id', 'page', 'search', 'query']):
+        # Potential SQL injection - ONLY if truly dynamic (not static files)
+        if params and any(keyword in path for keyword in ['id', 'page', 'search', 'query']) and not self._is_static_file(path):
             categories.append('sql_injection')
 
-        # Potential XSS
-        if params and any(keyword in path for keyword in ['comment', 'message', 'text', 'input']):
+        # Potential XSS - ONLY if truly dynamic (not static files)
+        if params and any(keyword in path for keyword in ['comment', 'message', 'text', 'input']) and not self._is_static_file(path):
             categories.append('xss')
 
         # Command injection
         if any(keyword in path for keyword in ['exec', 'cmd', 'command', 'shell']):
             categories.append('command_injection')
 
-        # File inclusion
-        if any(keyword in path for keyword in ['include', 'file', 'path']):
-            categories.append('file_inclusion')
-
-        # If no specific categories, mark as other
-        if not categories:
+        # If no specific categories, mark as other (not static)
+        if not categories and not self._is_static_file(path):
             categories.append('other')
 
         return categories
@@ -134,3 +141,31 @@ class EndpointClassifier:
         if categories:
             reasons.append(f"Categories: {', '.join(categories)}")
         return "; ".join(reasons)
+
+    def _is_static_file(self, path: str) -> bool:
+        """
+        Check if path is a static file that should NOT be scanned.
+        RULE: Do NOT scan static files
+        """
+        static_extensions = {
+            '.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.svg',
+            '.woff', '.woff2', '.ttf', '.eot', '.mp4', '.webm',
+            '.ico', '.map', '.json', '.xml', '.txt'
+        }
+        
+        # Check extension
+        for ext in static_extensions:
+            if path.endswith(ext):
+                return True
+        
+        # Check static file patterns
+        static_patterns = [
+            '/static/', '/assets/', '/dist/', '/build/', '/public/',
+            '/images/', '/img/', '/fonts/', '/styles/', '/scripts/',
+            '/vendor/', '/node_modules/', '/media/'
+        ]
+        for pattern in static_patterns:
+            if pattern in path:
+                return True
+        
+        return False

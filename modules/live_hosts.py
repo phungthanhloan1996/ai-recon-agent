@@ -52,25 +52,35 @@ class LiveHostEngine:
     def detect_live_hosts(self, targets: List[str]) -> List[Dict[str, Any]]:
         """Detect live hosts from target list"""
         logger.info(f"[LIVE] Probing {len(targets)} targets...")
-
+        
         live_hosts = []
         primary_limit = int(self.budget.get("live_primary_targets", 220))
         secondary_limit = int(self.budget.get("live_secondary_targets", 90))
         secondary_ports = self.ports[2: 2 + int(self.budget.get("live_ports_secondary", 4))]
         timeout = int(self.budget.get("live_timeout", 6))
-
+        
         primary_targets = targets[:primary_limit]
         if not primary_targets:
             self._save_results([])
             return []
-
-        # Queue 1: fast primary probing (80/443 only)
+        
+        # 🔥 FIX: Chuẩn hóa URL trước khi probe
+        normalized_targets = []
+        for target in primary_targets:
+            if target.startswith(('http://', 'https://')):
+                # Đã có scheme
+                normalized_targets.append(target)
+            else:
+                # Thêm cả http và https
+                normalized_targets.append(f"http://{target}")
+                normalized_targets.append(f"https://{target}")
+        
+        # Queue 1: fast primary probing
         primary_candidates = []
         with ThreadPoolExecutor(max_workers=30) as executor:
             futures = []
-            for target in primary_targets:
-                futures.append(executor.submit(self.probe_host, f"https://{target}", timeout))
-                futures.append(executor.submit(self.probe_host, f"http://{target}", timeout))
+            for target in normalized_targets:
+                futures.append(executor.submit(self.probe_host, target, timeout))
             for future in as_completed(futures):
                 try:
                     result = future.result()
@@ -80,6 +90,8 @@ class LiveHostEngine:
                         primary_candidates.append(host)
                 except Exception as e:
                     logger.debug(f"[LIVE] Probe error: {e}")
+    
+
 
         # Queue 2: deeper port probing only on hosts that were alive in queue 1.
         secondary_hosts = list(dict.fromkeys(primary_candidates))[:secondary_limit]

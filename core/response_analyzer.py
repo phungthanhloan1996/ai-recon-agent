@@ -10,6 +10,203 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger("recon.response_analyzer")
 
 
+class VulnerabilityScorer:
+    """
+    Scientific scoring for vulnerabilities.
+    
+    Base score (0-1):
+    - +0.4 = payload reflected in response (direct code execution)
+    - +0.3 = response anomaly (DB error / status change / timing)
+    - +0.3 = confirmed by second payload
+    
+    Rules:
+    - score < 0.5  → DISCARD (likely false positive)
+    - 0.5 - 0.7   → LOW
+    - 0.7 - 0.9   → MEDIUM
+    - > 0.9       → HIGH
+    
+    CRITICAL RULE: Evidence required for each point
+    """
+    
+    def __init__(self):
+        self.min_viable_score = 0.5  # Below this = DISCARD
+    
+    def score_vulnerability(
+        self,
+        exploit_type: str,
+        response_text: str,
+        baseline_response: Optional[str],
+        payload: Optional[str],
+        payload_count: int = 1,
+        status_code: int = 200,
+        baseline_status: int = 200
+    ) -> Dict:
+        """
+        Calculate vulnerability confidence score.
+        
+        Returns: {
+            'score': 0.0-1.0,
+            'severity': 'INFO|LOW|MEDIUM|HIGH',
+            'evidence': ['evidence_1', ...],
+            'evidence_count': int,
+            'validation_status': 'unconfirmed|confirmed' 
+        }
+        """
+        score = 0.0
+        evidence = []
+        
+        # EVIDENCE 1: Payload Reflection - STRONGEST (+0.4)
+        if payload and self._is_payload_reflected(response_text, payload):
+            score += 0.4
+            evidence.append(f"Payload reflected in response ({payload[:30]}...)")
+        
+        # EVIDENCE 2: Response Anomaly
+        anomaly_score = self._check_response_anomaly(
+            response_text, baseline_response, status_code, baseline_status, exploit_type
+        )
+        if anomaly_score > 0:
+            score += anomaly_score  # Up to +0.3
+            if status_code != baseline_status:
+                evidence.append(f"Status changed: {baseline_status}→{status_code}")
+            if baseline_response and len(response_text) != len(baseline_response):
+                diff = len(response_text) - len(baseline_response)
+                evidence.append(f"Response length changed: {diff:+d} bytes")
+        
+        # EVIDENCE 3: Validation (second payload) - REWARDING CONSISTENCY (+0.3)
+        if payload_count >= 2:
+            score += 0.3
+            evidence.append("Confirmed by multiple payloads")
+        
+        # Apply floor: remove low-confidence findings
+        if score < self.min_viable_score:
+            return {
+                'score': 0.0,
+                'severity': 'DISCARDED',
+                'evidence': evidence,
+                'evidence_count': len(evidence),
+                'validation_status': 'invalid',
+                'reason': 'Score below minimum viable threshold (0.5)'
+            }
+        
+        # Normalize to [0.5, 1.0] for viable findings
+        if score > 1.0:
+            score = 1.0
+        
+        # Determine severity
+        if score > 0.9:
+            severity = 'HIGH'
+        elif score > 0.7:
+            severity = 'MEDIUM'
+        elif score > 0.5:
+            severity = 'LOW'
+        else:
+            severity = 'INFO'
+        
+        # Validation status
+        validation = 'confirmed' if payload_count >= 2 else 'unconfirmed'
+        
+        return {
+            'score': round(score, 2),
+            'severity': severity,
+            'evidence': evidence,
+            'evidence_count': len(evidence),
+            'validation_status': validation,
+            'reason': f"Evidence verified: {len(evidence)} out of 3 points"
+        }
+    
+    def _is_payload_reflected(self, response_text: str, payload: str) -> bool:
+        """
+        Check if payload is reflected in the response.
+        IMPORTANT: Must be actual code behavior, not just in error message.
+        """
+        if not response_text or not payload:
+            return False
+        
+        # Make the check more specific
+        response_lower = response_text.lower()
+        payload_lower = payload.lower()
+        
+        # Short payloads might occur by chance, need longer match
+        if len(payload) < 5:
+            return False
+        
+        # Find if payload appears
+        if payload_lower in response_lower:
+            # Verify it's not just in an error message about the input
+            # Context check: avoid "invalid input: <payload>"
+            idx = response_lower.find(payload_lower)
+            context_before = response_lower[max(0, idx-50):idx]
+            
+            invalid_contexts = ['invalid', 'error', 'rejected', 'not allowed', 'syntax error in']
+            if any(ic in context_before for ic in invalid_contexts):
+                return False  # It's in an error message
+            
+            return True
+        
+        return False
+    
+    def _check_response_anomaly(
+        self,
+        response_text: str,
+        baseline_response: Optional[str],
+        status_code: int,
+        baseline_status: int,
+        exploit_type: str
+    ) -> float:
+        """
+        Check for response anomalies that indicate vulnerability.
+        Max +0.3, requires actual evidence.
+        """
+        score = 0.0
+        
+        # Status code change (allows for some flexibility)
+        if status_code != baseline_status:
+            # Some changes indicate success, others are normal
+            if status_code == 500 and exploit_type in ['sql_injection', 'command_injection']:
+                score += 0.15  # Server error on injection attempt
+            elif status_code == 403 and exploit_type == 'auth_bypass':
+                score += 0.15  # Access control
+            elif status_code in [400, 422] and status_code != baseline_status:
+                # Input rejection (less reliable)
+                score += 0.05
+        
+        # Response content change (only if we have baseline)
+        if baseline_response:
+            # Look for error patterns that ONLY appear with injection
+            response_keywords = self._extract_error_keywords(response_text)
+            baseline_keywords = self._extract_error_keywords(baseline_response)
+            
+            # New error keywords appearing → +0.15
+            new_errors = response_keywords - baseline_keywords
+            if new_errors and exploit_type in ['sql_injection', 'command_injection']:
+                score += 0.15
+        
+        return min(score, 0.3)
+    
+    def _extract_error_keywords(self, response_text: str) -> set:
+        """Extract DB/injection error keywords"""
+        error_patterns = {
+            'sql': [
+                'sql', 'syntax', 'query', 'database', 'table', 'column',
+                'syntax error', 'near', 'unexpected', 'mysql', 'postgresql',
+                'sqlite', 'oracle', 'mssql'
+            ],
+            'rce': ['uid=', 'root@', '/bin/', 'command not found', 'permission denied'],
+            'xss': ['<script>', '</script>', 'onclick=', 'onerror=', 'alert()']
+        }
+        
+        found = set()
+        response_lower = response_text.lower()
+        
+        for category, patterns in error_patterns.items():
+            for pattern in patterns:
+                if pattern in response_lower:
+                    found.add(pattern)
+        
+        return found
+
+
+
 # Signatures for detecting successful exploits
 SIGNATURES = {
     "sql_injection": {
@@ -123,6 +320,7 @@ HTTP_STATUS_RISK = {
 class ResponseAnalyzer:
     def __init__(self):
         self.findings = []
+        self.scorer = VulnerabilityScorer()
 
     def analyze(
         self,
@@ -130,73 +328,74 @@ class ResponseAnalyzer:
         status_code: int,
         url: str,
         exploit_type: str,
-        payload: Optional[str] = None
+        payload: Optional[str] = None,
+        baseline_response: Optional[Dict] = None
     ) -> Dict:
         """
-        Analyze HTTP response for exploit success indicators.
-        Returns a result dict with success status and details.
+        Analyze HTTP response for exploit success indicators using scientific scoring.
+        
+        Args:
+            response_text: Response body
+            status_code: HTTP status code
+            url: Target URL
+            exploit_type: Type of exploit (xss, sql_injection, etc.)
+            payload: Payload used
+            baseline_response: Baseline response for comparison
+        
+        Returns:
+            {
+                'url': str,
+                'exploit_type': str,
+                'payload': str,
+                'status_code': int,
+                'success': bool,
+                'confidence': 0.0-1.0,
+                'severity': str,
+                'evidence': [str],
+                'validation_status': str
+            }
         """
+        baseline_text = baseline_response.get('content', '') if baseline_response else None
+        baseline_status = baseline_response.get('status_code', 200) if baseline_response else 200
+        
+        # Use scientific scorer
+        score_result = self.scorer.score_vulnerability(
+            exploit_type=exploit_type,
+            response_text=response_text,
+            baseline_response=baseline_text,
+            payload=payload,
+            payload_count=1,
+            status_code=status_code,
+            baseline_status=baseline_status
+        )
+        
         result = {
             "url": url,
             "exploit_type": exploit_type,
             "payload": payload,
             "status_code": status_code,
-            "success": False,
-            "confidence": 0.0,
-            "indicators": [],
-            "severity": "INFO",
-            "notes": [],
+            "success": score_result['score'] >= self.scorer.min_viable_score,
+            "confidence": score_result['score'],
+            "indicators": score_result.get('evidence', []),
+            "severity": score_result['severity'],
+            "validation_status": score_result.get('validation_status', 'unconfirmed'),
+            "evidence_count": score_result.get('evidence_count', 0),
+            "reason": score_result.get('reason', '')
         }
-
-        text_lower = response_text.lower() if response_text else ""
-
-        # Check exploit-specific signatures
-        if exploit_type in SIGNATURES:
-            sigs = SIGNATURES[exploit_type]
-            for sig_type, patterns in sigs.items():
-                for pattern in patterns:
-                    if re.search(pattern, text_lower, re.IGNORECASE | re.MULTILINE):
-                        result["indicators"].append(f"{sig_type}: {pattern[:50]}")
-                        result["success"] = True
-                        result["confidence"] = min(1.0, result["confidence"] + 0.3)
-                        if sig_type in ("success", "webshell", "bruteforce_success", "data_leak"):
-                            result["severity"] = "CRITICAL"
-
-        # Always check for info disclosure
-        info_patterns = SIGNATURES.get("info_disclosure", {}).get("sensitive", [])
-        for pattern in info_patterns:
-            match = re.search(pattern, response_text or "", re.IGNORECASE)
-            if match:
-                result["indicators"].append(f"sensitive_data: {match.group(0)[:60]}")
-                result["success"] = True
-                result["confidence"] = max(result["confidence"], 0.7)
-                result["severity"] = "HIGH"
-
-        # Status code analysis
-        status_note = HTTP_STATUS_RISK.get(status_code, "")
-        if status_note:
-            result["notes"].append(f"HTTP {status_code}: {status_note}")
-
-        # Size-based heuristics
-        if response_text:
-            size = len(response_text)
-            if size > 100000:
-                result["notes"].append(f"Large response ({size} bytes) - possible data dump")
-            elif size < 10 and status_code == 200:
-                result["notes"].append("Empty 200 response - suspicious")
-
-        # Confidence normalization
-        result["confidence"] = round(min(1.0, result["confidence"]), 2)
-
-        if result["success"]:
-            logger.warning(
-                f"[ANALYZER] ✓ EXPLOIT SUCCESS [{exploit_type}] "
-                f"confidence={result['confidence']} url={url}"
+        
+        # Only track findings that pass the threshold
+        if result['success']:
+            logger.info(
+                f"[SCORING] ✓ VULNERABILITY [{exploit_type}] "
+                f"score={result['confidence']} severity={result['severity']} url={url}"
             )
             self.findings.append(result)
         else:
-            logger.debug(f"[ANALYZER] ✗ No success indicator for {exploit_type} @ {url}")
-
+            logger.debug(
+                f"[SCORING] ✗ REJECTED [{exploit_type}] "
+                f"score={result['confidence']} (below 0.5 threshold) url={url}"
+            )
+        
         return result
 
     def analyze_shell_response(self, response_text: str) -> Tuple[bool, str]:

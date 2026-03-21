@@ -40,6 +40,16 @@ class ReportGenerator:
 
     def _generate_json_report(self):
         """Generate structured JSON report"""
+        # FILTER: Only include high-confidence vulnerabilities
+        all_vulns = self.state.get("vulnerabilities", [])
+        valid_vulns = [v for v in all_vulns if v.get('confidence', 0) >= 0.5]
+        
+        logger.info(f"[REPORT] Filtering: {len(all_vulns)} → {len(valid_vulns)} valid vulns")
+        
+        # Build summary with FILTERED vulns
+        summary = self._build_summary()
+        summary["vulnerabilities_found"] = len(valid_vulns)  # Override with filtered count
+        
         report_data = {
             "assessment_info": {
                 "target": self.state.get("target", ""),
@@ -48,19 +58,21 @@ class ReportGenerator:
                 "duration": self._calculate_duration(),
                 "agent_version": "1.0.0"
             },
-            "summary": self._build_summary(),
+            "summary": summary,
             "findings": {
                 "subdomains": self.state.get("subdomains", []),
                 "live_hosts": self.state.get("live_hosts", []),
                 "endpoints": self.state.get("prioritized_endpoints", []),
-                "vulnerabilities": self.state.get("confirmed_vulnerabilities", []),
+                "vulnerabilities": valid_vulns,
                 "exploit_chains": self._format_chains_for_json(),
                 "external_findings": self.state.get("external_findings", []),
+                "security_findings": self.state.get("security_findings", []),
+                "rce_chain_possibilities": self.state.get("rce_chain_possibilities", [])
             },
             "attack_surface": {
                 "total_endpoints": len(self.state.get("endpoints", [])),
                 "prioritized_endpoints": len(self.state.get("prioritized_endpoints", [])),
-                "vulnerable_endpoints": len(self.state.get("confirmed_vulnerabilities", [])),
+                "vulnerable_endpoints": len(valid_vulns),
                 "attack_chains": len(self.state.get("exploit_chains", []))
             },
             "technical_details": {
@@ -107,6 +119,16 @@ class ReportGenerator:
         lines.extend(self._build_external_findings_section())
         lines.append("")
 
+
+        # 🔥 THÊM: Security Findings (non-CVE)
+        lines.extend(self._build_security_findings_section())
+        lines.append("")
+
+        # 🔥 THÊM: RCE Chain Possibilities
+        lines.extend(self._build_rce_chain_section())
+        lines.append("")
+
+
         # Critical Findings
         lines.extend(self._build_findings_section())
         lines.append("")
@@ -144,7 +166,7 @@ class ReportGenerator:
             "subdomains_discovered": len(self.state.get("subdomains", [])),
             "live_hosts_found": len(self.state.get("live_hosts", [])),
             "endpoints_analyzed": len(endpoints),
-            "vulnerabilities_found": len(vulns),
+            "vulnerabilities_found": len(self.state.get("confirmed_vulnerabilities", [])) + len(self.state.get("vulnerabilities", [])),
             "exploit_chains_planned": len(chains),
             "critical_vulns": len([v for v in vulns if v.get("severity") == "CRITICAL"]),
             "high_vulns": len([v for v in vulns if v.get("severity") == "HIGH"]),
@@ -203,6 +225,49 @@ class ReportGenerator:
                 url = host.get("url", "")
                 status = host.get("status_code", "")
                 lines.append(f"- {url} (Status: {status})")
+            lines.append("")
+
+        # Include non-CVE findings and RCE chain possibilities directly here as well,
+        # so report users can see them even if other sections are suppressed.
+        security_findings = self.state.get("security_findings", []) or []
+        rce_chains = self.state.get("rce_chain_possibilities", []) or []
+
+        lines.append("### Security Findings (Non-CVE)")
+        if security_findings:
+            for idx, f in enumerate(security_findings, 1):
+                title = f.get("title", f.get("type", "Unknown"))
+                endpoint = f.get("endpoint", "")
+                evidence = (f.get("evidence", "") or "").strip()
+                severity = f.get("severity", "INFO")
+                lines.extend([
+                    f"**{idx}. {title}**",
+                    f"- **Severity:** {severity}",
+                    f"- **Endpoint:** {endpoint}",
+                    f"- **Evidence:** {evidence[:2000]}",
+                    "",
+                ])
+        else:
+            lines.append("No security findings detected.")
+            lines.append("")
+
+        lines.append("### RCE Chain Possibilities")
+        if rce_chains:
+            for idx, c in enumerate(rce_chains, 1):
+                title = c.get("title", "Unknown RCE Chain")
+                severity = c.get("severity", "MEDIUM")
+                components = c.get("components", []) or []
+                evidence = (c.get("evidence", "") or "").strip()
+                requires_validation = c.get("requires_validation", True)
+                lines.extend([
+                    f"**{idx}. {title}**",
+                    f"- **Severity:** {severity}",
+                    f"- **Requires Validation:** {'Yes' if requires_validation else 'No'}",
+                    f"- **Components:** {', '.join([str(x) for x in components])}",
+                    f"- **Evidence:** {evidence[:2000]}",
+                    "",
+                ])
+        else:
+            lines.append("No RCE chain possibilities identified.")
             lines.append("")
 
         return lines
@@ -357,6 +422,104 @@ class ReportGenerator:
             lines.append("")
         return lines
 
+
+
+    def _build_security_findings_section(self) -> List[str]:
+        """Build section for security findings (non-CVE)"""
+        lines = [
+            "## 📋 SECURITY FINDINGS (Non-CVE)",
+            "",
+            "*These are security observations, misconfigurations, and informational findings that may not have CVEs but indicate security posture issues.*",
+            ""
+        ]
+        
+        findings = self.state.get("security_findings", [])
+        if not findings:
+            lines.append("No security findings detected.")
+            return lines
+        
+        # Group by severity
+        by_severity = {"CRITICAL": [], "HIGH": [], "MEDIUM": [], "LOW": [], "INFO": []}
+        for f in findings:
+            severity = f.get("severity", "INFO")
+            if severity in by_severity:
+                by_severity[severity].append(f)
+            else:
+                by_severity["INFO"].append(f)
+        
+        # Count by severity
+        lines.append("| Severity | Count |")
+        lines.append("|----------|-------|")
+        for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
+            if by_severity[sev]:
+                lines.append(f"| {sev} | {len(by_severity[sev])} |")
+        lines.append("")
+        
+        # List findings by severity
+        for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
+            if not by_severity[sev]:
+                continue
+            lines.append(f"### {sev} Severity Findings")
+            lines.append("")
+            for i, finding in enumerate(by_severity[sev], 1):
+                title = finding.get("title", finding.get("type", "Unknown"))
+                endpoint = finding.get("endpoint", "")
+                evidence = finding.get("evidence", "")[:200]
+                lines.extend([
+                    f"**{i}. {title}**",
+                    f"- **Endpoint:** {endpoint}",
+                    f"- **Evidence:** {evidence}",
+                    ""
+                ])
+            lines.append("")
+        
+        return lines
+
+
+
+    def _build_rce_chain_section(self) -> List[str]:
+        """Build section for RCE chain possibilities"""
+        lines = [
+            "## 💣 RCE CHAIN POSSIBILITIES",
+            "",
+            "*These are potential Remote Code Execution attack chains identified from the attack surface.*",
+            ""
+        ]
+        
+        rce_chains = self.state.get("rce_chain_possibilities", [])
+        if not rce_chains:
+            lines.append("No RCE chain possibilities identified.")
+            return lines
+        
+        lines.append("| Chain | Severity | Components | Requires Validation |")
+        lines.append("|-------|----------|------------|---------------------|")
+        
+        for chain in rce_chains:
+            title = chain.get("title", "Unknown RCE Chain")[:40]
+            severity = chain.get("severity", "MEDIUM")
+            components = ", ".join(chain.get("components", [])[:2])
+            requires_val = "Yes" if chain.get("requires_validation", True) else "No"
+            lines.append(f"| {title} | {severity} | {components} | {requires_val} |")
+        
+        lines.append("")
+        lines.append("### Detailed RCE Chains")
+        lines.append("")
+        
+        for i, chain in enumerate(rce_chains, 1):
+            lines.extend([
+                f"**{i}. {chain.get('title', 'Unknown RCE Chain')}**",
+                f"- **Severity:** {chain.get('severity', 'MEDIUM')}",
+                f"- **Components:** {', '.join(chain.get('components', []))}",
+                f"- **Evidence:** {chain.get('evidence', '')[:200]}",
+                f"- **Requires Manual Validation:** {chain.get('requires_validation', True)}",
+                ""
+            ])
+        
+        return lines
+
+
+
+
     def _build_technical_details_section(self) -> List[str]:
         """Build technical details section"""
         lines = [
@@ -399,14 +562,20 @@ class ReportGenerator:
         chains = summary.get('exploit_chains_planned', 0)
         pending_manual = self.state.get("manual_validation_required", [])
         pending_critical = any(item.get("severity") == "CRITICAL" for item in pending_manual)
+        
+        # 🔥 THÊM: RCE chains detection
+        rce_chains = self.state.get("rce_chain_possibilities", [])
+        high_rce_chains = len([c for c in rce_chains if c.get("severity") == "HIGH"])
+        med_rce_chains = len([c for c in rce_chains if c.get("severity") == "MEDIUM"])
+        
         if pending_critical:
             return "CRITICAL (PENDING MANUAL VALIDATION)"
 
-        if critical > 0 or chains > 3:
+        if critical > 0 or chains > 3 or high_rce_chains > 0:
             return "CRITICAL"
-        elif high > 2 or chains > 1:
+        elif high > 2 or chains > 1 or med_rce_chains > 2:
             return "HIGH"
-        elif high > 0 or chains > 0:
+        elif high > 0 or chains > 0 or rce_chains:
             return "MEDIUM"
         else:
             return "LOW"

@@ -250,7 +250,7 @@ class ReconEngine:
         # Save to file
         subdomains_file = os.path.join(self.output_dir, "subdomains.txt")
         with open(subdomains_file, 'w') as f:
-            f.write('\n'.join(sorted(subdomains)))
+            f.write('\\n'.join(sorted(subdomains)))
         score_file = os.path.join(self.output_dir, "subdomains_scored.json")
         scored = []
         for sub in sorted(subdomains):
@@ -291,7 +291,7 @@ class ReconEngine:
         # Save to file
         archived_file = os.path.join(self.output_dir, "archived_urls.txt")
         with open(archived_file, 'w') as f:
-            f.write('\n'.join(sorted(urls)))
+            f.write('\\n'.join(sorted(urls)))
 
         logger.info(f"[RECON] Found {len(urls)} archived URLs")
         return list(urls)
@@ -333,23 +333,15 @@ class ReconEngine:
         return merged
 
     def merge_url_sources(self, subdomains: List[str], archived_urls: List[str]) -> List[str]:
-        """Merge and deduplicate URLs from all sources, preserving target scheme"""
+        """Merge and deduplicate URLs from all sources"""
         all_urls = set()
-        
-        # Determine target scheme (http or https)
-        target_scheme = "https"  # default
-        raw_target = self.state.get("target", "")
-        if raw_target:
-            if raw_target.startswith("http://"):
-                target_scheme = "http"
-            elif raw_target.startswith("https://"):
-                target_scheme = "https"
-        
-        # Add subdomains as URLs - only use target scheme, not both
+
+        # Add subdomains as URLs
         for sub in subdomains:
-            all_urls.add(f"{target_scheme}://{sub}")
-        
-        # Add archived URLs (already include scheme from sources)
+            all_urls.add(f"https://{sub}")
+            all_urls.add(f"http://{sub}")
+
+        # Add archived URLs
         all_urls.update(archived_urls)
 
         # Normalize URLs
@@ -357,7 +349,7 @@ class ReconEngine:
         normalizer = URLNormalizer()
         normalized = normalizer.normalize_urls(list(all_urls))
 
-        logger.info(f"[RECON] Merged to {len(normalized)} unique URLs (using {target_scheme}:// scheme)")
+        logger.info(f"[RECON] Merged to {len(normalized)} unique URLs")
         return normalized
 
     def validate_live_hosts(self, urls: List[str]) -> List[Dict]:
@@ -428,32 +420,25 @@ class ReconEngine:
     def fallback_cert_transparency(self) -> List[str]:
         """Fetch subdomains from crt.sh Certificate Transparency logs"""
         logger.info(f"[RECON] Querying Certificate Transparency logs for {self.target}")
-        
-        # THÊM RETRY LOGIC
-        for attempt in range(2):
-            try:
-                query = f"%25.{self.target}"
-                url = f"https://crt.sh/?q={quote(query)}&output=json"
-                with urllib.request.urlopen(url, timeout=10) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
-                
-                subdomains = set()
-                for entry in data[:50]:  # Limit to first 50
-                    if 'name_value' in entry:
-                        subs = str(entry['name_value']).strip().split('\n')
-                        for sub in subs:
-                            if self.target in sub:
-                                subdomains.add(sub.lower())
-                
-                logger.info(f"[RECON] Found {len(subdomains)} CT subdomains")
-                return list(subdomains)
-            except Exception as e:
-                if attempt == 0:
-                    time.sleep(2)
-                    continue
-                logger.warning(f"[RECON] CT lookup failed after retry: {e}")
-                return []
-        return []
+        try:
+            query = f"%25.{self.target}"
+            url = f"https://crt.sh/?q={quote(query)}&output=json"
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                data = json.loads(resp.read().decode('utf-8'))
+            
+            subdomains = set()
+            for entry in data[:50]:  # Limit to first 50
+                if 'name_value' in entry:
+                    subs = str(entry['name_value']).strip().split('\n')
+                    for sub in subs:
+                        if self.target in sub:
+                            subdomains.add(sub.lower())
+            
+            logger.info(f"[RECON] Found {len(subdomains)} CT subdomains")
+            return list(subdomains)
+        except Exception as e:
+            logger.warning(f"[RECON] CT lookup failed: {e}")
+            return []
 
     def fallback_dns_enumeration(self) -> List[str]:
         """Bruteforce common subdomains with DNS resolution"""

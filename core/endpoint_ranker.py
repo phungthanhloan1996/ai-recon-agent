@@ -175,9 +175,14 @@ class EndpointRanker:
         print(f"  TOP {n} RISKY ENDPOINTS")
         print(f"{'='*60}")
         for i, ep in enumerate(ranked[:n], 1):
-            print(f"[{i:2d}] [{ep['risk_level']:8s}] Score:{ep['score']}/10  {ep['url']}")
-            if ep['reasons']:
-                print(f"       Reasons: {', '.join(ep['reasons'][:3])}")
+            # Use safe access to prevent KeyError
+            risk_level = ep.get('risk_level', 'UNKNOWN')
+            score = ep.get('score', 0)
+            url = ep.get('url') or ep.get('full_url') or ep.get('path') or 'unknown'
+            reasons = ep.get('reasons', [])
+            print(f"[{i:2d}] [{risk_level:8s}] Score:{score}/10  {url}")
+            if reasons:
+                print(f"       Reasons: {', '.join(reasons[:3])}")
         print(f"{'='*60}\n")
 
     def categorize_endpoints(self, endpoints: List[Dict]) -> Dict[str, List[Dict]]:
@@ -194,7 +199,12 @@ class EndpointRanker:
         }
 
         for ep in endpoints:
-            url = ep["url"].lower()
+            # Use safe access to prevent KeyError
+            url = (ep.get("url") or ep.get("full_url") or ep.get("path") or "").lower()
+            if not url:
+                categories["other"].append(ep)
+                continue
+                
             if re.search(r"login|auth|token|signin|register|password", url):
                 categories["auth"].append(ep)
             elif re.search(r"upload|file|import|attachment", url):

@@ -65,11 +65,16 @@ class AIAnalyzer:
         """Collect all scan data for report"""
         s = self.state
 
-        vulns = s.get("vulnerabilities", [])
+        # STRICT FILTERING: Only include validated vulnerabilities
+        all_vulns = s.get("vulnerabilities", [])
+        vulns = self._filter_valid_vulnerabilities(all_vulns)
+        
+        logger.info(f"[ANALYZER] Filtering: {len(all_vulns)} total → {len(vulns)} validated vulns")
+        
         exploit_results = s.get("exploit_results", [])
         wp_plugins = s.get("wp_plugins", [])
 
-        # Count severities
+        # Count severities (ONLY for valid vulns)
         severity_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0, "INFO": 0}
         for v in vulns:
             sev = v.get("severity", "INFO").upper()
@@ -112,6 +117,59 @@ class AIAnalyzer:
             "exploit_results": exploit_results,
             "successful_exploits": successful,
         }
+
+    def _filter_valid_vulnerabilities(self, vulns: List[Dict]) -> List[Dict]:
+        """
+        STRICT FILTERING: Remove false positives AND duplicates.
+        Only keep vulnerabilities with:
+        - Confidence >= 0.5
+        - Evidence from actual code execution or strong indicators
+        - Not from static files
+        - NOT duplicates
+        """
+        valid = []
+        seen = set()  # Track unique vulns (type + url + payload)
+        
+        for v in vulns:
+            # Rule 1: Must have confidence >= 0.5
+            confidence = v.get('confidence', 0)
+            if confidence < 0.5:
+                logger.debug(f"[FILTER] Rejecting {v.get('type')} (confidence {confidence:.2f} < 0.5)")
+                continue
+            
+            # Rule 2: Must NOT be from static files
+            url = v.get('url', '').lower()
+            if any(ext in url for ext in ['.css', '.js', '.png', '.jpg', '.svg', '.woff']):
+                logger.debug(f"[FILTER] Rejecting {v.get('type')} @ {url} (static file)")
+                continue
+            
+            # Rule 3: Must have evidence
+            evidence = v.get('evidence', []) or v.get('indicators', [])
+            if not evidence:
+                logger.debug(f"[FILTER] Rejecting {v.get('type')} (no evidence)")
+                continue
+            
+            # Rule 4: Must be valid endpoint
+            endpoint = v.get('url', '') or v.get('endpoint', '')
+            if not endpoint or endpoint == 'unknown':
+                logger.debug(f"[FILTER] Rejecting {v.get('type')} (invalid endpoint)")
+                continue
+            
+            # RULE 5: DEDUPLICATION - Skip exact duplicates
+            vuln_key = (
+                v.get('type'),
+                endpoint,
+                v.get('payload', '')[:50]  # First 50 chars of payload
+            )
+            
+            if vuln_key in seen:
+                logger.debug(f"[FILTER] Skipping duplicate: {v.get('type')} @ {endpoint}")
+                continue
+            
+            seen.add(vuln_key)
+            valid.append(v)
+        
+        return valid
 
     def _generate_static_report(self, data: Dict) -> str:
         """Generate a comprehensive static report"""

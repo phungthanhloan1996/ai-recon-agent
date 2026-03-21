@@ -6,6 +6,7 @@ import json
 import time
 import signal
 import concurrent.futures
+import re
 from datetime import datetime, timedelta
 from glob import glob
 import threading
@@ -143,7 +144,9 @@ class BatchDisplay:
         self.render_thread = threading.Thread(target=self._render_loop)
         self.render_thread.daemon = True
         self.render_thread.start()
-    
+        # Trong __init__
+        self.spinner_index = 0
+        self.spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
     def stop(self):
         self.running = False
     
@@ -235,7 +238,7 @@ class BatchDisplay:
             return f"{stats.get('eps', 0)} eps"
         elif phase == 'scan':
             tested = stats.get('payloads_tested', 0)
-            return f"{tested}/100 payloads"
+            return f"{tested} payloads"
         elif phase == 'exploit':
             chains = data.get('chains', [])
             exploited = sum(1 for c in chains if c.get('exploited'))
@@ -1017,12 +1020,19 @@ class ReconAgent:
         self._update_display()
 
         self._load_manual_inputs()
+        self._initialize_seed_queue()
 
         try:
             attack_graph = AttackGraph()
             
             while self.iteration_count < self.max_iterations:
                 self.iteration_count += 1
+                
+                # BUG 11 FIX: Clear completed phases on iteration 2+ to allow re-scanning
+                if self.iteration_count > 1:
+                    for phase in ["classify", "rank", "scan", "analyze", "graph", "chain", "exploit", "learn"]:
+                        self.completed_phases.discard(phase)
+                    self.logger.debug(f"[AGENT] Iteration {self.iteration_count}: Reset completed phases for re-scanning")
                 
                 # Phase 1: Recon
                 if self.iteration_count == 1 and not self._should_skip_phase("recon"):
@@ -1041,8 +1051,6 @@ class ReconAgent:
                     self.phase_status = "queued"
                     self._update_display()
                     self._run_live_hosts_phase()
-                    if self._should_abort_no_live_hosts():
-                        break
                 
                 # Phase 3: WordPress
                 if self.iteration_count == 1 and not self._should_skip_phase("wordpress"):
@@ -1072,6 +1080,16 @@ class ReconAgent:
                     self._run_discovery_phase()
                     if self._should_abort_low_signal():
                         break
+
+                # Phase 4.2: WordPress Detection from State Data
+                # After crawling, analyze discovered URLs/endpoints for WordPress patterns
+                if self.iteration_count == 1 and not self._should_skip_phase("wp_detect_state"):
+                    self.current_phase = "wp"
+                    self.phase_detail = "pattern-detect"
+                    self.phase_tool = "endpoint-analyzer"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_wordpress_detection_from_state()
 
                 # Phase 4.5: Authenticated sessions bootstrap
                 if self.iteration_count == 1 and self.auth_file and not self._should_skip_phase("auth"):
@@ -1204,16 +1222,20 @@ class ReconAgent:
                 self.batch_display.mark_failed(self.target, str(e)[:30])
 
     def _update_stats(self):
+        # Lấy vulns trực tiếp từ confirmed_vulnerabilities (chính xác hơn)
+        vulns = self.state.get("confirmed_vulnerabilities", [])
+        vulns_count = len(vulns)
+        
         summary = self.state.summary()
         self.stats.update({
             'subs': summary.get('subdomains', 0),
             'live': summary.get('live_hosts', 0),
             'eps': summary.get('endpoints', 0),
-            'vulns': summary.get('vulnerabilities', 0),
+            'vulns': vulns_count,  # ← SỬA: dùng số lượng vulns thực tế
             'wp': 1 if summary.get('wordpress') else 0
         })
         
-        vulns = self.state.get("confirmed_vulnerabilities", [])
+        # Cập nhật vuln_types cho display
         self.vuln_types.clear()
         for v in vulns:
             vtype = v.get('type', 'unknown')
@@ -1252,6 +1274,39 @@ class ReconAgent:
             self.last_action = "force recon enabled"
             self._update_display()
             self.state.save()
+
+    def _initialize_seed_queue(self):
+        """
+        Initialize scan with input target as seed (seed-first scanning).
+        This ensures the input target is always scanned, regardless of recon results.
+        """
+        from urllib.parse import urlparse
+        
+        self.logger.info(f"[INIT] Initializing seed queue with: {self.target}")
+        
+        try:
+            parsed = urlparse(self.target)
+            
+            seed = {
+                "url": self.target,
+                "source": "input_seed",
+                "host": parsed.netloc.split(":")[0] if parsed.netloc else self.target,
+                "port": parsed.port or (443 if parsed.scheme == "https" else 80),
+                "scheme": parsed.scheme or "https",
+                "priority": 100
+            }
+            
+            self.state.update(seed_targets=[seed])
+            self.state.update(all_scan_targets=[seed])
+            self.last_action = f"Seed initialized: {self.target}"
+            
+            self.logger.info(f"[INIT] Seed target registered for scanning: {seed['url']}")
+            self._update_display()
+            
+        except Exception as e:
+            self.logger.error(f"[INIT] Failed to initialize seed queue: {e}")
+            self.last_action = f"Seed init failed: {str(e)[:30]}"
+            self._update_display()
 
     def _should_skip_phase(self, phase: str) -> bool:
         skip_map = {
@@ -1306,8 +1361,27 @@ class ReconAgent:
         self._set_activity("live-host-detector", "running", "detect")
         self.phase_detail = "[HTTPX] Testing connectivity to hosts..."
         self._update_display()
-        self.stats['total_hosts'] = len(self.state.get("subdomains", []))
-        self.live_host_engine.detect_live_hosts(self.state.get("subdomains", []))
+        
+        # SEED-FIRST: Include both seed targets and recon discoveries
+        seeds = self.state.get("seed_targets", [])
+        seed_urls = [s["url"] for s in seeds] if seeds else []
+        
+        discoveries = self.state.get("subdomains", [])
+        
+        # Combine: Seeds have priority, then add discoveries
+        all_targets = seed_urls + discoveries
+        
+        stats_info = f"{len(seed_urls)} seeds"
+        if discoveries:
+            stats_info += f" + {len(discoveries)} discoveries"
+        self.logger.info(f"[LIVE] Probing {stats_info}")
+        
+        self.stats['total_hosts'] = len(all_targets)
+        
+        # Probe all targets (seeds + discoveries)
+        if all_targets:
+            self.live_host_engine.detect_live_hosts(all_targets)
+        
         self._set_activity("live-host-detector", "done", "detect")
         after = len(self.state.get("live_hosts", []))
         if after > before:
@@ -1319,16 +1393,6 @@ class ReconAgent:
                 self.batch_display._add_to_feed("🌐", "Live", self.target, f"Found {after-before} live")
         self._update_stats()
         self._mark_phase_done("live_hosts")
-
-    def _should_abort_no_live_hosts(self) -> bool:
-        """Abort early when the target has no reachable live hosts."""
-        live_hosts = self.state.get("live_hosts", [])
-        if live_hosts:
-            return False
-        self.last_action = "no live hosts detected; aborting deep scan"
-        self.state.add_error("No live hosts reachable for target")
-        self._update_display()
-        return True
 
     def _should_abort_low_signal(self) -> bool:
         """
@@ -1346,6 +1410,78 @@ class ReconAgent:
             self._update_display()
             return True
         return False
+
+    def _run_wordpress_detection_from_state(self):
+        self._set_activity("wordpress-detection", "running", "analyze")
+        
+        # Check if WordPress was not already detected
+        already_detected = self.state.get("wordpress_detected", False)
+        if already_detected:
+            self.logger.info("[WP] WordPress already detected; skipping state-based detection")
+            self.last_action = "wordpress already detected"
+            return
+        
+        # Collect URLs/endpoints from state
+        all_urls = []
+        urls_from_state = self.state.get("urls", [])
+        if isinstance(urls_from_state, list):
+            all_urls.extend(str(u) for u in urls_from_state if u)
+        
+        endpoints = self.state.get("endpoints", [])
+        if isinstance(endpoints, list):
+            for ep in endpoints:
+                if isinstance(ep, dict) and 'url' in ep:
+                    all_urls.append(str(ep['url']))
+                elif isinstance(ep, str):
+                    all_urls.append(ep)
+        
+        crawled = self.state.get("crawled_urls", [])
+        if isinstance(crawled, list):
+            all_urls.extend(str(u) for u in crawled if u)
+        
+        if not all_urls:
+            self.logger.debug("[WP] No URLs found in state; skipping detection")
+            self.last_action = "no urls to analyze"
+            return
+        
+        self.logger.info(f"[WP] Analyzing {len(all_urls)} discovered URLs for WordPress patterns...")
+        
+        # Use WP scanner's new detection method
+        try:
+            is_wordpress = self.wp_scanner.detect_wordpress_from_state_data()
+            
+            if is_wordpress:
+                self.logger.info("[WP] WordPress detected from state data ✓")
+                self.stats['wp'] = 1
+                self.last_action = "wordpress: detected from patterns"
+                
+                # 🔥 FIX: Lấy version và themes từ state
+                version = self.state.get("wp_version", "unknown")
+                themes = self.state.get("wp_themes", [])
+                plugins = self.state.get("wp_plugins", [])
+                
+                # 🔥 FIX: Cập nhật findings để hiển thị
+                if version and version != "unknown":
+                    self.findings['cms_version'] = f"WordPress {version}"
+                if themes:
+                    self.findings['themes'] = themes[:5]
+                if plugins:
+                    self.findings['plugins'] = plugins[:10]
+                
+                # Get confidence score if available
+                confidence = self.state.get("wp_scan_confidence", 0)
+                if confidence:
+                    self.phase_detail = f"pattern-detect ({confidence:.0f}%)"
+                    
+                # 🔥 FIX: Force update display
+                self._update_display()
+            else:
+                self.logger.debug("[WP] Insufficient WordPress patterns in data")
+                self.last_action = "no wordpress patterns"
+        
+        except Exception as e:
+            self.logger.warning(f"[WP] Error during state-based detection: {e}")
+            self.last_action = f"detection error: {str(e)[:30]}"
 
     def _run_wordpress_phase(self):
         self._set_activity("wpscan+wp-fingerprint", "running", "scan")
@@ -1400,8 +1536,9 @@ class ReconAgent:
                     self.batch_display._add_to_feed("🎯", "WordPress", self.target, f"Found {len(wp_sites)} sites")
                 
                 # ─── INTEGRATION: Advanced WordPress Security Scan (wp_scan_cve) ───
+                # BUG 12 FIX: Only run advanced scan when wp_sites are detected
                 self.logger.debug("[WORDPRESS] Running advanced security scan on detected targets...")
-                for site_url in target_urls:
+                for site_url in wp_sites.keys():
                     try:
                         self.phase_detail = f"[ADVANCED SCAN] Analyzing {site_url.split('://')[-1][:30]}..."
                         self._update_display()
@@ -1425,7 +1562,12 @@ class ReconAgent:
                         
                         if scan_data.get("wordpress_api", {}).get("user_enumeration_possible"):
                             self.logger.warning(f"[SECURITY] User enumeration possible via REST API")
-                        
+                            users = scan_data.get("wordpress_api", {}).get("users_found", [])
+                            if users:
+                                self.logger.info(f"[USERS] Found: {', '.join(str(u) for u in users)}")
+                                self.findings['users'] = users
+                                if self.batch_display:
+                                    self.batch_display._add_to_feed("👤", "Users", site_url.split('://')[-1][:20], ', '.join(users[:3]))
                         if scan_data.get("vulnerabilities"):
                             vuln_count = len(scan_data["vulnerabilities"])
                             self.logger.info(f"[SECURITY] Found {vuln_count} security observations")
@@ -1627,6 +1769,38 @@ class ReconAgent:
                     current_vulns.append(vuln)
             self.state.update(vulnerabilities=current_vulns)
             self.stats['vulns'] = len(current_vulns)
+        
+        # BUG 10 FIX: Merge dirbusting results into endpoints
+        # Get the raw findings from toolkit
+        findings = self.state.get("external_findings", []) or []
+        for finding in findings:
+            if finding.get("tool") == "dirbusting":
+                base_url = finding.get("url", "")
+                dirbusting_data = finding.get("data", {})
+                directories = dirbusting_data.get("directories", [])
+                files = dirbusting_data.get("files", [])
+                
+                current_endpoints = self.state.get("endpoints", []) or []
+                
+                # Add directories and files as endpoints
+                for item in directories + files:
+                    path = item if isinstance(item, str) else item.get("path", "") if isinstance(item, dict) else ""
+                    if path:
+                        full_url = base_url.rstrip("/") + "/" + path.lstrip("/")
+                        # Check if endpoint already exists
+                        if not any(e.get("url") == full_url for e in current_endpoints):
+                            new_endpoint = {
+                                "url": full_url,
+                                "source": "dirbusting",
+                                "categories": ["general"],
+                                "method": "GET"
+                            }
+                            current_endpoints.append(new_endpoint)
+                
+                # Update state
+                if any(e.get("source") == "dirbusting" for e in current_endpoints):
+                    self.state.update(endpoints=current_endpoints)
+                    self.logger.info(f"[MERGE] Added {len([e for e in current_endpoints if e.get('source') == 'dirbusting'])} dirbusting endpoints")
 
 
     def _run_discovery_phase(self):
@@ -1693,68 +1867,199 @@ class ReconAgent:
         self._update_display()
         self._run_endpoint_ranking()
         prioritized = len(self.state.get("prioritized_endpoints", []))
-        self.phase_detail = f"[RANK] Prioritized {prioritized} high-risk endpoints"
+        self.logger.warning(f"[RANK] Prioritized endpoints count: {prioritized}")
         self._update_display()
         self.phase_status = "done"
         self._mark_phase_done("rank")
 
     def _run_scanning_phase(self):
         before = len(self.state.get("confirmed_vulnerabilities", []))
+
         self._set_activity("nuclei/sqlmap/dalfox", "running", "active")
         self.phase_detail = "[NUCLEI] Testing with active scanning..."
         self._update_display()
-        
-        # IMPROVED: Wrap scanning with error recovery
+
         try:
-            self.scanning_engine.run()
+            targets = (
+                self.state.get("prioritized_endpoints")
+                or self.state.get("endpoints")
+                or [{"url": u} for u in self.state.get("urls", [])]
+            )
+
+            if not targets:
+                self.logger.warning("[SCAN] No targets available → skipping scan")
+            else:
+                self.logger.warning(f"[SCAN] Running scan on {len(targets)} endpoints")
+
+            self.state.update(scan_targets=targets)
+            self.state.update(prioritized_endpoints=targets)
+            # Update total_payloads để UI hiển thị đúng
+            self.stats['total_payloads'] = min(len(targets), 100)
+            self.stats['payloads_tested'] = 0
+            self._update_display()
+            # RUN SCAN
+            def _scan_progress(completed):
+                self.stats['payloads_tested'] = min(completed, self.stats.get('total_payloads', 100))
+                self._update_display()
+
+            self.scanning_engine.run(progress_cb=_scan_progress)
+
+            self.stats['payloads_tested'] = self.stats['total_payloads']
+            self._update_display()
             self.error_recovery.log_success("scan", "nuclei")
+
         except Exception as e:
             error_msg = str(e)[:80]
             self.error_recovery.log_error("scan", "nuclei", error_msg)
             recovery = self.error_recovery.suggest_recovery("scan", "nuclei", error_msg)
             self.phase_detail = f"[SCAN] Error - {recovery['recommended_action']}"
             self.logger.warning(f"Scanning phase error: {error_msg}")
-        
+
         self._set_activity("nuclei/sqlmap/dalfox", "done", "active")
+
+        # ============ ĐỌC VÀ XỬ LÝ SCAN RESULTS ============
+        scan_results_file = os.path.join(self.output_dir, "scan_results.json")
+        scan_responses = []
+        vulns_from_scan = []
+
+        if os.path.exists(scan_results_file):
+            self.logger.info(f"[SCAN] Reading scan results from {scan_results_file}")
+            
+            with open(scan_results_file, 'r') as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        result = json.loads(line)
+                        scan_responses.append(result)
+                        
+                        # Phát hiện vuln
+                        if result.get("vulnerable", False):
+                            endpoint = result.get("endpoint", "")
+                            category = result.get("category", "unknown")
+                            confidence = result.get("confidence", 0.5)
+                            
+                            # Tạo vuln object
+                            vuln = {
+                                "type": category,
+                                "endpoint": endpoint,
+                                "url": endpoint,
+                                "confidence": confidence,
+                                "evidence": result.get("reason", "No indicators detected"),
+                                "payload": result.get("payload", ""),
+                                "severity": "HIGH" if confidence >= 0.75 else "MEDIUM" if confidence >= 0.4 else "LOW",
+                                "status_code": result.get("status_code", 0),
+                                "method": result.get("method", "GET")
+                            }
+                            vulns_from_scan.append(vuln)
+                            
+                    except json.JSONDecodeError as e:
+                        self.logger.warning(f"[SCAN] Invalid JSON at line {line_num}: {e}")
+                        continue
+
+            self.logger.info(f"[SCAN] Loaded {len(scan_responses)} responses, found {len(vulns_from_scan)} vulnerabilities")
+            
+            # Cập nhật confirmed_vulnerabilities
+            if vulns_from_scan:
+                current_vulns = self.state.get("confirmed_vulnerabilities", [])
+                
+                # Deduplicate by endpoint+type
+                existing_keys = {(v.get('endpoint'), v.get('type')) for v in current_vulns}
+                new_vulns = []
+                
+                for vuln in vulns_from_scan:
+                    key = (vuln.get('endpoint'), vuln.get('type'))
+                    if key not in existing_keys:
+                        new_vulns.append(vuln)
+                        existing_keys.add(key)
+                
+                if new_vulns:
+                    current_vulns.extend(new_vulns)
+                    self.state.update(confirmed_vulnerabilities=current_vulns)
+                    self.logger.info(f"[SCAN] ✅ Added {len(new_vulns)} new vulnerabilities to state")
+                    
+                    # Log chi tiết
+                    for vuln in new_vulns[:10]:
+                        self.logger.info(f"[SCAN]   - {vuln['type']} on {vuln['endpoint'][:60]} (conf: {vuln['confidence']})")
+                else:
+                    self.logger.info("[SCAN] No new vulnerabilities (all already in state)")
+            else:
+                self.logger.info("[SCAN] No vulnerable results found in scan_results.json")
+
+        else:
+            self.logger.error(f"[SCAN] scan_results.json NOT FOUND at {scan_results_file}")
+            # Fallback
+            fallback_targets = self.state.get("prioritized_endpoints") or self.state.get("endpoints") or []
+            for e in fallback_targets[:20]:
+                scan_responses.append({
+                    "endpoint": e.get("url") if isinstance(e, dict) else e,
+                    "vulnerable": False,
+                    "category": "surface",
+                    "confidence": 0.1,
+                    "reason": "No active scan result - fallback surface detection"
+                })
+            self.logger.warning(f"[SCAN] Generated {len(scan_responses)} fallback responses")
+
+        # SAVE TO STATE
+        self.state.update(scan_responses=scan_responses)
+
+        # ============ CẬP NHẬT STATS ============
         after = len(self.state.get("confirmed_vulnerabilities", []))
-        
-        self.stats['payloads_tested'] = min(self.stats.get('payloads_tested', 0) + 25, 100)
-        
+        scanned = len(self.state.get("prioritized_endpoints", []) or [])
+        self.stats['payloads_tested'] = min(scanned, 100)
+        self._update_display()
+
         if after > before:
             self.stats['vulns'] = after
             new_vulns = after - before
-            self.phase_detail = f"[SCAN] Found {after} vulnerabilities"
+
+            self.phase_detail = f"[SCAN] Found {after} vulnerabilities (+{new_vulns} new)"
             self._update_display()
             self.last_action = f"scan: +{new_vulns} vulns found"
-            
+
             vulns = self.state.get("confirmed_vulnerabilities", [])
             if vulns and self.batch_display:
                 for vuln in vulns[-new_vulns:]:
                     vtype = vuln.get('type', 'unknown')
                     icon = "🐞" if vtype == "sqli" else "⚠️"
                     self.batch_display._add_to_feed(icon, vtype.upper(), self.target, vuln.get('url', '')[:30])
-            
+
             self._update_stats()
-        
-        # Load scan results
-        scan_results_file = os.path.join(self.output_dir, "scan_results.json")
-        scan_responses = []
-        if os.path.exists(scan_results_file):
-            with open(scan_results_file, 'r') as f:
-                for line in f:
-                    line = line.strip()
-                    if line:
-                        try:
-                            scan_responses.append(json.loads(line))
-                        except json.JSONDecodeError:
-                            self.logger.warning(f"Invalid JSON line in scan_results: {line}")
-        self.state.update(scan_responses=scan_responses)
+        else:
+            self.logger.info(f"[SCAN] No new vulnerabilities (before={before}, after={after})")
+            self._update_stats()
+
         self._mark_phase_done("scan")
 
     def _run_analysis_phase(self):
         self.phase_detail = "[ANALYSIS] Processing scan results..."
         self._update_display()
-        responses = self.state.get("scan_responses", [])
+
+        # Load scan_responses from state, and if missing then load from scan_results.json.
+        responses = self.state.get("scan_responses", []) or []
+        if not responses:
+            scan_file = os.path.join(self.output_dir, "scan_results.json")
+            loaded = []
+            if os.path.exists(scan_file):
+                try:
+                    with open(scan_file, "r") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                loaded.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                self.logger.warning(f"[ANALYSIS] Invalid JSON line in scan_results.json: {line}")
+                except Exception as e:
+                    self.logger.warning(f"[ANALYSIS] Failed to read scan_results.json: {e}")
+
+            if loaded:
+                responses = loaded
+                self.state.update(scan_responses=responses)
+                self.logger.warning(f"[ANALYSIS] Loaded {len(responses)} scan responses from scan_results.json")
+
         vulnerabilities = []
         manual_queue = []
         for response in responses:
@@ -1773,7 +2078,7 @@ class ReconAgent:
                     "evidence": response.get("reason", ""),
                     "auth_role": response.get("auth_role", "anonymous"),
                     "requires_manual_validation": requires_manual,
-                    "validated": False
+                    "validated": False,
                 }
                 vulnerabilities.append(vuln)
                 if requires_manual:
@@ -1784,22 +2089,721 @@ class ReconAgent:
                             "type": response.get("category"),
                             "severity": severity,
                             "evidence": response.get("reason", ""),
-                            "status": "pending_manual_review"
+                            "status": "pending_manual_review",
                         }
                     )
+
         self.state.update(confirmed_vulnerabilities=vulnerabilities)
         self.state.update(manual_validation_required=manual_queue)
         if manual_queue:
             queue_file = os.path.join(self.output_dir, "manual_validation_queue.json")
             with open(queue_file, "w") as f:
                 json.dump(manual_queue, f, indent=2)
-        
+
+        # Generate security_findings from non-CVE signals
+        self.phase_detail = "[ANALYSIS] Extracting security findings from scan data..."
+        self._update_display()
+        findings = self._generate_findings() or []
+
+        # Overwrite (no merge) security_findings into state.
+        # StateManager merges lists, so clear first to guarantee overwrite semantics.
+        self.state.update(security_findings=[])
+        self.state.update(security_findings=findings)
+        self.logger.info(f"[ANALYSIS] Generated {len(findings)} security findings")
+
+        # Detect RCE chain possibilities (dynamic, rules-driven)
+        rce_possibilities = self._analyze_rce_possibilities() or []
+
+        # Overwrite (no merge) rce_chain_possibilities into state.
+        self.state.update(rce_chain_possibilities=[])
+        self.state.update(rce_chain_possibilities=rce_possibilities)
+        self.logger.info(f"[ANALYSIS] Identified {len(rce_possibilities)} RCE attack surface(s)")
+
         if vulnerabilities:
-            self.last_action = f"analysis: {len(vulnerabilities)} confirmed"
+            self.last_action = f"analysis: {len(vulnerabilities)} CVEs + {len(findings)} findings"
             self._update_stats()
+        elif findings:
+            self.last_action = f"analysis: {len(findings)} findings (no CVEs)"
+            self._update_stats()
+
         self.phase_status = "done"
         self._update_display()
         self._mark_phase_done("analyze")
+
+    def _generate_findings(self) -> List[Dict[str, Any]]:
+        """
+        Generate structured findings from discovered data (non-CVE signals).
+        Covers: tech detection, misconfigurations, interesting endpoints, anomalies.
+        """
+        findings: List[Dict[str, Any]] = []
+
+        # 1. TECHNOLOGY DETECTION FINDINGS
+        findings.extend(self._extract_tech_findings())
+
+        # 2. OUTDATED VERSION FINDINGS (rules-driven)
+        findings.extend(self._extract_outdated_version_findings())
+
+        # 3. INTERESTING ENDPOINT FINDINGS (rules-driven + dynamic fallback)
+        findings.extend(self._extract_endpoint_findings())
+
+        # 4. MISCONFIGURATION FINDINGS
+        findings.extend(self._extract_misconfig_findings())
+
+        # 5. INFORMATION LEAK FINDINGS
+        findings.extend(self._extract_info_leak_findings())
+
+        # 6. ANOMALY FINDINGS
+        findings.extend(self._extract_anomaly_findings())
+
+        # Deduplicate
+        seen = set()
+        unique_findings = []
+        for finding in findings:
+            key = (finding.get("type"), finding.get("title", ""), finding.get("endpoint", ""))
+            if key not in seen:
+                seen.add(key)
+                unique_findings.append(finding)
+
+        self.logger.debug(f"[FINDINGS] Generated {len(unique_findings)} findings from {len(findings)} raw entries")
+        return unique_findings
+
+    def _extract_outdated_version_findings(self) -> List[Dict[str, Any]]:
+        """
+        Detect outdated/unsafe versions using rules files only.
+        If rules are missing or versions are unknown, skip gracefully.
+        """
+        findings: List[Dict[str, Any]] = []
+
+        rules_file = os.path.join(BASE_DIR, "rules", "wordpress_rules.json")
+        if not os.path.exists(rules_file):
+            return findings
+
+        try:
+            with open(rules_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return findings
+
+        wp_rules = data.get("wordpress", data) or {}
+
+        def to_version_tuple(v: str) -> Optional[tuple]:
+            if not v or not isinstance(v, str):
+                return None
+            if v.lower() == "unknown":
+                return None
+            # Extract numeric components only (e.g. "5.8.1" -> (5, 8, 1))
+            parts = re.findall(r"\d+", v)
+            if not parts:
+                return None
+            return tuple(int(p) for p in parts[:4])
+
+        def cmp_versions(a: str, b: str) -> Optional[int]:
+            ta = to_version_tuple(a)
+            tb = to_version_tuple(b)
+            if ta is None or tb is None:
+                return None
+            if ta == tb:
+                return 0
+            return -1 if ta < tb else 1
+
+        def version_in_expr(version: str, expr: str) -> bool:
+            if not version or not expr:
+                return False
+            expr = expr.strip()
+            c = cmp_versions(version, expr.lstrip("<").strip())
+            if expr.startswith("<"):
+                return c is not None and c < 0
+            if "-" in expr and not expr.startswith("<"):
+                # Range: "4.0-4.7.1"
+                start, end = [p.strip() for p in expr.split("-", 1)]
+                c1 = cmp_versions(version, start)
+                c2 = cmp_versions(version, end)
+                return c1 is not None and c2 is not None and c1 >= 0 and c2 <= 0
+            return False
+
+        # WordPress core
+        if self.state.get("wordpress_detected"):
+            wp_version = self.state.get("wp_version", "unknown")
+            if isinstance(wp_version, str) and wp_version.lower() != "unknown":
+                vuln_versions = wp_rules.get("vulnerable_versions", {}) or {}
+                sev_map = {
+                    "critical": "CRITICAL",
+                    "high": "HIGH",
+                    "medium": "MEDIUM",
+                }
+                for group, ranges in vuln_versions.items():
+                    for expr in ranges or []:
+                        if version_in_expr(wp_version, str(expr)):
+                            findings.append(
+                                {
+                                    "type": "outdated_version",
+                                    "severity": sev_map.get(group, "MEDIUM"),
+                                    "title": f"Outdated WordPress version detected (v{wp_version})",
+                                    "endpoint": "WordPress Core",
+                                    "evidence": f"Matched vulnerable version rule: {expr}",
+                                    "prerequisites": ["wordpress_detected"],
+                                    "consequences": ["outdated_wordpress_version"],
+                                }
+                            )
+                            break
+
+        # Plugins/themes (only if versions are known)
+        plugin_vulns = wp_rules.get("plugin_vulnerabilities", {}) or {}
+        for plugin in self.state.get("wp_plugins", []) or []:
+            if not isinstance(plugin, dict):
+                continue
+            name = plugin.get("name", "")
+            ver = plugin.get("version", "unknown")
+            if not name or not ver or str(ver).lower() == "unknown":
+                continue
+            if name not in plugin_vulns:
+                continue
+            info = plugin_vulns.get(name, {}) or {}
+            for expr in info.get("versions", []) or []:
+                if version_in_expr(str(ver), str(expr)):
+                    findings.append(
+                        {
+                            "type": "outdated_component_version",
+                            "severity": info.get("severity", "MEDIUM"),
+                            "title": f"Outdated WordPress plugin detected: {name} (v{ver})",
+                            "endpoint": "WordPress Plugin",
+                            "evidence": f"Matched vulnerable version rule: {expr}",
+                            "prerequisites": ["wordpress_detected"],
+                            "consequences": ["outdated_component_version"],
+                            "cve": info.get("cve", []),
+                        }
+                    )
+                    break
+
+        theme_vulns = wp_rules.get("theme_vulnerabilities", {}) or {}
+        for theme in self.state.get("wp_themes", []) or []:
+            if not isinstance(theme, dict):
+                continue
+            name = theme.get("name", "")
+            ver = theme.get("version", "unknown")
+            if not name or not ver or str(ver).lower() == "unknown":
+                continue
+            if name not in theme_vulns:
+                continue
+            info = theme_vulns.get(name, {}) or {}
+            for expr in info.get("versions", []) or []:
+                if version_in_expr(str(ver), str(expr)):
+                    findings.append(
+                        {
+                            "type": "outdated_component_version",
+                            "severity": info.get("severity", "MEDIUM"),
+                            "title": f"Outdated WordPress theme detected: {name} (v{ver})",
+                            "endpoint": "WordPress Theme",
+                            "evidence": f"Matched vulnerable version rule: {expr}",
+                            "prerequisites": ["wordpress_detected"],
+                            "consequences": ["outdated_component_version"],
+                            "cve": info.get("cve", []),
+                        }
+                    )
+                    break
+
+        return findings
+
+    def _extract_tech_findings(self) -> List[Dict[str, Any]]:
+        """Extract findings from technology detection."""
+        findings = []
+        
+        # WordPress detection
+        if self.state.get("wordpress_detected"):
+            wp_version = self.state.get("wp_version", "unknown")
+            findings.append({
+                "type": "tech_detect",
+                "severity": "INFO",
+                "title": f"WordPress detected (v{wp_version})",
+                "endpoint": "N/A",
+                "evidence": f"WordPress CMS identified. Version: {wp_version}. Plugins detected: {len(self.state.get('wp_plugins', []))}. Themes: {len(self.state.get('wp_themes', []))}."
+            })
+        
+        # Framework/CMS detection
+        cms_version = self.findings.get('cms_version', '')
+        if cms_version and 'wordpress' not in cms_version.lower():
+            findings.append({
+                "type": "tech_detect",
+                "severity": "INFO",
+                "title": f"CMS detected - {cms_version}",
+                "endpoint": "N/A",
+                "evidence": f"Server is running {cms_version}"
+            })
+        
+        # PHP version
+        php_version = self.findings.get('php_version', '')
+        if php_version:
+            findings.append({
+                "type": "tech_detect",
+                "severity": "INFO",
+                "title": f"PHP version exposed: {php_version}",
+                "endpoint": "N/A",
+                "evidence": f"Server identifies as {php_version} in response headers"
+            })
+        
+        # WAF detection
+        waf = self.findings.get('waf', '')
+        if waf:
+            findings.append({
+                "type": "tech_detect",
+                "severity": "INFO",
+                "title": f"WAF/Security detected: {waf}",
+                "endpoint": "N/A",
+                "evidence": f"Server is protected by {waf} security appliance"
+            })
+        
+        return findings
+
+    def _extract_endpoint_findings(self) -> List[Dict[str, Any]]:
+        findings: List[Dict[str, Any]] = []
+
+        def collect_candidate_urls() -> List[str]:
+            out = set()
+            for u in (self.state.get("urls", []) or []):
+                if u:
+                    out.add(str(u))
+            for u in (self.state.get("crawled_urls", []) or []):
+                if u:
+                    out.add(str(u))
+
+            for item in self.state.get("endpoints", []) or []:
+                if isinstance(item, dict) and item.get("url"):
+                    out.add(str(item["url"]))
+                elif isinstance(item, str) and item:
+                    out.add(item)
+
+            for item in self.state.get("prioritized_endpoints", []) or []:
+                if isinstance(item, dict) and item.get("url"):
+                    out.add(str(item["url"]))
+
+            for resp in self.state.get("scan_responses", []) or []:
+                if isinstance(resp, dict) and resp.get("endpoint"):
+                    out.add(str(resp["endpoint"]))
+            return list(out)
+
+        def wildcard_to_regex(pattern: str) -> str:
+            # Support '*' as wildcard for rule path patterns.
+            escaped = re.escape(pattern)
+            return escaped.replace(r"\*", ".*")
+
+        candidate_urls = collect_candidate_urls()
+        if not candidate_urls:
+            return findings
+
+        # Prefer dynamic patterns from state; fallback to rules.
+        pattern_entries: List[Dict[str, Any]] = []
+        state_patterns = self.state.get("dangerous_patterns", []) or []
+        if isinstance(state_patterns, list) and state_patterns:
+            for p in state_patterns:
+                if isinstance(p, dict) and p.get("pattern"):
+                    pattern_entries.append(p)
+
+        if not pattern_entries:
+            rules_file = os.path.join(BASE_DIR, "rules", "wordpress_rules.json")
+            if os.path.exists(rules_file):
+                try:
+                    with open(rules_file, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    wp_rules = data.get("wordpress", data) or {}
+                except Exception:
+                    wp_rules = {}
+            else:
+                wp_rules = {}
+
+            # Build severity lookup from common vulnerable endpoints.
+            common = wp_rules.get("common_vulnerabilities", {}) or {}
+            endpoint_sev_map: Dict[str, Dict[str, Any]] = {}
+            for key, info in common.items():
+                endpoint = info.get("endpoint")
+                if endpoint:
+                    endpoint_sev_map[str(endpoint).lower()] = info
+
+            default_paths = wp_rules.get("default_paths", {}) or {}
+
+            token_map = {
+                "login": "login_endpoint_found",
+                "uploads": "file_upload_endpoint",
+            }
+
+            # Default WP paths -> dynamic patterns
+            for path_key, path_value in default_paths.items():
+                if not path_value:
+                    continue
+                sev = "MEDIUM"
+                type_hint = str(path_key)
+                match_info = endpoint_sev_map.get(str(path_value).lower())
+                if match_info and match_info.get("severity"):
+                    sev = match_info.get("severity", sev)
+                    type_hint = match_info.get("type", type_hint)
+                consequences = []
+                tok = token_map.get(str(path_key))
+                if tok:
+                    consequences.append(tok)
+
+                pattern_entries.append(
+                    {
+                        "finding_type": "interesting_endpoint",
+                        "pattern": str(path_value),
+                        "title": f"WordPress path exposed: {path_key}",
+                        "severity": sev,
+                        "consequences": consequences,
+                    }
+                )
+
+            # Common vulnerable endpoints
+            for info in common.values():
+                endpoint = info.get("endpoint")
+                if not endpoint:
+                    continue
+                tok = None
+                # Map known "common" findings into capability tokens when possible.
+                if info.get("type") == "xmlrpc_bruteforce":
+                    tok = "xmlrpc_endpoint_found"
+                if info.get("type") == "user_enumeration":
+                    tok = "user_enumeration_possible"
+                consequences = [tok] if tok else []
+                pattern_entries.append(
+                    {
+                        "finding_type": "interesting_endpoint",
+                        "pattern": str(endpoint),
+                        "title": f"Potential vulnerable WordPress endpoint ({info.get('type', 'unknown')})",
+                        "severity": info.get("severity", "MEDIUM"),
+                        "consequences": consequences,
+                    }
+                )
+
+            # Detection patterns (paths/files) as extra signals
+            det = wp_rules.get("detection_patterns", {}) or {}
+            for p in det.get("paths", []) or []:
+                pattern_entries.append(
+                    {
+                        "finding_type": "interesting_endpoint",
+                        "pattern": str(p),
+                        "title": "WordPress indicator path exposed",
+                        "severity": "LOW",
+                        "consequences": [],
+                    }
+                )
+            for f_name in det.get("files", []) or []:
+                pattern_entries.append(
+                    {
+                        "finding_type": "interesting_endpoint",
+                        "pattern": str(f_name),
+                        "title": "WordPress indicator file exposed",
+                        "severity": "LOW",
+                        "consequences": [],
+                    }
+                )
+
+        # Dynamic fallback: infer endpoint type from URL naming (rules-driven patterns are preferred above).
+        # Note: keep fallback generic and do not hardcode sensitive specific filenames.
+        fallback_patterns = [
+            (r"/admin(?:/|\\b)", "Admin interface exposed", "LOW", ["admin_endpoint_found"]),
+            (r"/login(?:/|\\b)", "Login panel exposed", "MEDIUM", ["login_endpoint_found"]),
+            (r"/upload(?:/|\\b)|/uploads(?:/|\\b)", "File upload surface exposed", "MEDIUM", ["file_upload_endpoint"]),
+            (r"/api(?:/|\\b)|graphql|swagger", "API surface exposed", "LOW", ["api_endpoint_found"]),
+            (r"/debug(?:/|\\b)|/debug\\.php(?:\\b|$)", "Debug surface exposed", "MEDIUM", []),
+            (r"/backup(?:/|\\b)", "Backup surface exposed", "MEDIUM", []),
+            (r"/config(?:/|\\b)", "Configuration surface exposed", "MEDIUM", []),
+        ]
+        for regex, title, sev, cons in fallback_patterns:
+            pattern_entries.append(
+                {
+                    "finding_type": "interesting_endpoint",
+                    "regex": regex,
+                    "title": title,
+                    "severity": sev,
+                    "consequences": cons,
+                }
+            )
+
+        # Apply patterns to each candidate URL.
+        for url in candidate_urls:
+            if not url:
+                continue
+            for entry in pattern_entries:
+                finding_type = entry.get("finding_type", "interesting_endpoint")
+                severity = entry.get("severity", "MEDIUM")
+                title = entry.get("title", "Interesting endpoint")
+                consequences = entry.get("consequences", []) or []
+
+                if entry.get("regex"):
+                    regex = str(entry["regex"])
+                else:
+                    regex = wildcard_to_regex(str(entry.get("pattern", "")))
+
+                if not regex:
+                    continue
+
+                if re.search(regex, url, re.IGNORECASE):
+                    pattern_label = entry.get("pattern") or entry.get("regex")
+                    findings.append(
+                        {
+                            "type": finding_type,
+                            "severity": severity,
+                            "title": title,
+                            "endpoint": url,
+                            "evidence": f"Matched dynamic pattern '{pattern_label}' on {url}",
+                            "prerequisites": [],
+                            "consequences": consequences,
+                        }
+                    )
+
+        self.logger.debug(f"[FINDINGS] Endpoint findings: {len(findings)} raw matches")
+        return findings
+
+    def _extract_misconfig_findings(self) -> List[Dict[str, Any]]:
+        """Extract findings from misconfigurations."""
+        findings = []
+        
+        # Suspicious response patterns
+        responses = self.state.get("scan_responses", []) or []
+        responses_str = " ".join([str(r) for r in responses])
+        
+        # Check for verbose error messages
+        verbose_patterns = [
+            r'strpos\(\)',
+            r'undefined variable',
+            r'Warning: ',
+            r'Fatal error:',
+            r'Exception:',
+            r'stack trace',
+            r'at line \d+',
+        ]
+        
+        for pattern in verbose_patterns:
+            if re.search(pattern, responses_str, re.IGNORECASE):
+                findings.append({
+                    "type": "misconfig",
+                    "severity": "LOW",
+                    "title": "Verbose error messages exposed",
+                    "endpoint": "*",
+                    "evidence": f"Server exposes debugging information in error responses (pattern: {pattern})"
+                })
+                break
+        
+        return findings
+
+    def _extract_info_leak_findings(self) -> List[Dict[str, Any]]:
+        """Extract findings from potential information leaks."""
+        findings = []
+        
+        # User enumeration via WordPress
+        if self.findings.get('users'):
+            user_count = len(self.findings['users'])
+            findings.append({
+                "type": "info_leak",
+                "severity": "LOW",
+                "title": f"{user_count} users enumerated",
+                "endpoint": "WordPress REST API",
+                "evidence": f"User enumeration possible - {user_count} usernames discovered: {', '.join(self.findings['users'][:5])}"
+            })
+        
+        # Plugin information leak
+        if self.findings.get('plugins'):
+            plugin_count = len(self.findings['plugins'])
+            findings.append({
+                "type": "info_leak",
+                "severity": "LOW",
+                "title": f"{plugin_count} plugins identified",
+                "endpoint": "/wp-content/plugins/",
+                "evidence": f"Active WordPress plugins exposed: {', '.join([p.get('name', 'unknown')[:20] for p in self.findings['plugins'][:5]])}"
+            })
+        
+        # Technology fingerprinting
+        if self.tech_stack:
+            tech_count = len(self.tech_stack)
+            tech_list = list(self.tech_stack.keys())[:5]
+            findings.append({
+                "type": "info_leak",
+                "severity": "LOW",
+                "title": f"Technology fingerprinting possible ({tech_count} technologies detected)",
+                "endpoint": "*",
+                "evidence": f"Server reveals technology stack: {', '.join(tech_list)}"
+            })
+        
+        return findings
+
+    def _extract_anomaly_findings(self) -> List[Dict[str, Any]]:
+        """Extract findings from anomalous patterns."""
+        findings = []
+        endpoints = self.state.get("endpoints", []) or []
+        
+        # Attack surface despite no CVEs
+        if len(endpoints) > 20 and len(self.state.get("confirmed_vulnerabilities", [])) == 0:
+            findings.append({
+                "type": "anomaly",
+                "severity": "MEDIUM",
+                "title": "Large attack surface with no detected CVEs",
+                "endpoint": f"{len(endpoints)} total",
+                "evidence": f"Server exposes {len(endpoints)} endpoints but no CVEs detected. Potential for zero-day or complex chain attacks."
+            })
+        
+        return findings
+
+    def _analyze_rce_possibilities(self) -> List[Dict[str, Any]]:
+        """
+        Analyze potential RCE attack chains WITHOUT executing exploits.
+        Chains are derived dynamically from:
+        - existing findings (security_findings)
+        - existing vulnerabilities (confirmed_vulnerabilities)
+        - rules-based chain prerequisites (rules/exploit_chains.json)
+        """
+        findings = self.state.get("security_findings", []) or []
+        confirmed_vulns = self.state.get("confirmed_vulnerabilities", []) or []
+
+        # Collect candidate URLs to infer endpoint capabilities.
+        all_urls = set()
+        for u in (self.state.get("urls", []) or []):
+            if u:
+                all_urls.add(str(u))
+        for u in (self.state.get("crawled_urls", []) or []):
+            if u:
+                all_urls.add(str(u))
+        for item in (self.state.get("endpoints", []) or []):
+            if isinstance(item, dict) and item.get("url"):
+                all_urls.add(str(item["url"]))
+        for item in (self.state.get("prioritized_endpoints", []) or []):
+            if isinstance(item, dict) and item.get("url"):
+                all_urls.add(str(item["url"]))
+
+        token_sources: Dict[str, List[str]] = defaultdict(list)
+        tokens = set()
+
+        # Helper: collect capability tokens from findings (both prerequisites and consequences).
+        # If a finding exists, its prerequisites are considered satisfied for chain inference purposes.
+        for f in findings:
+            for tok in (f.get("prerequisites", []) or []):
+                if tok:
+                    tokens.add(tok)
+                    token_sources[tok].append(f.get("evidence") or f.get("endpoint") or f.get("title") or f.get("type") or "finding")
+            for tok in (f.get("consequences", []) or []):
+                if tok:
+                    tokens.add(tok)
+                    token_sources[tok].append(f.get("evidence") or f.get("endpoint") or f.get("title") or f.get("type") or "finding")
+
+        # WordPress marker
+        if self.state.get("wordpress_detected"):
+            tokens.add("wordpress_detected")
+            token_sources["wordpress_detected"].append("state.wordpress_detected")
+
+        # WordPress-specific endpoint capabilities from rules (dynamic, no hardcoded endpoint names)
+        login_endpoint_path = None
+        uploads_path = None
+        wp_rules_file = os.path.join(BASE_DIR, "rules", "wordpress_rules.json")
+        if os.path.exists(wp_rules_file):
+            try:
+                with open(wp_rules_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                wp_rules = data.get("wordpress", data) or {}
+                default_paths = wp_rules.get("default_paths", {}) or {}
+                login_endpoint_path = default_paths.get("login")
+                uploads_path = default_paths.get("uploads")
+            except Exception:
+                pass
+
+        def wildcard_to_regex(pattern: str) -> str:
+            escaped = re.escape(pattern)
+            return escaped.replace(r"\*", ".*")
+
+        if login_endpoint_path:
+            login_regex = wildcard_to_regex(str(login_endpoint_path))
+            if any(re.search(login_regex, u, re.IGNORECASE) for u in all_urls):
+                tokens.add("login_endpoint_found")
+                token_sources["login_endpoint_found"].append(str(login_endpoint_path))
+
+        if uploads_path:
+            uploads_regex = wildcard_to_regex(str(uploads_path))
+            if any(re.search(uploads_regex, u, re.IGNORECASE) for u in all_urls):
+                tokens.add("file_upload_endpoint")
+                token_sources["file_upload_endpoint"].append(str(uploads_path))
+
+        # Generic fallback capability inference
+        if "login_endpoint_found" not in tokens:
+            if any(re.search(r"/login(?:/|\\b)", u, re.IGNORECASE) for u in all_urls):
+                tokens.add("login_endpoint_found")
+                token_sources["login_endpoint_found"].append("URL matched /login")
+
+        if "file_upload_endpoint" not in tokens:
+            if any(re.search(r"/upload(?:/|\\b)|/uploads(?:/|\\b)", u, re.IGNORECASE) for u in all_urls):
+                tokens.add("file_upload_endpoint")
+                token_sources["file_upload_endpoint"].append("URL matched /upload(s)")
+
+        # Map vulnerability categories to chain prerequisite tokens.
+        def vuln_type_to_token(vtype: str) -> Optional[str]:
+            t = (vtype or "").lower()
+            if not t:
+                return None
+            if "sql" in t or "sqli" in t or t in {"sqli", "sql_injection"}:
+                return "sqli_vulnerability"
+            if "file_inclusion" in t or "lfi" in t or "path_traversal" in t:
+                return "lfi_vulnerability"
+            if "xss" in t:
+                return "xss_vulnerability"
+            if "auth" in t or "authentication" in t or "login" in t:
+                return "auth_vulnerability"
+            if "file_upload" in t or "upload" in t:
+                return "file_upload_endpoint"
+            return None
+
+        for v in confirmed_vulns:
+            token = vuln_type_to_token(v.get("type", ""))
+            if token:
+                tokens.add(token)
+                token_sources[token].append(v.get("evidence") or v.get("endpoint") or v.get("url") or v.get("type") or "vuln")
+
+        # Load rules-driven chain templates and select those whose prerequisites are met.
+        chains_file = os.path.join(BASE_DIR, "rules", "exploit_chains.json")
+        if not os.path.exists(chains_file):
+            return []
+
+        try:
+            with open(chains_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return []
+
+        chain_templates = data.get("chains", data) or {}
+
+        severity_weight = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
+
+        possible = []
+        for chain_id, tpl in chain_templates.items():
+            prereqs = tpl.get("prerequisites", []) or []
+            prereqs = [str(p) for p in prereqs if p is not None]
+            if prereqs and not all(p in tokens for p in prereqs):
+                continue
+
+            components = []
+            for p in prereqs:
+                srcs = token_sources.get(p, [])
+                if srcs:
+                    components.append(f"{p} ({srcs[0][:80]})")
+                else:
+                    components.append(p)
+
+            evidence_parts = []
+            desc = tpl.get("description") or ""
+            if desc:
+                evidence_parts.append(desc.strip())
+            if prereqs:
+                evidence_parts.append(f"Prerequisites satisfied: {', '.join(prereqs)}")
+            evidence = " | ".join([p for p in evidence_parts if p])
+
+            possible.append(
+                {
+                    "type": "rce_possibility",
+                    "severity": tpl.get("risk_level", "MEDIUM"),
+                    "title": tpl.get("name", chain_id),
+                    "components": components,
+                    "evidence": evidence or tpl.get("name", chain_id),
+                    "requires_validation": True,
+                    "prerequisites": prereqs,
+                }
+            )
+
+        possible.sort(key=lambda x: severity_weight.get(x.get("severity", "MEDIUM"), 0), reverse=True)
+        return possible
 
     def _run_attack_graph_phase(self, attack_graph: AttackGraph):
         self.phase_detail = "[GRAPH] Building attack graph from vulnerabilities..."
@@ -2000,23 +3004,120 @@ class ReconAgent:
     def _run_endpoint_ranking(self):
         urls = self.state.get("urls", [])
         endpoints = self.state.get("endpoints", [])
-        all_urls = list(set(urls + [ep.get("url", "") for ep in endpoints if ep.get("url")]))
-
-        if not all_urls:
+        
+        # 🔥 FIX: Log số lượng
+        self.logger.warning(f"[RANK] urls: {len(urls)}, endpoints: {len(endpoints)}")
+        
+        # Normalize endpoints → always dict
+        normalized = []
+        
+        for u in urls:
+            if u:
+                normalized.append({
+                    "url": u,
+                    "parameters": [],
+                    "categories": []
+                })
+        
+        for ep in endpoints:
+            if isinstance(ep, dict) and ep.get("url"):
+                normalized.append(ep)
+            elif isinstance(ep, str):
+                normalized.append({
+                    "url": ep,
+                    "parameters": [],
+                    "categories": []
+                })
+        
+        # Deduplicate by URL
+        seen = set()
+        all_eps = []
+        for ep in normalized:
+            u = ep["url"]
+            if u not in seen:
+                seen.add(u)
+                all_eps.append(ep)
+        
+        if not all_eps:
+            self.logger.warning("[RANK] No URLs found for ranking")
+            # 🔥 FIX: Fallback từ urls
+            if urls:
+                fallback_eps = [{"url": u, "parameters": [], "categories": []} for u in urls[:100]]
+                self.state.update(prioritized_endpoints=fallback_eps)
+                self.logger.warning(f"[RANK] Fallback: {len(fallback_eps)} endpoints from urls")
             return
-
+        
+        self.logger.warning(f"[RANK] Total endpoints before ranking: {len(all_eps)}")
+        
+        # Rank using URL only
         ranker = EndpointRanker()
-        ranked = ranker.rank_endpoints(all_urls)
+        ranked_dicts = ranker.rank_endpoints([ep["url"] for ep in all_eps])
+        
+        self.logger.warning(f"[RANK] Ranked endpoints: {len(ranked_dicts)}")
+        
+        # Extract URLs from ranked dicts
+        ranked_urls = [item["url"] for item in ranked_dicts] if ranked_dicts else []
+        
+        # Fallback if rank fail
+        if not ranked_urls:
+            self.logger.warning("[RANK] Ranker returned empty, using fallback")
+            ranked_urls = [ep["url"] for ep in all_eps]
+        
         rank_top = int(os.environ.get("RANK_TOP", "150"))
-        self.state.update(prioritized_endpoints=ranked[:rank_top])
-
+        
+        # Map URL → full object
+        url_map = {ep["url"]: ep for ep in all_eps}
+        final_targets = [url_map[u] for u in ranked_urls if u in url_map][:rank_top]
+        
+        # 🔥 FIX: fallback lần 2
+        if not final_targets:
+            self.logger.warning("[RANK] Final targets empty → fallback to all endpoints")
+            final_targets = all_eps[:50]
+        
+        self.state.update(prioritized_endpoints=final_targets)
+        
+        self.logger.warning(f"[RANK] Final prioritized endpoints: {len(final_targets)}")
+        
+        # Save file
         ranked_file = os.path.join(self.output_dir, "endpoints_ranked.json")
         with open(ranked_file, "w") as f:
-            json.dump(ranked[:rank_top], f, indent=2)
+            json.dump(final_targets, f, indent=2)
 
     def _generate_final_report(self):
         report_gen = ReportGenerator(self.state, self.output_dir)
         report_gen.generate()
+        
+        # Print terminal summary
+        self._print_scan_summary()
+
+    def _print_scan_summary(self):
+        """Print scan summary to terminal"""
+        vulns = self.state.get("vulnerabilities", [])
+        valid_vulns = [v for v in vulns if v.get('confidence', 0) >= 0.5]
+        exploit_results = self.state.get("exploit_results", [])
+        successful_exploits = [e for e in exploit_results if e.get('success')]
+        
+        print("\n" + "="*70)
+        print("[SCAN SUMMARY]")
+        print("="*70)
+        print(f"  Target:              {self.target}")
+        print(f"  Total Endpoints:     {len(self.state.get('endpoints', []))}")
+        print(f"  Vulnerabilities:")
+        print(f"    - Total Found:     {len(vulns)}")
+        print(f"    - Validated (≥0.5): {len(valid_vulns)}")
+        print(f"  Exploit Results:")
+        print(f"    - Successful:      {len(successful_exploits)}")
+        print(f"    - Failed:          {len(exploit_results) - len(successful_exploits)}")
+        
+        if valid_vulns:
+            print(f"\n  Top Findings (by confidence):")
+            for v in sorted(valid_vulns, key=lambda x: x.get('confidence', 0), reverse=True)[:5]:
+                conf = v.get('confidence', 0)
+                vuln_type = v.get('type', 'unknown')
+                url = v.get('url', 'unknown')[:50]
+                print(f"    - [{conf:.2f}] {vuln_type:20s} {url}")
+        
+        print("="*70 + "\n")
 
     # ─── NEW: Enhanced Methods for 10 Critical Improvements ─────────────────────────────
 
@@ -2192,7 +3293,7 @@ def parse_args():
 
 
 def load_targets(filepath: str) -> tuple[list, int]:
-    """Load domains from file, trả về (list domains, tổng số dòng)"""
+    """Load domains from file, preserve schemes (http://, https://)"""
     if not os.path.exists(filepath):
         return [], 0
     
@@ -2205,7 +3306,8 @@ def load_targets(filepath: str) -> tuple[list, int]:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                line = line.replace("https://", "").replace("http://", "").split("/")[0].strip()
+                # Remove trailing slashes but preserve scheme
+                line = line.rstrip('/').strip()
                 if line:
                     targets.append(line.lower())
     except Exception as e:
@@ -2272,14 +3374,29 @@ def run_batch(targets_file: str, options: dict, args):
     base_output = args.output or os.path.join(BASE_DIR, "results")
     os.makedirs(base_output, exist_ok=True)
     
-    # Setup logging
+    # Setup logging with both file and stream handlers
     batch_log = os.path.join(base_output, "batch.log")
-    logging.basicConfig(
-        level=logging.INFO,
-        format="[%(asctime)s] %(message)s",
-        datefmt="%H:%M:%S",
-        handlers=[logging.FileHandler(batch_log)]
-    )
+    
+    # Create logger
+    batch_logger = logging.getLogger("batch")
+    batch_logger.setLevel(logging.INFO)
+    
+    # File handler
+    file_handler = logging.FileHandler(batch_log)
+    file_handler.setLevel(logging.INFO)
+    file_formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
+    file_handler.setFormatter(file_formatter)
+    
+    # Stream handler - for real-time terminal output
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setLevel(logging.INFO)
+    stream_formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
+    stream_handler.setFormatter(stream_formatter)
+    
+    # Remove existing handlers and add new ones
+    batch_logger.handlers.clear()
+    batch_logger.addHandler(file_handler)
+    batch_logger.addHandler(stream_handler)
     
     # Initialize display
     api_status = check_api_keys()
@@ -2344,7 +3461,8 @@ def run_batch(targets_file: str, options: dict, args):
                 if getattr(args, "once", False) and processed and not futures:
                     break
 
-                time.sleep(10)
+                # Reduced sleep for faster Terminal updates
+                time.sleep(2)
                 
     except KeyboardInterrupt:
         display.stop()

@@ -6,6 +6,8 @@ Lưu toàn bộ dữ liệu trong quá trình scan
 import json
 import os
 import logging
+import tempfile
+import shutil
 from datetime import datetime
 from typing import Any, Dict, List
 from dataclasses import dataclass, field, asdict
@@ -18,6 +20,11 @@ class ScanState:
     target: str = ""
     scan_id: str = ""
     start_time: str = ""
+    
+    # Seed-first scanning: Track input target and discovered targets separately
+    seed_targets: List[Dict] = field(default_factory=list)
+    discovered_targets: List[Dict] = field(default_factory=list)
+    all_scan_targets: List[Dict] = field(default_factory=list)
     
     # Phase 1 - Recon
     subdomains: List[str] = field(default_factory=list)
@@ -35,11 +42,15 @@ class ScanState:
     prioritized_endpoints: List[Dict] = field(default_factory=list)
     tech_stack: List[str] = field(default_factory=list)
 
-    # Phase 5 - Vulnerabilities
+    # Phase 5 - Vulnerabilities & Findings
     vulnerabilities: List[Dict] = field(default_factory=list)
     confirmed_vulnerabilities: List[Dict] = field(default_factory=list)
     scan_responses: List[Dict] = field(default_factory=list)
     scan_metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    # NEW: Structured findings layer (non-CVE security signals)
+    security_findings: List[Dict] = field(default_factory=list)  # General security findings
+    rce_chain_possibilities: List[Dict] = field(default_factory=list)  # Potential RCE vectors
 
     # Phase 6 - WordPress
     wordpress_detected: bool = False
@@ -50,6 +61,9 @@ class ScanState:
     wp_vulns: List[Dict] = field(default_factory=list)
     wp_vulnerabilities: List[Dict] = field(default_factory=list)
     wp_conditioned_findings: List[Dict] = field(default_factory=list)
+    wp_version: str = "unknown"
+    wp_scan_confidence: float = 0.0
+    wp_pattern_matches: Dict[str, Any] = field(default_factory=dict)
 
     # Phase 7 - Exploit results
     exploit_chains: List[Dict] = field(default_factory=list)
@@ -99,7 +113,7 @@ class StateManager:
             self.state.subdomains.append(subdomain)
 
     def add_live_host(self, host_info: Dict):
-        urls = [h["url"] for h in self.state.live_hosts]
+        urls = [h.get("url") for h in self.state.live_hosts if "url" in h]
         if host_info.get("url") not in urls:
             self.state.live_hosts.append(host_info)
 
@@ -108,7 +122,7 @@ class StateManager:
             self.state.urls.append(url)
 
     def add_endpoint(self, endpoint: Dict):
-        paths = [e["path"] for e in self.state.endpoints]
+        paths = [e.get("path") for e in self.state.endpoints if "path" in e]
         if endpoint.get("path") not in paths:
             self.state.endpoints.append(endpoint)
 
@@ -131,22 +145,105 @@ class StateManager:
         return getattr(self.state, key, default)
 
     def save(self):
+        """Save state atomically (write to temp, then rename) to prevent corruption"""
         try:
-            with open(self.state_file, "w") as f:
-                json.dump(asdict(self.state), f, indent=2, default=str)
+            os.makedirs(self.output_dir, exist_ok=True)
+            
+            # Write to temporary file first
+            fd, temp_path = tempfile.mkstemp(dir=self.output_dir, suffix=".tmp")
+            try:
+                with os.fdopen(fd, 'w') as f:
+                    json.dump(asdict(self.state), f, indent=2, default=str)
+                
+                # Atomic rename
+                shutil.move(temp_path, self.state_file)
+                logger.debug(f"[STATE] State saved atomically to {self.state_file}")
+            except Exception as e:
+                # Clean up temp file if something went wrong
+                if os.path.exists(temp_path):
+                    try:
+                        os.unlink(temp_path)
+                    except:
+                        pass
+                raise e
         except Exception as e:
-            logger.error(f"[STATE] Failed to save state: {e}")
+            logger.error(f"[STATE] Failed to save state atomically: {e}")
+            # Fallback to direct write
+            try:
+                with open(self.state_file, "w") as f:
+                    json.dump(asdict(self.state), f, indent=2, default=str)
+                logger.warning("[STATE] Saved state using fallback method")
+            except Exception as e2:
+                logger.error(f"[STATE] Fallback save also failed: {e2}")
+
+    def _recover_from_corruption(self) -> bool:
+        """Try to recover from corrupted JSON file"""
+        if not os.path.exists(self.state_file):
+            return False
+        
+        backup_path = self.state_file + ".corrupted"
+        
+        try:
+            # Move corrupted file to backup
+            shutil.move(self.state_file, backup_path)
+            logger.warning(f"[STATE] Moved corrupted state file to {backup_path}")
+            
+            # Check if there's a previous backup we can restore
+            for i in range(1, 5):  # Look for state.json.backup1-4
+                backup_num = self.state_file + f".backup{i}"
+                if os.path.exists(backup_num):
+                    try:
+                        logger.info(f"[STATE] Attempting recovery from {backup_num}")
+                        with open(backup_num) as f:
+                            data = json.load(f)
+                        self.state = ScanState(**data)
+                        self.save()
+                        logger.info("[STATE] Successfully recovered from backup")
+                        return True
+                    except:
+                        continue
+            
+            logger.warning("[STATE] No valid backups found, starting with fresh state")
+            return False
+        except Exception as e:
+            logger.error(f"[STATE] Error during corruption recovery: {e}")
+            return False
 
     def load(self) -> bool:
+        """Load state from file, with corruption detection and recovery"""
         if os.path.exists(self.state_file):
             try:
                 with open(self.state_file) as f:
                     data = json.load(f)
                 self.state = ScanState(**data)
-                logger.info("[STATE] Loaded existing state")
+                logger.info("[STATE] Loaded existing state successfully")
                 return True
+            except json.JSONDecodeError as e:
+                logger.error(f"[STATE] JSON corruption detected: {e}")
+                # Try to recover from backup
+                if self._recover_from_corruption():
+                    return True
+                logger.warning("[STATE] Starting with fresh state after corruption")
+                return False
+            except TypeError as e:
+                # Missing required fields - try with defaults
+                logger.warning(f"[STATE] State has missing/incompatible fields: {e}")
+                try:
+                    with open(self.state_file) as f:
+                        data = json.load(f)
+                    # Fill in missing fields with defaults
+                    for key in asdict(ScanState()).keys():
+                        if key not in data:
+                            data[key] = getattr(ScanState(), key)
+                    self.state = ScanState(**data)
+                    logger.info("[STATE] Loaded state with default values for missing fields")
+                    return True
+                except Exception as e2:
+                    logger.error(f"[STATE] Failed to load state even with defaults: {e2}")
+                    return False
             except Exception as e:
-                logger.error(f"[STATE] Failed to load state: {e}")
+                logger.error(f"[STATE] Unexpected error loading state: {e}")
+                return False
         return False
 
     def summary(self) -> Dict:

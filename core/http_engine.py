@@ -33,18 +33,26 @@ class HTTPClient:
         self.max_retries = max_retries
         self.session_manager = session_manager
         self.last_request_time = 0
-        self.min_delay = 1  # Minimum delay between requests
+        self.min_delay = 0.5  # Reduced from 1 - more efficient for local testing
+        self.scheme_cache = {}
+        self.unreachable_ports = set()
+        self.error_count = 0  # Track consecutive errors
+        self.current_concurrency = 50  # Default connection pool
 
-        # Configure retry strategy
+        # ENHANCED: Connection pool of 50, with exponential backoff
         retry_strategy = Retry(
-            total=max_retries,
+            total=max_retries,  # Retry up to 3 times
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE"],
-            backoff_factor=1
+            backoff_factor=2  # Exponential backoff: 2s, 4s, 8s
         )
 
-        # Mount adapter with retry strategy
-        adapter = HTTPAdapter(max_retries=retry_strategy)
+        # Mount adapters with larger pool
+        adapter = HTTPAdapter(
+            max_retries=retry_strategy,
+            pool_connections=50,  # Connection pool size
+            pool_maxsize=50  # Max connections per pool
+        )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
         self.session.verify = False
@@ -64,6 +72,18 @@ class HTTPClient:
         self._rate_limit()
         self._rotate_headers()
         
+        # Normalize URL for localhost - skip HTTPS
+        url = self._normalize_url(url)
+        
+        # Check cache for unreachable ports - fail fast
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host_port = (parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80))
+        if host_port in self.unreachable_ports:
+            error = ConnectionError(f"Port {host_port[1]} on {host_port[0]} is unreachable (cached)")
+            logger.debug(f"[HTTP] Skipping unreachable {url}: {error}")
+            raise error
+        
         kwargs.setdefault('timeout', self.timeout)
         kwargs.setdefault('allow_redirects', True)
         kwargs.setdefault('verify', SSL_VERIFY)
@@ -72,9 +92,28 @@ class HTTPClient:
             response = self.session.get(url, **kwargs)
             self._update_session(response)
             return response
+        except ConnectionError as e:
+            # Cache connection refused errors
+            if 'Connection refused' in str(e):
+                self.unreachable_ports.add(host_port)
+                logger.debug(f"[HTTP] Cached unreachable: {host_port}")
+            
+            # FALLBACK HTTPS -> HTTP for SSL errors
+            if 'SSL' in str(e) and url.startswith('https://'):
+                http_url = url.replace('https://', 'http://', 1)
+                logger.warning(f"[HTTP] SSL failed, retrying with HTTP: {http_url}")
+                try:
+                    response = self.session.get(http_url, **kwargs)
+                    self._update_session(response)
+                    return response
+                except Exception as e2:
+                    logger.error(f"GET request failed for {http_url}: {e2}")
+                    raise e2
+            
+            logger.error(f"GET request failed for {url}: {e}")
+            raise
         except HeaderParsingError as e:
             logger.warning(f"Failed to parse headers (url={url}): {e}")
-            # Try to get response anyway by making a raw request
             try:
                 response = self.session.get(url, **kwargs)
                 self._update_session(response)
@@ -90,6 +129,9 @@ class HTTPClient:
         """Make POST request"""
         self._rate_limit()
         self._rotate_headers()
+        
+        # Normalize URL for localhost - skip HTTPS
+        url = self._normalize_url(url)
         
         kwargs.setdefault('timeout', self.timeout)
         kwargs.setdefault('verify', SSL_VERIFY)
@@ -108,6 +150,34 @@ class HTTPClient:
         if elapsed < self.min_delay:
             time.sleep(self.min_delay - elapsed)
         self.last_request_time = time.time()
+
+    def _normalize_url(self, url: str) -> str:
+        """
+        Normalize URL for specific hosts.
+        Skip HTTPS for localhost entirely to avoid SSL errors.
+        """
+        if not url:
+            return url
+        
+        # Extract host from URL
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        host = parsed.hostname or ''
+        
+        # Skip HTTPS for localhost - use HTTP only
+        if host in ['localhost', '127.0.0.1', '::1', '0.0.0.0']:
+            if url.startswith('https://'):
+                # Replace https:// with http://
+                url = url.replace('https://', 'http://', 1)
+                return url
+        
+        # Check cache for non-localhost hosts
+        if host in self.scheme_cache:
+            preferred_scheme = self.scheme_cache[host]
+            if parsed.scheme != preferred_scheme:
+                url = url.replace(f'{parsed.scheme}://', f'{preferred_scheme}://', 1)
+        
+        return url
 
     def _rotate_headers(self):
         """Rotate user agent and other headers"""

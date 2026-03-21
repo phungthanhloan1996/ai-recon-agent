@@ -220,8 +220,8 @@ class WordPressScannerEngine:
 
         results = {}
 
-        # BUG 7 FIX: Reduce max_workers from 10 to 3 to avoid overwhelming server
-        with ThreadPoolExecutor(max_workers=3) as executor:
+        # Use thread pool for parallel scanning
+        with ThreadPoolExecutor(max_workers=10) as executor:
             futures = {executor.submit(self._check_and_scan_site, target): target for target in canonical_targets}
 
             with tqdm(total=len(canonical_targets), desc="WordPress Scan", unit="site") as pbar:
@@ -288,34 +288,27 @@ class WordPressScannerEngine:
             # Check multiple indicators
             for indicator in self.wp_indicators[:3]:  # Check first 3 indicators
                 test_url = url.rstrip("/") + indicator
-                # BUG 7 FIX: Wrap each HTTP call in try/except
-                try:
-                    response = self.http_client.get(test_url, timeout=10)
-                    if response.status_code == 200:
-                        content = response.text.lower()
-                        if "wordpress" in content or "wp-" in content:
-                            return True
-                except Exception:
-                    logger.debug(f"[WP] Probe failed for {test_url}")
-                    continue
+                response = self.http_client.get(test_url, timeout=10)
+
+                if response.status_code == 200:
+                    content = response.text.lower()
+                    if "wordpress" in content or "wp-" in content:
+                        return True
 
             # Check homepage for WordPress meta
-            try:
-                response = self.http_client.get(url, timeout=10)
-                content = response.text.lower()
+            response = self.http_client.get(url, timeout=10)
+            content = response.text.lower()
 
-                wp_signatures = [
-                    "wp-content",
-                    "wp-includes",
-                    "wordpress",
-                    "generator\" content=\"wordpress",
-                    "/wp-json/"
-                ]
+            wp_signatures = [
+                "wp-content",
+                "wp-includes",
+                "wordpress",
+                "generator\" content=\"wordpress",
+                "/wp-json/"
+            ]
 
-                if any(sig in content for sig in wp_signatures):
-                    return True
-            except Exception:
-                logger.debug(f"[WP] Homepage probe failed for {url}")
+            if any(sig in content for sig in wp_signatures):
+                return True
 
         except Exception as e:
             logger.debug(f"[WP] Error checking {url}: {e}")
@@ -477,9 +470,8 @@ class WordPressScannerEngine:
         return themes
 
     def _enumerate_users(self, url: str) -> List[str]:
-        """Enumerate WordPress users and print results immediately"""
+        """Enumerate WordPress users"""
         users = []
-        rest_api_users = []
 
         # Try user enumeration via REST API
         try:
@@ -490,19 +482,10 @@ class WordPressScannerEngine:
                     username = user.get("slug") or user.get("name")
                     if username:
                         users.append(username)
-                        rest_api_users.append(username)
-                
-                # Print results immediately
-                if rest_api_users:
-                    print(f"\n[✓] WordPress Users Enumerated via REST API ({url}/wp-json/wp/v2/users):")
-                    for user in rest_api_users:
-                        print(f"    • {user}")
-                    logger.info(f"[REST-API] Found {len(rest_api_users)} users via /wp-json/wp/v2/users")
-        except Exception as e:
-            logger.debug(f"[REST-API] User enumeration via REST API failed: {str(e)[:50]}")
+        except Exception:
+            pass
 
         # Try author enumeration
-        author_users = []
         for i in range(1, 11):  # Check first 10 authors
             try:
                 response = self.http_client.get(f"{url.rstrip('/')}/?author={i}", timeout=10)
@@ -510,26 +493,16 @@ class WordPressScannerEngine:
                     # Extract username from redirect or content
                     username_match = re.search(r'/author/([^/]+)/', response.url)
                     if username_match:
-                        username = username_match.group(1)
-                        if username not in users:
-                            users.append(username)
-                            author_users.append(username)
+                        users.append(username_match.group(1))
             except Exception:
                 continue
-
-        # Print author enumeration results
-        if author_users:
-            print(f"\n[✓] WordPress Users Enumerated via Author Probe ({url}):")
-            for user in author_users:
-                print(f"    • {user}")
-            logger.info(f"[AUTHOR-PROBE] Found {len(author_users)} users via author parameter")
 
         return list(set(users))  # Remove duplicates
 
     def _run_wpscan(self, url: str) -> Dict[str, Any]:
-        """Run WPScan as ENRICHMENT ONLY - fail fast if not available or slow"""
+        """Run WPScan on the target URL"""
         if not tool_available("wpscan"):
-            logger.debug("[WP] WPScan not available - using advanced scan data only")
+            logger.debug("WPScan not available")
             return {}
 
         os.makedirs(self.wpscan_cache_dir, exist_ok=True)
@@ -537,117 +510,76 @@ class WordPressScannerEngine:
             "wpscan",
             "--url", url,
             "--format", "json",
-            "--cache-dir", self.wpscan_cache_dir,
-            "-e", "vp,u,m"
+            "--cache-dir", self.wpscan_cache_dir
         ]
 
         if self.wps_token:
             cmd.extend(["--api-token", self.wps_token])
-        else:
-            logger.debug("[WP] No WPScan API token - will use cache only")
 
-        # FAIL FAST: Only try once, no endless retries
         try:
             cmd_env = os.environ.copy()
             cmd_env["WPSCAN_CACHE_DIR"] = self.wpscan_cache_dir
-            
-            ret, out, err = run_command(cmd, timeout=60, env=cmd_env)
-            
-            # Any error means skip WPScan
-            if ret != 0:
-                logger.debug(f"[WP] WPScan failed with code {ret} - skipping (not critical)")
-                return {}
-            
-            # Parse output
-            if out:
+            ret, out, err = run_command(cmd, timeout=300, env=cmd_env)
+            if ret == 0 and out:
                 try:
                     data = json.loads(out)
-                    logger.info(f"[WP] WPScan enrichment successful")
                     return data
                 except json.JSONDecodeError:
-                    logger.debug("[WP] Failed to parse WPScan output - skipping")
+                    logger.error("Failed to parse WPScan JSON output")
                     return {}
-                    
+            else:
+                logger.error(f"WPScan failed: {err}")
+                return {}
         except Exception as e:
-            logger.debug(f"[WP] WPScan execution failed: {str(e)[:50]} - skipping")
+            logger.error(f"WPScan execution error: {e}")
             return {}
-        
-        return {}
 
     def _scan_wordpress_site(self, url: str) -> Dict[str, Any]:
-        """Scan a WordPress site using wp_advanced_scan as PRIMARY, WPScan as enrichment only"""
+        """Scan a WordPress site using WPScan and HTTP checks"""
         site_info = {
             "url": url,
-            "version": None,
-            "plugins": [],
-            "themes": [],
-            "users": [],
-            "vulnerabilities": [],
-            "source": "wp_advanced_scan"  # Track source
+            "version": self._detect_version(url),
+            "plugins": self._enumerate_plugins(url),
+            "themes": self._enumerate_themes(url),
+            "users": self._enumerate_users(url),
+            "vulnerabilities": []
         }
 
-        # ✅ STEP 1: PRIMARY - Run wp_advanced_scan
-        logger.info(f"[WP] Running wp_advanced_scan on {url}...")
-        try:
-            from integrations.wp_advanced_scan import WordPressAdvancedScan
-            advanced_scan = WordPressAdvancedScan(url)
-            advanced_data = advanced_scan.run_data_collection()
-            
-            # Merge advanced scan results
-            if advanced_data:
-                if advanced_data.get("version_detection"):
-                    site_info["version"] = advanced_data["version_detection"].get("wp_version")
-                if advanced_data.get("plugin_versions"):
-                    for plugin_name, plugin_info in advanced_data["plugin_versions"].items():
-                        site_info["plugins"].append({
-                            "name": plugin_name,
-                            "version": plugin_info.get("version", "unknown"),
-                            "vulnerabilities": plugin_info.get("vulnerabilities", [])
-                        })
-                if advanced_data.get("vulnerabilities"):
-                    site_info["vulnerabilities"].extend(advanced_data["vulnerabilities"])
-                
-                logger.info(f"[WP] wp_advanced_scan: {len(site_info['plugins'])} plugins, {len(site_info['vulnerabilities'])} vulns")
-        except Exception as e:
-            logger.warning(f"[WP] wp_advanced_scan failed: {str(e)[:100]}")
-        
-        # ✅ STEP 2: ENRICHMENT - Run basic HTTP detection if no data yet
-        if not site_info["plugins"]:
-            logger.info(f"[WP] Running basic HTTP enumeration on {url}...")
-            site_info["version"] = self._detect_version(url)
-            site_info["plugins"] = self._enumerate_plugins(url)
-            site_info["themes"] = self._enumerate_themes(url)
-            site_info["users"] = self._enumerate_users(url)
-        
-        # ✅ STEP 3: OPTIONAL - Run WPScan if available (enrichment ONLY)
-        # Do NOT fail if WPScan fails - we already have data from advanced_scan
+        # Run WPScan if available
         wpscan_data = self._run_wpscan(url)
         if wpscan_data:
-            logger.info(f"[WP] WPScan enrichment succeeded")
-            # Merge only NEW data from WPScan
-            if "version" in wpscan_data and not site_info["version"]:
-                site_info["version"] = wpscan_data["version"].get("number")
+            # Merge WPScan results
+            if "version" in wpscan_data:
+                site_info["version"] = wpscan_data["version"].get("number", site_info["version"])
             if "plugins" in wpscan_data:
-                plugin_names = {p["name"].lower() for p in site_info["plugins"]}
+                # Merge plugins
+                wpscan_plugins = []
                 for plugin_data in wpscan_data["plugins"]:
-                    if plugin_data.get("name", "").lower() not in plugin_names:
-                        site_info["plugins"].append({
-                            "name": plugin_data.get("name", ""),
-                            "version": plugin_data.get("version", "unknown"),
-                            "vulnerabilities": plugin_data.get("vulnerabilities", [])
-                        })
+                    wpscan_plugins.append({
+                        "name": plugin_data.get("name", ""),
+                        "version": plugin_data.get("version", "unknown"),
+                        "vulnerabilities": plugin_data.get("vulnerabilities", [])
+                    })
+                site_info["plugins"].extend(wpscan_plugins)
+            if "themes" in wpscan_data:
+                wpscan_themes = []
+                for theme_data in wpscan_data["themes"]:
+                    wpscan_themes.append({
+                        "name": theme_data.get("name", ""),
+                        "version": theme_data.get("version", "unknown"),
+                        "vulnerabilities": theme_data.get("vulnerabilities", [])
+                    })
+                site_info["themes"].extend(wpscan_themes)
             if "vulnerabilities" in wpscan_data:
                 site_info["vulnerabilities"].extend(wpscan_data["vulnerabilities"])
-        else:
-            logger.debug(f"[WP] WPScan unavailable or failed - continuing with basic scan data")
-        
-        # ✅ STEP 4: HTTP-based vulnerability checks
+
+        # Run HTTP-based vulnerability checks
         for check in self.vuln_checks:
             vuln = self._run_vuln_check(url, check)
             if vuln:
                 site_info["vulnerabilities"].append(vuln)
 
-        # ✅ STEP 5: Check for known vulnerabilities
+        # Check for known vulnerabilities in plugins/themes
         known_vulns = self._check_known_vulnerabilities(url, site_info)
         site_info["vulnerabilities"].extend(known_vulns)
         site_info["conditioned_findings"] = self._build_conditioned_findings(site_info)
@@ -815,14 +747,10 @@ class WordPressScannerEngine:
                         vuln_info = wp_rules["vulnerable_plugins"][plugin_name]
                         vulnerabilities.append({
                             "type": "plugin_vulnerability",
-                            "url": url,
                             "name": plugin_name,
                             "severity": vuln_info.get("severity", "HIGH"),
                             "cve": vuln_info.get("cve", []),
-                            "description": vuln_info.get("description", ""),
-                            "confidence": 0.8,
-                            "source": "wordpress_rules",
-                            "evidence": f"Plugin {plugin_name} detected"
+                            "description": vuln_info.get("description", "")
                         })
 
                 # Check themes
@@ -832,14 +760,10 @@ class WordPressScannerEngine:
                         vuln_info = wp_rules["vulnerable_themes"][theme_name]
                         vulnerabilities.append({
                             "type": "theme_vulnerability",
-                            "url": url,
                             "name": theme_name,
                             "severity": vuln_info.get("severity", "HIGH"),
                             "cve": vuln_info.get("cve", []),
-                            "description": vuln_info.get("description", ""),
-                            "confidence": 0.8,
-                            "source": "wordpress_rules",
-                            "evidence": f"Theme {theme_name} detected"
+                            "description": vuln_info.get("description", "")
                         })
 
             except Exception as e:
@@ -1098,13 +1022,6 @@ class WordPressScannerEngine:
             wp_vulnerabilities=all_vulns,
             wp_conditioned_findings=all_conditioned
         )
-
-        # Merge vào confirmed_vulnerabilities
-        existing = self.state.get("confirmed_vulnerabilities", []) or []
-        for v in all_vulns:
-            if not any(e.get("type") == v.get("type") and e.get("url") == v.get("url") for e in existing):
-                existing.append(v)
-        self.state.update(confirmed_vulnerabilities=existing)
 
         critical_vulns = [v for v in all_vulns if v.get("severity") == "CRITICAL"]
         if critical_vulns:

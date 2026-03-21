@@ -128,42 +128,18 @@ class PayloadMutator:
 
     # Encoding methods
     def _base64_encode(self, payload: str) -> str:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return ""
-        
         """Base64 encode the payload"""
         return base64.b64encode(payload.encode()).decode()
 
     def _url_encode(self, payload: str) -> str:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return ""
-        
         """URL encode the payload"""
         return urllib.parse.quote(payload)
 
     def _double_url_encode(self, payload: str) -> str:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return ""
-        
         """Double URL encode the payload"""
         return urllib.parse.quote(urllib.parse.quote(payload))
 
     def _html_encode(self, payload: str) -> str:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return ""
-        
         """HTML encode special characters"""
         return (payload.replace('&', '&amp;')
                       .replace('<', '&lt;')
@@ -172,40 +148,14 @@ class PayloadMutator:
                       .replace("'", '&#x27;'))
 
     def _unicode_escape(self, payload: str) -> str:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return ""
-        
-        # Ensure we iterate over characters, not substrings
-        try:
-            return ''.join(f'\\u{ord(c):04x}' for c in payload)
-        except TypeError as e:
-            logger.warning(f"Unicode escape failed: {e}")
-            return ""
+        return ''.join(f'\\u{ord(c):04x}' for c in payload)
 
     def _hex_encode(self, payload: str) -> str:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return ""
-        
         """Hex encode the payload"""
-        try:
-            return ''.join(f'\\x{ord(c):02x}' for c in payload)
-        except TypeError as e:
-            logger.warning(f"Hex encode failed: {e}")
-            return ""
+        return ''.join(f'\\x{ord(c):02x}' for c in payload)
 
     # Mutation methods
     def _case_variation(self, payload: str) -> List[str]:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return []
         """Generate case variations"""
         variations = []
         variations.append(payload.upper())
@@ -229,11 +179,6 @@ class PayloadMutator:
         return variations
 
     def _add_comments(self, payload: str) -> List[str]:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return []
         """Add comments to obfuscate payload"""
         variations = []
 
@@ -249,11 +194,6 @@ class PayloadMutator:
         return variations
 
     def _change_delimiters(self, payload: str) -> List[str]:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return []
         """Change delimiters in the payload"""
         variations = []
 
@@ -270,11 +210,6 @@ class PayloadMutator:
         return variations
 
     def _add_noise(self, payload: str) -> List[str]:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return []
         """Add noise characters to evade detection"""
         variations = []
 
@@ -289,11 +224,6 @@ class PayloadMutator:
         return variations
 
     def _split_payload(self, payload: str) -> List[str]:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return []
         """Split payload into parts (for concatenation)"""
         variations = []
 
@@ -322,10 +252,6 @@ class PayloadMutator:
             return self.mutate_payloads(payloads)
 
     def _mutate_for_sqli(self, payloads: List[str]) -> List[str]:
-        # Auto-fix: type checking for list input
-        if not isinstance(payloads, list):
-            return []
-        
         """SQL injection specific mutations"""
         mutated = []
         for payload in payloads:
@@ -337,10 +263,6 @@ class PayloadMutator:
         return mutated + self.mutate_payloads(payloads)
 
     def _mutate_for_xss(self, payloads: List[str]) -> List[str]:
-        # Auto-fix: type checking for list input
-        if not isinstance(payloads, list):
-            return []
-        
         """XSS specific mutations"""
         mutated = []
         for payload in payloads:
@@ -352,10 +274,6 @@ class PayloadMutator:
         return mutated + self.mutate_payloads(payloads)
 
     def _mutate_for_rce(self, payloads: List[str]) -> List[str]:
-        # Auto-fix: type checking for list input
-        if not isinstance(payloads, list):
-            return []
-        
         """RCE specific mutations"""
         mutated = []
         for payload in payloads:
@@ -367,11 +285,6 @@ class PayloadMutator:
         return mutated + self.mutate_payloads(payloads)
 
     def _waf_case_mixing(self, payload: str) -> List[str]:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return []
         """Apply case mixing for WAF bypass"""
         variations = []
         # Convert to mixed case
@@ -380,11 +293,6 @@ class PayloadMutator:
         return variations
 
     def _waf_add_spaces(self, payload: str) -> List[str]:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return []
         """Add spaces between characters for WAF bypass"""
         variations = []
         spaced = ' '.join(payload)
@@ -392,11 +300,6 @@ class PayloadMutator:
         return variations
 
     def _waf_replace_keywords(self, payload: str) -> List[str]:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return []
         variations = []
         replacements = {
             'UNION': '/**/UNION/**/',
@@ -411,11 +314,6 @@ class PayloadMutator:
         return variations
 
     def _random_case(self, payload: str) -> List[str]:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return []
         """Random case variation for WAF bypass"""
         import random
         variations = []
@@ -426,11 +324,6 @@ class PayloadMutator:
 
 
     def _keyword_split(self, payload: str) -> List[str]:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return []
         variations = []
         keywords = ['UNION', 'SELECT', 'SCRIPT', 'ALERT', 'EVAL']
 
@@ -443,11 +336,6 @@ class PayloadMutator:
         return variations
 
     def _comment_injection(self, payload: str) -> List[str]:
-        if not isinstance(payload, str):
-            if isinstance(payload, dict):
-                payload = str(payload)
-            else:
-                return []
         """Inject comments into payload for WAF bypass"""
         variations = []
         # Inject /**/ between characters

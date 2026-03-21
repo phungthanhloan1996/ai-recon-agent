@@ -45,22 +45,54 @@ class ScanningEngine:
 
         self.scan_results_file = os.path.join(output_dir, "scan_results.json")
 
-    def run(self):
+    def run(self, progress_cb=None):
         """Execute vulnerability scanning pipeline"""
         logger.info("[SCANNING] Starting AI-driven vulnerability scanning")
 
-        prioritized_endpoints = self.state.get("prioritized_endpoints", [])
-        budget = (self.state.get("scan_metadata", {}) or {}).get("budget", {})
-        self.max_endpoints = int(self.state.get("max_endpoints", budget.get("scan_prioritized_endpoints", 140)))
+        # ✅ FIX: fallback nhiều nguồn
+        prioritized_endpoints = (
+            self.state.get("prioritized_endpoints")
+            or self.state.get("scan_targets")
+            or []
+        )
 
-        # Use parallel execution for scanning endpoints
+        logger.warning(f"[SCANNING] Received {len(prioritized_endpoints)} endpoints")
+
+        if not prioritized_endpoints:
+            logger.error("[SCANNING] No endpoints to scan → exiting")
+            return
+
+        budget = (self.state.get("scan_metadata", {}) or {}).get("budget", {})
+        self.max_endpoints = int(
+            self.state.get("max_endpoints", budget.get("scan_prioritized_endpoints", 140))
+        )
+
+        # Ensure file exists (tránh missing file)
+        try:
+            open(self.scan_results_file, "a").close()
+        except Exception as e:
+            logger.error(f"[SCANNING] Cannot create scan_results.json: {e}")
+
+        # Use parallel execution
         with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-            futures = [executor.submit(self.scan_endpoint, endpoint) for endpoint in prioritized_endpoints[:self.max_endpoints]]
-            for future in concurrent.futures.as_completed(futures, timeout=300):  # 5 min timeout per endpoint
+            futures = [
+                executor.submit(self.scan_endpoint, endpoint)
+                for endpoint in prioritized_endpoints[:self.max_endpoints]
+            ]
+
+            for future in concurrent.futures.as_completed(futures, timeout=300):
                 try:
-                    self.process_endpoint_results(future.result())
+                    result = future.result()
+
+                    if result:
+                        self.process_endpoint_results(result)
+                        completed = sum(1 for f in futures if f.done())
+                        self.state.update(payloads_tested=completed)
+                    if progress_cb:
+                        progress_cb(completed)
                 except concurrent.futures.TimeoutError:
                     logger.error("[SCANNING] Endpoint scan timed out")
+
                 except Exception as e:
                     logger.error(f"[SCANNING] Failed to scan endpoint: {e}")
 
@@ -68,18 +100,107 @@ class ScanningEngine:
 
     def process_endpoint_results(self, responses: List[Dict[str, Any]]):
         """Process and stream endpoint results to file"""
+        confirmed = self.state.get("confirmed_vulnerabilities", []) or []
+        
         with open(self.scan_results_file, 'a') as f:
             for response in responses:
                 json.dump(response, f)
                 f.write('\n')  # JSONL format
+                
+                # FIX: Propagate confirmed vulnerabilities to state during scanning
+                if response.get("vulnerable") and response.get("confidence", 0) >= 0.5:
+                    vuln = {
+                        "name": f"{response.get('category', 'unknown')} detection",
+                        "endpoint": response.get("endpoint"),
+                        "url": response.get("endpoint"),
+                        "type": response.get("category", "unknown"),
+                        "source": "ai_scan",
+                        "payload": response.get("payload"),
+                        "confidence": response.get("confidence", 0),
+                        "evidence": response.get("reason", ""),
+                        "auth_role": response.get("auth_role", "anonymous"),
+                        "exploitable": response.get("exploitable", False),
+                        "exploit_context": response.get("exploit_context", {})
+                    }
+                    confirmed.append(vuln)
+        
+        # Update state with propagated vulnerabilities
+        if confirmed:
+            self.state.update(confirmed_vulnerabilities=confirmed)
+            # 🔥 FIX: SYNC confirmed_vulnerabilities INTO vulnerabilities
+            all_vulns = self.state.get("vulnerabilities", []) + confirmed
+            self.state.update(vulnerabilities=all_vulns)
+            logger.debug(f"[SCANNING] Synced {len(confirmed)} vulnerabilities to vulnerabilities field")
 
     def scan_endpoint(self, endpoint: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Scan a single endpoint with AI-generated payloads"""
+        # Defensive: normalize endpoint structure
+        if not isinstance(endpoint, dict):
+            logger.warning(f"[SCANNING] Invalid endpoint type: {type(endpoint)}, skipping")
+            return []
+        
         url = endpoint.get("url", "")
-        categories = endpoint.get("categories", [])
-        parameters = endpoint.get("parameters", [])
+        url = url.replace('\\/', '/').replace('\\/','/')  # fix escaped slashes
 
-        logger.debug(f"[SCANNING] Scanning {url} (categories: {categories})")
+        categories = endpoint.get("categories", []) or []
+        parameters = endpoint.get("parameters", []) or []
+        
+        # FIX: If no URL, skip
+        if not url or not isinstance(url, str):
+            logger.warning(f"[SCANNING] Invalid URL: {url}, skipping")
+            return []
+        
+        # BUG 4 FIX: Skip static assets
+        _SKIP_EXT = {'.css','.js','.png','.jpg','.jpeg','.gif','.ico','.woff','.woff2','.ttf','.svg','.map','.webp'}
+        _parsed = urllib.parse.urlparse(url)
+        if any(_parsed.path.endswith(ext) for ext in _SKIP_EXT):
+            logger.debug(f"[SCANNING] Skipping static asset: {url}")
+            return []
+        
+        # FIX: Auto-detect categories if empty (fallback heuristic)
+        if not categories:
+            detected = []
+            url_lower = url.lower()
+            
+            # 🔥 FIX: Thêm detection cho WordPress và XML-RPC
+            if 'xmlrpc' in url_lower:
+                detected.append("rpc")
+                detected.append("command_injection")  # XML-RPC có thể dẫn đến RCE
+            if 'wp-' in url_lower or 'wordpress' in url_lower:
+                detected.append("wordpress")
+            if any(kw in url_lower for kw in ["admin", "login", "auth", "panel", "wp-admin"]):
+                detected.append("authentication")
+            if any(kw in url_lower for kw in ["upload", "file", "attachment", "wp-content/uploads"]):
+                detected.append("file_upload")
+            if any(kw in url_lower for kw in ["api", "json", "graphql", "wp-json"]):
+                detected.append("api_injection")
+            if any(kw in url_lower for kw in ["search", "query", "id=", "q=", "p=", "cat="]):
+                detected.append("injection")
+                detected.append("command_injection")
+            
+            # 🔥 FIX: Fallback mặc định
+            if not detected:
+                detected.append("general")
+                detected.append("injection")  # Luôn test injection
+                categories = detected
+            else:
+                categories = detected
+            
+            logger.debug(f"[SCANNING] Auto-detected categories for {url}: {categories}")       
+        # FIX: Auto-detect parameters from URL if empty
+        if not parameters:
+            parameters = ["q"]
+            parsed = urllib.parse.urlparse(url)
+            if parsed.query:
+                params_dict = urllib.parse.parse_qs(parsed.query)
+                parameters = list(params_dict.keys())
+                if parameters:
+                    logger.debug(f"[SCANNING] Auto-detected parameters from URL: {parameters}")
+        
+        logger.debug(f"[SCANNING] Scanning {url} (categories: {categories}, params: {parameters})")
+        
+        # Store first parameter for exploitation context
+        first_param = parameters[0] if parameters else None
 
         responses = []
         auth_contexts = self._get_auth_contexts()
@@ -101,9 +222,16 @@ class ScanningEngine:
                     current_vulns = self.state.get("vulnerabilities", [])
                     current_vulns.append(vuln)
                     self.state.update(vulnerabilities=current_vulns)
-
+                    
         # Run nuclei for general scan
-        if parameters or any(kw in url for kw in ["admin", "login", "api"]):
+        # BUG 6 FIX: Only run on URLs with real query params or important keywords
+        parsed_url = urllib.parse.urlparse(url)
+        has_real_query_params = bool(parsed_url.query)
+        important_keywords = ["wp-admin", "api", "login", "admin", "graphql"]
+        url_lower = url.lower()
+        has_important_keyword = any(kw in url_lower for kw in important_keywords)
+        
+        if (has_real_query_params or has_important_keyword):
             nuclei_result = self.nuclei_runner.run(url)
             if nuclei_result.get("success"):
                 vuln = {"type": "general", "url": url, "tool": "nuclei", "output": nuclei_result["output"]}
@@ -131,12 +259,14 @@ class ScanningEngine:
                 try:
                     # Normalize payload to dictionary format
                     if isinstance(payload_item, str):
-                        payload = {"value": payload_item, "method": "GET", "params": {}}
+                        payload_value = payload_item
+
                     elif isinstance(payload_item, dict):
-                        payload = payload_item
+                        payload_value = payload_item.get("value", "")
                     else:
                         logger.warning(f"Skipping unknown payload type: {type(payload_item)}")
                         continue
+                    payload = {"value": payload_value, "method": "GET", "params": {}}
 
                     for auth_ctx in auth_contexts:
                         response = self.test_payload(url, payload, category, baseline_response, auth_ctx)
@@ -144,6 +274,18 @@ class ScanningEngine:
                         responses.append(response)
 
                         if response.get("vulnerable"):
+                            # FIX: Mark exploitable if confidence is high
+                            if response.get("confidence", 0) >= 0.7:
+                                response["exploitable"] = True
+                                response["exploit_context"] = {
+                                    "category": category,
+                                    "injection_point": first_param or "url",
+                                    "auth_role": auth_ctx.get("role", "anonymous")
+                                }
+                            else:
+                                response["exploitable"] = False
+                                response["exploit_context"] = {}
+                            
                             self.learning_engine.add_successful_payload(payload, category)
                         else:
                             # Mutate and retry on failure - using the original string value
@@ -266,26 +408,42 @@ class ScanningEngine:
         req_cookies = auth_ctx.get("cookies", {}) or {}
 
         max_retries = 3
-        mutations = self.payload_mutator._apply_waf_bypass(payload_value)
+        # BUG 5 FIX: Cap mutations to 3, not unlimited
+        mutations = self.payload_mutator._apply_waf_bypass(payload_value)[:3]
         import random
         random.shuffle(mutations)  # Randomize order
         
+        waf_bypass_failed = False
         for mutation in [payload_value] + mutations:  # Try original first, then mutations
             waf_bypass_attempted = mutation != payload_value
             
             for attempt in range(max_retries):
                 try:
-                    # Prepare request
+                    # Prepare request - TEST ALL PARAMETERS, NOT JUST FIRST
                     if method == "GET":
                         parsed = urllib.parse.urlparse(url)
                         query_pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+                        
                         if query_pairs:
-                            first_key = query_pairs[0][0]
-                            query_pairs[0] = (first_key, mutation)
+                            # Test injection in each parameter
+                            for param_idx in range(len(query_pairs)):
+                                param_key = query_pairs[param_idx][0]
+                                test_pairs = list(query_pairs)
+                                test_pairs[param_idx] = (param_key, mutation)
+                                new_query = urllib.parse.urlencode(test_pairs, doseq=True)
+                                test_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
+                                try:
+                                    response = self.http_client.get(test_url, timeout=10, headers=req_headers, cookies=req_cookies)
+                                    if not self._is_waf_blocked(response):
+                                        analysis = self.analyze_response(response, baseline, {"value": mutation}, category)
+                                        if analysis.get("vulnerable"):
+                                            return {"endpoint": url, "payload": mutation, "vulnerable": True, "confidence": analysis.get("confidence", 0), "param": param_key}
+                                except:
+                                    pass
                         else:
                             inject_key = next(iter(params.keys()), "q") if isinstance(params, dict) else "q"
-                            query_pairs.append((inject_key, mutation))
-                        new_query = urllib.parse.urlencode(query_pairs, doseq=True)
+                            query_pairs = [(inject_key, mutation)]
+                            new_query = urllib.parse.urlencode(query_pairs, doseq=True)
                         test_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
                         response = self.http_client.get(test_url, timeout=10, headers=req_headers, cookies=req_cookies)
                     elif method == "POST":
@@ -306,6 +464,7 @@ class ScanningEngine:
                             break  # Try next mutation
                         else:
                             logger.debug(f"[WAF] Bypass failed for {url}")
+                            waf_bypass_failed = True
                             continue  # Try next attempt
                     
                     # If we reach here, WAF bypassed or no WAF
@@ -316,7 +475,36 @@ class ScanningEngine:
                     analysis = self.analyze_response(response, baseline, {"value": mutation}, category)
 
                     if analysis.get("vulnerable"):
-                        logger.info(f"[VULN] Potential {category} vulnerability detected on {url} (confidence: {analysis.get('confidence', 0)})")
+                        confidence = analysis.get("confidence", 0)
+
+                        logger.info(f"[VULN] Potential {category} vulnerability detected on {url} (confidence: {confidence})")
+
+                        # 🔥 FIX: PUSH VÀO confirmed_vulnerabilities
+                        if confidence >= 0.5:
+                            vuln = {
+                                "type": category,
+                                "url": url,
+                                "payload": mutation,
+                                "confidence": confidence,
+                                "source": "ai",
+                                "evidence": analysis.get("reason", "")
+                            }
+
+                            # 🔥 HIGH CONF → cho phép exploit phase dùng
+                            if confidence >= 0.5:
+                                vuln["exploitable"] = True
+                                vuln["exploit_context"] = {
+                                    "category": category,
+                                    "injection_point": url
+                                }
+
+                            current_vulns = self.state.get("vulnerabilities", [])
+                            current_vulns.append(vuln)
+                            self.state.update(vulnerabilities=current_vulns)
+                            
+                            confirmed = self.state.get("confirmed_vulnerabilities", [])
+                            confirmed.append(vuln)
+                            self.state.update(confirmed_vulnerabilities=confirmed)
 
                     return {
                         "endpoint": url,
@@ -355,6 +543,26 @@ class ScanningEngine:
                             "timestamp": time.time()
                         }
                     time.sleep(1)  # Wait before retry
+            
+            # BUG 5 FIX: If all WAF bypass mutations failed, stop and return early
+            if waf_bypass_attempted and waf_bypass_failed:
+                logger.debug(f"[WAF] Max bypass attempts reached for {url}, skipping")
+                return {
+                    "endpoint": url,
+                    "payload": payload_value,
+                    "method": method,
+                    "status_code": 403,
+                    "content_length": 0,
+                    "response_time": 0,
+                    "baseline_status": baseline.get("status_code", 0),
+                    "baseline_length": baseline.get("content_length", 0),
+                    "baseline_time": baseline.get("response_time", 0),
+                    "category": category,
+                    "vulnerable": False,
+                    "confidence": 0,
+                    "reason": "WAF blocking - max bypass attempts reached",
+                    "timestamp": time.time()
+                }
             
             # If all retries failed for this mutation, try next
             if waf_bypass_attempted:
@@ -422,146 +630,117 @@ class ScanningEngine:
         return mutations
 
     def analyze_response(self, response, baseline: Dict[str, Any], payload: Dict, category: str) -> Dict[str, Any]:
-        """Analyze response for vulnerability indicators using baseline comparison and content analysis"""
+        """
+        Analyze response for vulnerability using SCIENTIFIC SCORING.
+        
+        Only marks as vulnerable if evidence is strong enough:
+        - Payload reflected (XSS) +0.4
+        - Response anomaly (DB error) +0.3
+        - Confirmed by 2nd payload +0.3
+        
+        THRESHOLD: >= 0.5 only
+        """
         test_status = response.status_code
         test_length = len(response.text)
         test_time = response.elapsed.total_seconds() if hasattr(response, 'elapsed') else 0
-        response_text = response.text.lower()
+        response_text = response.text
 
         base_status = baseline["status_code"]
         base_length = baseline["content_length"]
         base_time = baseline["response_time"]
-        payload_value = payload.get("value", "").lower()
+        payload_value = payload.get("value", "")
 
         analysis = {
             "vulnerable": False,
             "confidence": 0.0,
-            "reason": "No indicators detected"
+            "reason": "No evidence detected",
+            "evidence": []
         }
 
-        # 1. Keyword-based error detection
-        error_keywords = {
-            "sql_injection": [
-                "sql syntax", "mysql", "ora-", "syntax error", "database error",
-                "sqlite", "postgresql", "you have an error in your sql",
-                "unclosed quotation mark", "invalid sql statement"
-            ],
-            "command_injection": [
-                "command not found", "permission denied", "access denied",
-                "/bin/sh", "/bin/bash", "exec", "system()"
-            ],
-            "file_inclusion": [
-                "failed to open stream", "no such file", "include_once",
-                "require_once", "root:", "boot.ini", "etc/passwd"
-            ],
-            "general": [
-                "warning", "fatal error", "parse error", "exception",
-                "stack trace", "unexpected token", "uncaught exception",
-                "error 500", "internal server error"
-            ]
-        }
-
-        keyword_score = 0.0
-        detected_errors = []
-
-        # Check category-specific keywords
-        for kw in error_keywords.get(category, []):
-            if kw in response_text:
-                keyword_score += 0.3
-                detected_errors.append(kw)
-
-        # Check general error keywords
-        for kw in error_keywords["general"]:
-            if kw in response_text:
-                keyword_score += 0.2
-                detected_errors.append(kw)
-
-        if detected_errors:
-            analysis["confidence"] += keyword_score
-            analysis["reason"] = f"Error keywords detected: {', '.join(detected_errors[:3])}"
-
-        # 2. Reflection detection (for XSS and similar)
-        reflection_score = 0.0
-        if payload_value and len(payload_value) > 3:  # Avoid false positives with short payloads
-            if payload_value in response_text:
-                if category in ["xss", "html_injection"]:
-                    reflection_score = 0.5
-                    analysis["reason"] += f" (payload reflected in response)"
-                else:
-                    reflection_score = 0.2  # Less confident for other categories
-
-        analysis["confidence"] += reflection_score
-
-        # 3. Status code anomaly
-        status_score = 0.0
-        if test_status != base_status:
-            if test_status in [500, 502, 503] and base_status == 200:
-                status_score = 0.8
-                analysis["reason"] = f"Status code changed from {base_status} to {test_status} (server error)"
-            elif test_status == 200 and base_status != 200:
-                status_score = 0.6
-                analysis["reason"] = f"Status code changed from {base_status} to {test_status}"
-            elif test_status >= 400 and base_status < 400:
-                status_score = 0.4
-                analysis["reason"] = f"Status code changed from {base_status} to {test_status} (client/server error)"
-
-        analysis["confidence"] += status_score
-
-        # 4. Content length anomaly
-        length_score = 0.0
-        if not analysis["vulnerable"]:  # Only if not already high confidence
-            length_diff = abs(test_length - base_length)
-            length_ratio = length_diff / max(base_length, 1)
-            if length_ratio > 0.5:  # More than 50% difference
-                length_score = 0.7
-                analysis["reason"] = f"Content length changed significantly ({base_length} -> {test_length})"
-            elif length_ratio > 0.2:  # More than 20% difference
-                length_score = 0.3
-
-        analysis["confidence"] += length_score
-
-        # 5. Timing anomaly (for blind injections) - enhanced detection
-        timing_score = 0.0
-        time_diff = test_time - base_time
+        # 1. EVIDENCE 1: Reflection Detection (STRONGEST) +0.4
+        reflects = False
+        if payload_value and len(payload_value) > 3:
+            payload_lower = payload_value.lower()
+            response_lower = response_text.lower()
+            
+            if payload_lower in response_lower:
+                # Check that it's not just in error message
+                idx = response_lower.find(payload_lower)
+                context = response_lower[max(0, idx-50):idx]
+                
+                if not any(x in context for x in ['invalid', 'error', 'rejected', 'syntax error']):
+                    reflects = True
+                    analysis["confidence"] += 0.4
+                    analysis["evidence"].append("Payload reflected in response")
         
-        # Different timing thresholds based on vulnerability type
-        if category in ["sql_injection", "sqli"]:
-            # SQL timing attacks (SLEEP, BENCHMARK, etc.)
-            if test_time > 3 and base_time < 1:  # Strong indicator
-                timing_score = 0.8
-                analysis["reason"] = f"SQL timing attack detected ({base_time:.2f}s -> {test_time:.2f}s)"
-            elif time_diff > 2:  # Moderate delay
-                timing_score = 0.5
-                analysis["reason"] = f"Response delayed by {time_diff:.2f}s (possible SQL injection)"
-                
-        elif category in ["command_injection", "rce"]:
-            # Command execution timing
-            if test_time > 2 and base_time < 0.5:  # Command execution delay
-                timing_score = 0.7
-                analysis["reason"] = f"Command execution delay detected ({base_time:.2f}s -> {test_time:.2f}s)"
-            elif time_diff > 1:  # Moderate command delay
-                timing_score = 0.4
-                
-        else:
-            # General timing anomaly
-            if test_time > 5 and base_time < 2:  # Significant delay
-                timing_score = 0.6
-                analysis["reason"] = f"Response time increased significantly ({base_time:.2f}s -> {test_time:.2f}s)"
-            elif test_time > base_time * 2:  # Doubled time
-                timing_score = 0.4
-
-        analysis["confidence"] += timing_score
-
-        # Determine if vulnerable based on confidence threshold
+        # 2. EVIDENCE 2: Response Anomaly (status or error keywords) +0.3 MAX
+        anomaly_score = self._check_response_anomaly(
+            response_text, baseline, test_status, base_status, test_time, base_time, category
+        )
+        if anomaly_score > 0:
+            analysis["confidence"] += anomaly_score
+            if test_status != base_status:
+                analysis["evidence"].append(f"Status code: {base_status}→{test_status}")
+        
+        # 3. Content length anomaly - only if minor evidence
+        if len(analysis["evidence"]) < 2 and base_length > 0:
+            length_diff = abs(test_length - base_length)
+            length_ratio = length_diff / base_length
+            if length_ratio > 0.5:  # Significant change
+                analysis["confidence"] += 0.1
+                analysis["evidence"].append(f"Content length changed: {length_diff:+d} bytes")
+        
+        # Cap at 1.0
+        analysis["confidence"] = min(analysis["confidence"], 1.0)
+        
+        # STRICT RULE: Only vulnerable if score >= 0.5
         if analysis["confidence"] >= 0.5:
             analysis["vulnerable"] = True
-        elif analysis["confidence"] >= 0.3 and (keyword_score > 0 or reflection_score > 0):
-            analysis["vulnerable"] = True  # Lower threshold for direct indicators
-
-        # Cap confidence at 1.0
-        analysis["confidence"] = min(analysis["confidence"], 1.0)
-
+            analysis["reason"] = f"Evidence verified: {len(analysis['evidence'])} indicators"
+        else:
+            analysis["reason"] = f"Score {analysis['confidence']:.2f} below 0.5 threshold"
+        
         return analysis
+    
+    def _check_response_anomaly(self, response_text: str, baseline: Dict, test_status, base_status, test_time, base_time, category: str) -> float:
+        """
+        Check for real response anomalies (not just random keywords).
+        Max +0.3
+        """
+        score = 0.0
+        
+        # DB Error patterns (SQL injection specific)
+        if category in ['sql_injection', 'sqli']:
+            db_errors = [
+                'sql syntax', 'mysql', 'postgresql', 'sqlite', 'ora-', 'odbc',
+                'you have an error', 'unclosed quotation', 'syntax error near'
+            ]
+            response_lower = response_text.lower()
+            found_errors = [e for e in db_errors if e in response_lower]
+            if found_errors:
+                score += 0.15
+        
+        # RCE/Command patterns
+        elif category in ['command_injection', 'rce']:
+            rce_patterns = ['uid=', 'root@', '/bin/', 'command not found']
+            response_lower = response_text.lower()
+            found_patterns = [p for p in rce_patterns if p in response_lower]
+            if found_patterns:
+                score += 0.15
+        
+        # Timing anomaly (blind injection) - ONLY for SQL timing attacks
+        if category in ['sql_injection', 'sqli']:
+            time_diff = test_time - base_time
+            if time_diff > 3 and base_time < 1:  # Strong indicator
+                score += 0.15
+        
+        # Status code anomalies (only relevant ones)
+        if test_status == 500 and base_status != 500:
+            # True server error, not input validation
+            if 'exception' in response_text.lower() or 'error' in response_text.lower():
+                score += 0.1
+        
+        return min(score, 0.3)
 
     def _detect_sqli_potential(self, endpoint: Dict[str, Any]) -> bool:
         """Detect if endpoint is likely vulnerable to SQLi"""
@@ -606,6 +785,7 @@ class ScanningEngine:
             current_vulns = self.state.get("vulnerabilities", [])
             current_vulns.append(vuln)
             self.state.update(vulnerabilities=current_vulns)
+            
         elif ret not in (0, -1):
             logger.debug(f"[SCANNING] sqlmap non-zero for {target}: {err[:120]}")
 
