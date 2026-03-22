@@ -6,9 +6,68 @@ Mutate payload để bypass WAF
 
 import logging
 import base64
+import json
+import urllib.request
+import urllib.error
 from typing import Dict, List
 
 logger = logging.getLogger("recon.payload_gen")
+
+# ─── GROQ PROMPT: Payload Generation ──────────────────────────────────────────
+# Prompt này được dùng trong generate_for_category() để sinh thêm payload
+# bypass WAF dựa trên context thực tế của target.
+# Model: llama3-70b-8192 | Temperature: 0.4 | Max tokens: 800
+_PAYLOAD_GEN_SYSTEM = """You are an expert penetration tester specializing in web application vulnerability exploitation and WAF bypass techniques.
+
+Your task: generate targeted attack payloads for a specific vulnerability type.
+
+STRICT OUTPUT RULES:
+- Respond ONLY with a valid JSON array of strings
+- No explanation, no markdown, no ```json fences, no extra text
+- Each payload must be ready to inject directly — no placeholders
+- Maximum 15 payloads per response
+- Do not duplicate payloads that already exist in existing_sample
+
+Example valid output: ["payload1", "payload2", "payload3"]
+
+WAF BYPASS RULES by bypass_mode:
+- NONE: standard payloads, no special bypass
+- ENCODE: URL-encode special chars (%3C%3E%22%27%3B%28%29)
+- CASE_MANGLE: mix upper/lower case — ScRiPt, aLeRt, SeLeCt, UnIoN
+- FRAGMENT: split keywords with comments — un/**/ion, se/**/lect, sc/**/ript
+- SLOW: minimal single-token payloads only, no chaining
+
+PAYLOAD RULES by vuln_type:
+xss:
+  - Use diverse event handlers: onerror, onload, onfocus, onmouseover, oninput, onblur
+  - Use diverse tags: img, svg, iframe, details, video, marquee, input, body
+  - Include attribute injection: "><payload, '><payload
+  - Include javascript: URI and data: URI variants
+  - Apply bypass_mode to all generated payloads
+
+sqli:
+  - Include time-based blind: SLEEP(5), WAITFOR DELAY, BENCHMARK
+  - Include UNION-based: NULL column probing with 1,2,3 columns
+  - Include boolean-based: AND 1=1, AND 1=2
+  - Use comment variations: --, #, /**/, /*!*/
+  - Apply bypass_mode encoding to keywords
+
+rce:
+  - Include command separators: ; | && || newline
+  - Include backtick and $() substitution
+  - Include /bin/sh, /usr/bin/curl, /bin/bash variants
+  - Include OOB detection with curl/ping (use OOBHOST as placeholder)
+
+lfi:
+  - Include null byte: %00
+  - Include path traversal variations: ../ %2F %252F ....//
+  - Include PHP wrappers: php://filter, php://input, data://
+  - Include /proc/self/environ /proc/self/fd
+
+file_upload:
+  - Extension bypass: .php, .php5, .phtml, .pHp, .php%00.jpg
+  - Double extension: shell.jpg.php, shell.php.jpg
+  - MIME bypass filenames"""
 
 # ─── BASE PAYLOADS ─────────────────────────────────────────────────────────────
 
@@ -155,8 +214,56 @@ class PayloadGenerator:
     """AI-enhanced payload generation with WAF bypass mutations"""
 
     def __init__(self, ai_client=None):
+        # ai_client là groq_key (string) được pass từ agent.py
         self.ai_client = ai_client
+        self._groq_key = ai_client if isinstance(ai_client, str) and len(ai_client) > 10 else None
+        self._groq_model = "llama-3.3-70b-versatile"
         self.waf_bypass_cache = {}
+        # WAF context được set từ agent sau _ai_decide()
+        self.waf_context = {"waf_name": None, "bypass_mode": "NONE", "failed_patterns": []}
+
+    def _call_groq_for_payloads(self, vuln_type: str, parameters: List[str]) -> List[str]:
+        """Gọi Groq API để sinh payload thông minh. Trả về [] nếu lỗi."""
+        if not self._groq_key:
+            return []
+        try:
+            user_msg = json.dumps({
+                "vuln_type": vuln_type,
+                "parameters": parameters[:5],
+                "waf_detected": self.waf_context.get("waf_name"),
+                "bypass_mode": self.waf_context.get("bypass_mode", "NONE"),
+                "failed_patterns": self.waf_context.get("failed_patterns", [])[:8],
+                "existing_sample": []
+            })
+            payload = json.dumps({
+                "model": self._groq_model,
+                "messages": [
+                    {"role": "system", "content": _PAYLOAD_GEN_SYSTEM},
+                    {"role": "user", "content": user_msg}
+                ],
+                "max_tokens": 800,
+                "temperature": 0.4
+            }).encode("utf-8")
+            req = urllib.request.Request(
+                "https://api.groq.com/openai/v1/chat/completions",
+                data=payload,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {self._groq_key}"
+                }
+            )
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                raw = data["choices"][0]["message"]["content"].strip()
+                # Strip markdown fences nếu có
+                raw = raw.lstrip("```json").lstrip("```").rstrip("```").strip()
+                result = json.loads(raw)
+                if isinstance(result, list):
+                    logger.info(f"[GROQ] Generated {len(result)} AI payloads for {vuln_type}")
+                    return [str(p) for p in result if p]
+        except Exception as e:
+            logger.debug(f"[GROQ] Payload gen failed: {e}")
+        return []
 
     def generate_xss(self, context: str = "html", count: int = 10) -> List[str]:
         """Generate XSS payloads for a given context"""
@@ -329,9 +436,9 @@ class PayloadGenerator:
         """Generate payloads for a specific vulnerability category"""
         if parameters is None:
             parameters = []
-        
+
         payloads = []
-        
+
         if category.lower() == "xss":
             strings = self.generate_xss(count=10)
         elif category.lower() == "sqli" or category.lower() == "sql_injection":
@@ -341,12 +448,16 @@ class PayloadGenerator:
         elif category.lower() == "lfi" or category.lower() == "file_inclusion":
             strings = self.generate_lfi()
         elif category.lower() == "file_upload":
-            # For upload, return webshell content
             strings = [self.generate_webshell()]
         else:
-            # Default to XSS
             strings = self.generate_xss(count=5)
-        
+
+        # Bổ sung payload thông minh từ Groq nếu có key
+        ai_payloads = self._call_groq_for_payloads(category, parameters)
+        if ai_payloads:
+            existing = set(strings)
+            strings = strings + [p for p in ai_payloads if p not in existing]
+
         # Convert to dict format expected by scanner
         for payload_str in strings:
             payloads.append({
@@ -354,7 +465,7 @@ class PayloadGenerator:
                 "method": "GET",
                 "params": {}
             })
-        
+
         return payloads
 
     def generate_xmlrpc_brute(self, username: str, passwords: List[str]) -> List[str]:

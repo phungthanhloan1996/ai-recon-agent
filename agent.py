@@ -137,14 +137,16 @@ class BatchDisplay:
         self.total_live = 0
         self.total_wordpress = 0
         
-        # Live feed - 5 sự kiện gần nhất
-        self.live_feed = deque(maxlen=5)
-        
+        # Live feed - tăng lên 12 events
+        self.live_feed = deque(maxlen=12)
+
+        # AI/Groq activity feed riêng
+        self.ai_feed = deque(maxlen=6)
+
         # Start render thread
         self.render_thread = threading.Thread(target=self._render_loop)
         self.render_thread.daemon = True
         self.render_thread.start()
-        # Trong __init__
         self.spinner_index = 0
         self.spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
     def stop(self):
@@ -219,6 +221,11 @@ class BatchDisplay:
         """Thêm sự kiện vào live feed"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.live_feed.appendleft((timestamp, icon, event, domain, detail))
+
+    def _add_to_ai_feed(self, event: str, detail: str, domain: str = ""):
+        """Thêm AI/Groq event vào ai_feed riêng"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.ai_feed.appendleft((timestamp, event, domain, detail))
     
     def _get_progress_text(self, data: dict) -> str:
         """Tạo progress text dựa trên phase"""
@@ -247,13 +254,13 @@ class BatchDisplay:
             return phase_detail or "working..."
     
     def _render_loop(self):
-        """Thread render liên tục - 2 lần/giây"""
+        """Thread render liên tục - 4 lần/giây"""
         while self.running:
             current_time = time.time()
-            if current_time - self.last_render_time >= 0.5:
+            if current_time - self.last_render_time >= 0.25:
                 self._render()
                 self.last_render_time = current_time
-            time.sleep(0.1)
+            time.sleep(0.05)
     
     def _render(self):
         """Vẽ giao diện đơn giản"""
@@ -361,7 +368,7 @@ class BatchDisplay:
                 print("│                                                                                                      │")
                 print("│  ┌─ DETAILS ───────────────────────────────────────────────────────────────────────────────────────┐")
                 
-                for idx, (domain, data) in enumerate(list(self.domains.items())[:2], 1):
+                for idx, (domain, data) in enumerate(list(self.domains.items())[:self.max_workers], 1):
                     stats = data.get('stats', {})
                     chains = data.get('chains', [])
                     toolkit_m = data.get('toolkit_metrics', {})
@@ -508,7 +515,7 @@ class BatchDisplay:
                 print("│                                                                                                      │")
                 print("│  ┌─ CURRENT ACTIVITY ──────────────────────────────────────────────────────────────────────────────┐")
                 
-                for idx, (domain, data) in enumerate(list(self.domains.items())[:2], 1):
+                for idx, (domain, data) in enumerate(list(self.domains.items())[:self.max_workers], 1):
                     phase_tool = data.get('phase_tool', '')
                     phase_detail = data.get('phase_detail', '')
                     stats = data.get('stats', {})
@@ -599,12 +606,30 @@ class BatchDisplay:
             if self.live_feed:
                 print("│                                                                                                      │")
                 print("│  ┌─ LIVE ──────────────────────────────────────────────────────────────────────────────────────────┐")
-                for timestamp, icon, event, domain, detail in list(self.live_feed)[:5]:
+                for timestamp, icon, event, domain, detail in list(self.live_feed)[:8]:
                     domain_display = domain[:20] + ".." if len(domain) > 20 else domain.ljust(22)
-                    print(f"│  │  {timestamp} │ {icon} {event:<12} │ {domain_display} │ {detail:<35} │")
+                    detail_display = detail[:35] if len(detail) > 35 else detail.ljust(35)
+                    print(f"│  │  {timestamp} │ {icon} {event:<12} │ {domain_display} │ {detail_display} │")
                 print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────┘")
-            
-            # Footer với stats tổng hợp
+
+            # AI / Groq activity panel
+            if self.ai_feed:
+                print("│                                                                                                      │")
+                print("│  ┌─ AI LAYER ──────────────────────────────────────────────────────────────────────────────────────┐")
+                for timestamp, event, domain, detail in list(self.ai_feed)[:6]:
+                    domain_short = domain[:18] + ".." if len(domain) > 18 else domain.ljust(20)
+                    detail_display = detail[:55] if len(detail) > 55 else detail
+                    print(f"│  │  {timestamp} │ 🧠 {event:<18} │ {domain_short} │ {detail_display:<55} │")
+                print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────┘")
+
+            # Footer với stats tổng hợp chi tiết
+            total_scanned = len(self.completed) + len(self.failed)
+            total_targets = self.total_domains or (total_scanned + active_count + queue_count)
+            pct_done = int(total_scanned * 100 / total_targets) if total_targets > 0 else 0
+            bar_filled = int(pct_done / 5)
+            bar = "█" * bar_filled + "░" * (20 - bar_filled)
+            print("├──────────────────────────────────────────────────────────────────────────────────────────────────────┤")
+            print(f"│  TOTALS │ Vulns: {self.total_vulns:<4} │ Exploited: {self.total_exploited:<3} │ Endpoints: {self.total_endpoints:<5} │ Live: {self.total_live:<4} │ WP: {self.total_wordpress:<3} │ Progress: [{bar}] {pct_done:>3}% │")
             print("└──────────────────────────────────────────────────────────────────────────────────────────────────────┘")
             
             sys.stdout.flush()
@@ -2948,11 +2973,59 @@ class ReconAgent:
         self.phase_detail = "[LEARN] Analyzing results and updating patterns..."
         self._update_display()
         self.learning_engine.learn_from_iteration(self.state)
-        
+
         failed_payloads = self.learning_engine.get_failed_payloads()
         self.learning_stats['mutated'] = len(failed_payloads)
         self.phase_detail = f"[LEARN] Analyzed {len(failed_payloads)} failed payloads"
         self._update_display()
+
+        # ── Groq learning analysis ──────────────────────────────────────────
+        try:
+            failure_data = self.learning_engine.export_learning_data()
+            user_msg = json.dumps({
+                "target": self.target,
+                "iteration": self.iteration_count,
+                "failure_patterns": failure_data.get("failure_patterns", {}),
+                "successful_payloads": failure_data.get("successful_payloads", [])[-5:],
+                "failed_payloads_sample": failure_data.get("failed_payloads", [])[-10:],
+                "stats": failure_data.get("stats", {})
+            })
+            raw = self._call_groq(self._GROQ_LEARNING_PROMPT, user_msg, timeout=12)
+            if raw:
+                raw = raw.lstrip("```json").lstrip("```").rstrip("```").strip()
+                analysis = json.loads(raw)
+                waf_fp = analysis.get("waf_fingerprint", "Unknown")
+                bypass_rec = analysis.get("recommended_bypass", "NONE")
+                exploitability = analysis.get("estimated_exploitability", "UNKNOWN")
+                self.logger.info(f"[GROQ-LEARN] WAF={waf_fp} | Bypass={bypass_rec} | Exploitability={exploitability}")
+                self.phase_detail = f"[LEARN] AI: WAF={waf_fp}, Bypass={bypass_rec}, Score={exploitability}"
+                self._update_display()
+                # Hiện lên AI panel
+                if self.batch_display:
+                    self.batch_display._add_to_ai_feed(
+                        "WAF Analysis",
+                        f"WAF={waf_fp} | Bypass={bypass_rec} | Exploitability={exploitability}",
+                        self.target
+                    )
+                    root_cause = analysis.get("failure_root_cause", "")
+                    if root_cause:
+                        self.batch_display._add_to_ai_feed(
+                            "Failure Root Cause",
+                            root_cause[:55],
+                            self.target
+                        )
+                # Feed kết quả vào waf_context của payload_gen
+                if bypass_rec and bypass_rec != "NONE":
+                    self.payload_gen.waf_context["bypass_mode"] = bypass_rec
+                if waf_fp and waf_fp not in ("None", "Unknown"):
+                    self.payload_gen.waf_context["waf_name"] = waf_fp
+                blocked = analysis.get("blocked_keywords", [])
+                if blocked:
+                    self.payload_gen.waf_context["failed_patterns"] = blocked
+                self.state.update(ai_learning_analysis=analysis)
+        except Exception as e:
+            self.logger.debug(f"[GROQ-LEARN] Analysis failed: {e}")
+
         self.phase_status = "done"
         self._mark_phase_done("learn")
 
@@ -3000,6 +3073,359 @@ class ReconAgent:
             if self.batch_display and mutated:
                 self.batch_display._add_to_feed("🧠", "Learning", self.target, f"Mutated {len(mutated)} payloads")
             self._update_display()
+        # ── Gọi AI để ra quyết định cho iteration tiếp theo ──────────────────
+        self._ai_decide_and_apply()
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # GROQ AI DECISION LAYER
+    # Được gọi ở cuối mỗi iteration để điều chỉnh strategy cho iteration sau.
+    # Không thay thế logic cũ — chỉ override các parameter nếu AI nói cần.
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    # ── Prompt 1: Adaptive Strategy Decision ───────────────────────────────────
+    # Dùng ở: _ai_decide_and_apply() sau mỗi iteration
+    # Quyết định rate, endpoint filter, WAF bypass mode, chain hints
+    _GROQ_DECISION_PROMPT = """You are the decision engine of an automated penetration testing agent performing authorized security assessments.
+
+After each scan iteration, you receive the current scan state and must output a JSON decision for the NEXT iteration.
+
+## INPUT FORMAT
+JSON object with these fields:
+- target: domain being tested
+- iteration: current iteration number (max 3)
+- waf_detected: WAF name string or null
+- consecutive_resets: connection resets in a row
+- consecutive_waf_blocks: consecutive 403/406/419 responses
+- payload_success_rate: float 0.0-1.0 from last batch
+- payloads_tested: total payloads sent this iteration
+- endpoints_total: total discovered endpoints
+- endpoints_scanned: how many were scanned
+- endpoint_priority_counts: {"CRITICAL": N, "HIGH": N, "MEDIUM": N, "LOW": N}
+- vulns_found: list of {type, severity, endpoint}
+- cms: detected CMS and version string
+- plugins: list of {name, version, has_known_cve}
+- wp_users: list of discovered WordPress usernames
+- xmlrpc_enabled: boolean
+- last_10_status_codes: list of last 10 HTTP status codes
+- failed_payload_types: payload categories with 0% success rate
+- current_waf_bypass_mode: "NONE"|"ENCODE"|"CASE_MANGLE"|"FRAGMENT"|"SLOW"
+- scan_responses_count: total scan responses in state
+
+## OUTPUT FORMAT
+Respond ONLY with a valid JSON object. No explanation. No markdown. No extra text.
+
+{
+  "action": "PROCEED" | "CHANGE_STRATEGY" | "SKIP_TO_EXPLOIT" | "ABORT_TARGET",
+  "reason": "<one sentence>",
+  "next_strategy": {
+    "rate_limit_factor": <float 0.1-1.0>,
+    "max_payloads": <int 10-100>,
+    "timeout_multiplier": <float 0.5-3.0>,
+    "endpoint_filter": "CRITICAL_ONLY" | "HIGH_AND_ABOVE" | "ALL",
+    "waf_bypass_mode": "NONE" | "ENCODE" | "CASE_MANGLE" | "FRAGMENT" | "SLOW",
+    "skip_payload_types": [],
+    "prioritize_payload_types": []
+  },
+  "chain_hints": [],
+  "learning_insight": "<one sentence — what pattern explains failures>"
+}
+
+## DECISION RULES — apply in order, first match wins
+
+ABORT conditions:
+- consecutive_resets > 50 AND vulns_found empty → action=ABORT_TARGET
+- iteration == 3 AND payloads_tested > 80 AND vulns_found empty AND consecutive_waf_blocks > 30 → action=ABORT_TARGET
+
+WAF blocking escalation (NEVER skip steps):
+- consecutive_waf_blocks > 10 AND current_waf_bypass_mode == "NONE" → CHANGE_STRATEGY, waf_bypass_mode=ENCODE
+- consecutive_waf_blocks > 10 AND current_waf_bypass_mode == "ENCODE" → CHANGE_STRATEGY, waf_bypass_mode=CASE_MANGLE
+- consecutive_waf_blocks > 10 AND current_waf_bypass_mode == "CASE_MANGLE" → CHANGE_STRATEGY, waf_bypass_mode=FRAGMENT
+- consecutive_waf_blocks > 10 AND current_waf_bypass_mode == "FRAGMENT" → CHANGE_STRATEGY, waf_bypass_mode=SLOW, rate_limit_factor=0.1
+
+Connection resets:
+- consecutive_resets > 5 → rate_limit_factor=0.2, timeout_multiplier=2.0
+- consecutive_resets > 20 → rate_limit_factor=0.1, timeout_multiplier=3.0, max_payloads=10
+
+Server overload:
+- last_10_status_codes has 8+ entries that are 5xx → rate_limit_factor=0.2, timeout_multiplier=2.5
+
+Payload efficiency:
+- payload_success_rate < 0.05 AND payloads_tested > 20 → add all zero-success categories to skip_payload_types
+- Never continue a payload type that failed 20+ times with 0 success
+
+Endpoint filtering:
+- endpoints_total > 5000 AND vulns_found not empty → endpoint_filter=CRITICAL_ONLY
+- endpoints_total > 5000 AND vulns_found empty → endpoint_filter=HIGH_AND_ABOVE
+- iteration == 3 AND vulns_found empty → endpoint_filter=HIGH_AND_ABOVE, max_payloads=20
+
+Early exploit:
+- vulns_found has 2+ HIGH or CRITICAL entries AND payload_success_rate > 0.3 → action=SKIP_TO_EXPLOIT
+
+Chain hints (add when conditions met):
+- any vuln type contains "sqli" → add "sqli_credential_dump"
+- cms contains "WordPress" AND any plugin has has_known_cve=true → add "wp_plugin_exploit_to_rce"
+- any vuln type contains "file_upload" → add "webshell_upload_rce"
+- xmlrpc_enabled AND wp_users not empty → add "xmlrpc_multicall_bruteforce"
+- any vuln type contains "xss" AND wp_users not empty → add "stored_xss_session_hijack"
+
+Default: if no rule matches → action=PROCEED with unchanged settings"""
+
+    # ── Prompt 2: Learning Analysis ─────────────────────────────────────────────
+    # Dùng ở: _run_learning_phase() sau learn_from_iteration()
+    # Phân tích failure pattern, fingerprint WAF, gợi ý bypass
+    _GROQ_LEARNING_PROMPT = """You are a penetration testing analyst reviewing scan results to extract actionable insights.
+
+Analyze failure patterns from a completed scan iteration and output structured recommendations.
+
+## INPUT FORMAT
+JSON object with:
+- target: domain scanned
+- iteration: which iteration just finished
+- failure_patterns: {response_codes, common_rejections, keyword_filtering, encoding_issues, payload_length_issues}
+- successful_payloads: last 5 successful payloads [{payload, vuln_type}]
+- failed_payloads_sample: last 10 failed payloads [{payload, reason, response_code}]
+- stats: {total_successful, total_failed, success_rate}
+
+## OUTPUT FORMAT
+Respond ONLY with a valid JSON object. No explanation. No markdown.
+
+{
+  "failure_root_cause": "<one sentence>",
+  "waf_fingerprint": "Cloudflare" | "ModSecurity" | "WordFence" | "Generic" | "None" | "Unknown",
+  "waf_confidence": <float 0.0-1.0>,
+  "blocked_keywords": [],
+  "recommended_bypass": "ENCODE" | "CASE_MANGLE" | "FRAGMENT" | "SLOW" | "NONE",
+  "payload_types_to_drop": [],
+  "payload_types_to_keep": [],
+  "next_iteration_focus": "<one sentence>",
+  "estimated_exploitability": "HIGH" | "MEDIUM" | "LOW" | "NONE"
+}
+
+## ANALYSIS RULES
+
+WAF fingerprinting:
+- keyword_filtering["script"] or keyword_filtering["alert"] > 5 → likely WordFence
+- Many 406 responses → likely ModSecurity
+- 403 with inconsistent pattern, no keyword match → likely Cloudflare or CDN
+- No 403/406, 200 but payload not reflected → application-level filtering
+
+Bypass recommendation:
+- Dominant 403 + keyword filtering → CASE_MANGLE first, then FRAGMENT
+- Dominant 406 → ENCODE first (ModSecurity often misses double encoding)
+- Connection resets (status_code 0) → SLOW mode, reduce concurrency
+- encoding_issues > 5 → try double encoding before other strategies
+- payload_length_issues > 5 → FRAGMENT long payloads
+
+Exploitability estimation:
+- success_rate > 0.1 → HIGH
+- success_rate > 0.02 → MEDIUM
+- success_rate > 0 → LOW
+- success_rate == 0 AND total_failed > 50 → NONE"""
+
+    def _call_groq(self, system_prompt: str, user_message: str, timeout: int = 15) -> str:
+        """Gọi Groq API. Trả về string rỗng nếu lỗi hoặc không có key."""
+        import urllib.request as _ureq
+        import urllib.error as _uerr
+        groq_key = os.environ.get("GROQ_API_KEY", "") or os.environ.get("GROQ_APIKEY", "")
+        if not groq_key:
+            return ""
+        try:
+            body = json.dumps({
+                "model": "llama-3.3-70b-versatile",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                "max_tokens": 512,
+                "temperature": 0.1
+            }).encode("utf-8")
+            req = _ureq.Request(
+                "https://api.groq.com/openai/v1/chat/completions",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {groq_key}"
+                }
+            )
+            with _ureq.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data["choices"][0]["message"]["content"].strip()
+        except Exception as e:
+            self.logger.debug(f"[GROQ] API call failed: {e}")
+            return ""
+
+    def _build_ai_context(self) -> dict:
+        """Build context dict để feed vào _GROQ_DECISION_PROMPT."""
+        scan_responses = self.state.get("scan_responses", []) or []
+        vulns = self.state.get("confirmed_vulnerabilities", []) or []
+        endpoints = self.state.get("prioritized_endpoints", []) or []
+        plugins = self.state.get("wp_plugins", []) or []
+
+        priority_counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        for ep in endpoints:
+            lvl = ep.get("risk_level", "LOW") if isinstance(ep, dict) else "LOW"
+            priority_counts[lvl] = priority_counts.get(lvl, 0) + 1
+
+        last_codes = [
+            r.get("status_code", 0) for r in scan_responses[-10:]
+            if isinstance(r, dict)
+        ]
+
+        consecutive_resets = 0
+        for r in reversed(scan_responses):
+            if isinstance(r, dict) and (
+                r.get("status_code", 0) == 0
+                or "reset" in str(r.get("reason", "")).lower()
+            ):
+                consecutive_resets += 1
+            else:
+                break
+
+        consecutive_waf_blocks = 0
+        for r in reversed(scan_responses):
+            if isinstance(r, dict) and r.get("status_code", 0) in (403, 406, 419):
+                consecutive_waf_blocks += 1
+            else:
+                break
+
+        total = len(scan_responses)
+        successful = sum(1 for r in scan_responses if isinstance(r, dict) and r.get("vulnerable"))
+        success_rate = round(successful / total, 4) if total > 0 else 0.0
+
+        category_stats = {}
+        for r in scan_responses:
+            if not isinstance(r, dict):
+                continue
+            cat = r.get("category", "unknown")
+            if cat not in category_stats:
+                category_stats[cat] = {"total": 0, "success": 0}
+            category_stats[cat]["total"] += 1
+            if r.get("vulnerable"):
+                category_stats[cat]["success"] += 1
+        failed_types = [
+            cat for cat, s in category_stats.items()
+            if s["total"] >= 5 and s["success"] == 0
+        ]
+
+        return {
+            "target": self.target,
+            "iteration": self.iteration_count,
+            "waf_detected": self.findings.get("waf") or None,
+            "consecutive_resets": consecutive_resets,
+            "consecutive_waf_blocks": consecutive_waf_blocks,
+            "payload_success_rate": success_rate,
+            "payloads_tested": self.stats.get("payloads_tested", 0),
+            "endpoints_total": len(self.state.get("urls", []) or []),
+            "endpoints_scanned": len(endpoints),
+            "endpoint_priority_counts": priority_counts,
+            "vulns_found": [
+                {"type": v.get("type", ""), "severity": v.get("severity", ""), "endpoint": v.get("endpoint", "")[:60]}
+                for v in vulns[:10]
+            ],
+            "cms": self.findings.get("cms_version", ""),
+            "plugins": [
+                {"name": p.get("name", ""), "version": p.get("version", ""), "has_known_cve": bool(p.get("vulnerabilities"))}
+                for p in plugins[:10]
+            ],
+            "wp_users": self.state.get("wp_users", [])[:5],
+            "xmlrpc_enabled": any(
+                "xmlrpc" in str(f).lower()
+                for f in self.state.get("wp_vulns", []) or []
+            ),
+            "last_10_status_codes": last_codes,
+            "failed_payload_types": failed_types,
+            "current_waf_bypass_mode": getattr(self, "_waf_bypass_mode", "NONE"),
+            "scan_responses_count": total,
+        }
+
+    def _ai_decide_and_apply(self):
+        """Gọi Groq để ra quyết định adaptive sau mỗi iteration và apply kết quả."""
+        try:
+            ctx = self._build_ai_context()
+            raw = self._call_groq(self._GROQ_DECISION_PROMPT, json.dumps(ctx), timeout=15)
+            if not raw:
+                return
+
+            # Strip markdown fences nếu có
+            raw = raw.lstrip("```json").lstrip("```").rstrip("```").strip()
+            decision = json.loads(raw)
+
+            action = decision.get("action", "PROCEED")
+            reason = decision.get("reason", "")
+            strategy = decision.get("next_strategy", {})
+            chain_hints = decision.get("chain_hints", [])
+            insight = decision.get("learning_insight", "")
+
+            self.logger.info(f"[GROQ] Decision: {action} — {reason}")
+            if insight:
+                self.logger.info(f"[GROQ] Insight: {insight}")
+
+            # Hiện lên AI panel
+            if self.batch_display:
+                self.batch_display._add_to_ai_feed(
+                    f"Decision: {action}",
+                    f"{reason[:55]}" if reason else "",
+                    self.target
+                )
+                if insight:
+                    self.batch_display._add_to_ai_feed(
+                        "Insight",
+                        insight[:55],
+                        self.target
+                    )
+                if chain_hints:
+                    self.batch_display._add_to_ai_feed(
+                        "Chain hints",
+                        ", ".join(chain_hints[:3]),
+                        self.target
+                    )
+
+            # Lưu insight vào state để chain_planner và report dùng
+            self.state.update(ai_learning_insight=insight)
+            if chain_hints:
+                self.state.update(ai_chain_hints=chain_hints)
+
+            # Apply WAF bypass mode
+            new_bypass = strategy.get("waf_bypass_mode")
+            if new_bypass and new_bypass != getattr(self, "_waf_bypass_mode", "NONE"):
+                self._waf_bypass_mode = new_bypass
+                self.payload_gen.waf_context["bypass_mode"] = new_bypass
+                self.logger.info(f"[GROQ] WAF bypass escalated to: {new_bypass}")
+                if self.batch_display:
+                    self.batch_display._add_to_feed("🧠", "AI-Adapt", self.target, f"WAF bypass → {new_bypass}")
+
+            # Apply skip_payload_types
+            skip_types = strategy.get("skip_payload_types", [])
+            if skip_types:
+                self.state.update(ai_skip_payload_types=skip_types)
+                self.logger.info(f"[GROQ] Skipping payload types: {skip_types}")
+
+            # Apply endpoint filter
+            ep_filter = strategy.get("endpoint_filter")
+            if ep_filter:
+                self.state.update(ai_endpoint_filter=ep_filter)
+
+            # Apply max_payloads
+            max_p = strategy.get("max_payloads")
+            if max_p and isinstance(max_p, int):
+                self.stats["total_payloads"] = min(max_p, self.stats.get("total_payloads", 100))
+
+            # Xử lý action đặc biệt
+            if action == "ABORT_TARGET":
+                self.logger.warning(f"[GROQ] ABORT_TARGET: {reason}")
+                self.last_action = f"AI abort: {reason}"
+                self._update_display()
+            elif action == "SKIP_TO_EXPLOIT":
+                self.logger.info(f"[GROQ] SKIP_TO_EXPLOIT: {reason}")
+                # Mark scan phase done để nhảy thẳng vào exploit
+                self._mark_phase_done("scan")
+            elif action == "CHANGE_STRATEGY":
+                self.logger.info(f"[GROQ] CHANGE_STRATEGY: {reason}")
+                self.last_action = f"AI strategy change: {new_bypass or 'adjusted'}"
+                self._update_display()
+
+        except Exception as e:
+            self.logger.debug(f"[GROQ] _ai_decide_and_apply failed: {e}")
 
     def _run_endpoint_ranking(self):
         urls = self.state.get("urls", [])

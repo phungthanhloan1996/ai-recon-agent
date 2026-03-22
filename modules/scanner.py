@@ -80,6 +80,7 @@ class ScanningEngine:
                 for endpoint in prioritized_endpoints[:self.max_endpoints]
             ]
 
+            completed = 0  # FIX: Initialize completed variable before loop
             for future in concurrent.futures.as_completed(futures, timeout=300):
                 try:
                     result = future.result()
@@ -189,13 +190,13 @@ class ScanningEngine:
             logger.debug(f"[SCANNING] Auto-detected categories for {url}: {categories}")       
         # FIX: Auto-detect parameters from URL if empty
         if not parameters:
-            parameters = ["q"]
             parsed = urllib.parse.urlparse(url)
             if parsed.query:
                 params_dict = urllib.parse.parse_qs(parsed.query)
                 parameters = list(params_dict.keys())
-                if parameters:
-                    logger.debug(f"[SCANNING] Auto-detected parameters from URL: {parameters}")
+                logger.debug(f"[SCANNING] Auto-detected parameters from URL: {parameters}")
+            else:
+                logger.debug(f"[SCANNING] No parameters found for {url} - will skip payload generation")
         
         logger.debug(f"[SCANNING] Scanning {url} (categories: {categories}, params: {parameters})")
         
@@ -240,44 +241,64 @@ class ScanningEngine:
                 self.state.update(vulnerabilities=current_vulns)
 
         # Generate payloads based on endpoint type
-        for category in categories:
-            if category == "xss":
-                context = self._detect_xss_context(baseline_response.get("content", ""))
-                payloads = self.payload_gen.generate_xss(context, self.get_max_payloads_for_category(category))
-            else:
-                payloads = self.payload_gen.generate_for_category(category, parameters)
+        if parameters:
+            # FIX (OPTIONAL): Estimate endpoint priority score to optimize mutation count
+            endpoint_score = 5  # Default baseline
+            if "api" in categories or "/api/" in url or "/json" in url:
+                endpoint_score = 8  # API endpoints are higher priority
+            if "authentication" in categories or "/login" in url or "/auth" in url:
+                endpoint_score = 7  # Auth endpoints are also important
+            if "command_injection" in categories or "sql_injection" in categories:
+                endpoint_score = 9  # Known high-risk categories
+            if len(parameters) > 2:
+                endpoint_score += 2  # Multiple parameters = higher priority
+            if "?" in url:
+                endpoint_score += 1  # Natural query strings are better
+            endpoint_score = min(10, endpoint_score)  # Cap at 10
+            
+            for category in categories:
+                if category == "xss":
+                    context = self._detect_xss_context(baseline_response.get("content", ""))
+                    payloads = self.payload_gen.generate_xss(context, self.get_max_payloads_for_category(category))
+                else:
+                    payloads = self.payload_gen.generate_for_category(category, parameters)
 
-            # Apply mutations
-            mutated_payloads = self.payload_mutator.mutate_payloads(payloads)
+                # Apply mutations
+                mutated_payloads = self.payload_mutator.mutate_payloads(payloads)
+                
+                # FIX (OPTIONAL): Limit mutations based on endpoint priority score
+                score_based_max = max(5, min(30, endpoint_score * 3))  # Score 5→15 mutations, 10→30
+                mutated_payloads = mutated_payloads[:score_based_max]
+                logger.debug(f"[SCANNING] Endpoint score: {endpoint_score} → {score_based_max} mutations for {url}")
 
-            # Determine payload count based on category risk
-            max_payloads = self.get_max_payloads_for_category(category)
+                # Determine payload count based on category risk
+                max_payloads = self.get_max_payloads_for_category(category)
 
-            # Test payloads
-            for payload_item in mutated_payloads[:max_payloads]:
-                payload = {}
-                try:
-                    # Normalize payload to dictionary format
-                    if isinstance(payload_item, str):
-                        payload_value = payload_item
+                # Test payloads
+                for payload_item in mutated_payloads[:max_payloads]:
+                    payload = {}
+                    try:
+                        # Normalize payload to dictionary format
+                        if isinstance(payload_item, str):
+                            payload_value = payload_item
 
-                    elif isinstance(payload_item, dict):
-                        payload_value = payload_item.get("value", "")
-                    else:
-                        logger.warning(f"Skipping unknown payload type: {type(payload_item)}")
-                        continue
-                    payload = {"value": payload_value, "method": "GET", "params": {}}
+                        elif isinstance(payload_item, dict):
+                            payload_value = payload_item.get("value", "")
+                        else:
+                            logger.warning(f"Skipping unknown payload type: {type(payload_item)}")
+                            continue
+                        payload = {"value": payload_value, "method": "GET", "params": {}}
 
-                    for auth_ctx in auth_contexts:
-                        response = self.test_payload(url, payload, category, baseline_response, auth_ctx)
-                        response["auth_role"] = auth_ctx.get("role")
-                        responses.append(response)
+                        for auth_ctx in auth_contexts:
+                            response = self.test_payload(url, payload, category, baseline_response, auth_ctx)
+                            response["auth_role"] = auth_ctx.get("role")
+                            responses.append(response)
 
-                        if response.get("vulnerable"):
-                            # FIX: Mark exploitable if confidence is high
-                            if response.get("confidence", 0) >= 0.7:
-                                response["exploitable"] = True
-                                response["exploit_context"] = {
+                            if response.get("vulnerable"):
+                                # FIX: Mark exploitable if confidence is high
+                                if response.get("confidence", 0) >= 0.7:
+                                    response["exploitable"] = True
+                                    response["exploit_context"] = {
                                     "category": category,
                                     "injection_point": first_param or "url",
                                     "auth_role": auth_ctx.get("role", "anonymous")
@@ -304,11 +325,13 @@ class ScanningEngine:
                                     self.learning_engine.add_successful_payload(p, category)
                                     break
 
-                    # Small delay to avoid overwhelming
-                    time.sleep(0.1)
+                        # Small delay to avoid overwhelming
+                        time.sleep(0.1)
 
-                except Exception as e:
-                    logger.error(f"[PAYLOAD] Failed to test payload on {url}: {e} (payload: {payload})")
+                    except Exception as e:
+                        logger.error(f"[PAYLOAD] Failed to test payload on {url}: {e} (payload: {payload})")
+        else:
+            logger.debug(f"[SCANNING] Skipping payload generation for {url} - no parameters detected (00-param endpoint)")
 
         return responses
 
@@ -775,6 +798,10 @@ class ScanningEngine:
     def _run_sqlmap(self, url: str, parameters: List[str]):
         """Best-effort sqlmap execution for high-signal parameterized endpoints."""
         if not tool_available("sqlmap"):
+            return
+        # FIX: Skip sqlmap on placeholder parameters like FUZZ
+        if any(p == "FUZZ" for p in parameters):
+            logger.debug("[SCANNING] Skipping sqlmap on placeholder parameters")
             return
         marker = parameters[0] if parameters else "id"
         target = url if "?" in url else f"{url}?{marker}=1"

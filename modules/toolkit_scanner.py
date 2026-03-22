@@ -65,6 +65,10 @@ class ToolkitScanner:
             # Skip URLs với file extension
             from urllib.parse import urlparse as _up
             _path = _up(u).path
+            if any(k in u for k in ('wp-json', 'oembed', 'embed', 'feed', 'xmlrpc')):
+                continue
+            if len(_path.split('/')) > 4:
+                continue
             if '.' in _path.split('/')[-1]:
                 continue
             s = 0

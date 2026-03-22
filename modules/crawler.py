@@ -227,6 +227,13 @@ class DiscoveryEngine:
 
         if check_tools(["arjun"]).get("arjun"):
             for url in seeds[:8]:
+                # FIX: Skip arjun on static URLs without query strings or API patterns
+                api_patterns = ["/api/", "/graphql", "/rest/", "/wp-json"]
+                has_query = "?" in url
+                has_api = any(p in url for p in api_patterns)
+                if not has_query and not has_api:
+                    logger.debug(f"[DISCOVERY] Skipping arjun on static URL: {url}")
+                    continue
                 with tempfile.NamedTemporaryFile(prefix="arjun_", suffix=".txt", delete=False) as tf:
                     out_file = tf.name
                 try:
@@ -257,11 +264,23 @@ class DiscoveryEngine:
 
         if check_tools(["paramspider"]).get("paramspider"):
             domains = sorted({urlparse(u).netloc for u in seeds if urlparse(u).netloc})
-            for domain in domains[:4]:
-                rc, stdout, _ = run_command(["paramspider", "-d", domain, "-s"], timeout=180)
-                if rc != 0 or not stdout:
-                    continue
-                out.extend(self._parse_plain_url_output(stdout, source="paramspider"))
+            # FIX: Only run paramspider on domains with API patterns or historical query strings
+            api_patterns = ["/api/", "/graphql", "/rest/", "/wp-json"]
+            domains_with_potential = []
+            for domain in domains:
+                domain_seeds = [u for u in seeds if urlparse(u).netloc == domain]
+                has_api = any(any(p in u for p in api_patterns) for u in domain_seeds)
+                has_params = any("?" in u for u in domain_seeds)
+                if has_api or has_params:
+                    domains_with_potential.append(domain)
+            if not domains_with_potential:
+                logger.debug("[DISCOVERY] Skipping paramspider - no API patterns or query strings found")
+            else:
+                for domain in domains_with_potential[:4]:
+                    rc, stdout, _ = run_command(["paramspider", "-d", domain, "-s"], timeout=180)
+                    if rc != 0 or not stdout:
+                        continue
+                    out.extend(self._parse_plain_url_output(stdout, source="paramspider"))
 
         if out:
             logger.info(f"[DISCOVERY] Param tools discovered {len(out)} endpoints")
