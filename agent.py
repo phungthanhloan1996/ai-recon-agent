@@ -1,4 +1,10 @@
 import argparse
+import warnings
+try:
+    from bs4 import XMLParsedAsHTMLWarning
+    warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
+except ImportError:
+    pass
 import logging
 import os
 import sys
@@ -12,7 +18,7 @@ from glob import glob
 import threading
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Any
-
+import config
 # ─── Suppress DEBUG logs from libraries ────────────────────────────────────
 logging.getLogger("urllib3").setLevel(logging.WARNING)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
@@ -234,18 +240,44 @@ class BatchDisplay:
         phase_detail = data.get('phase_detail', '')
         
         if phase == 'recon':
-            return f"{stats.get('subs', 0)} subs"
+            subs = stats.get('subs', 0)
+            live = stats.get('live', 0)
+            total = stats.get('total_hosts', 0)
+            # Show live/total if available, otherwise just subs
+            if total > 0:
+                percent = int((live / total) * 100) if total else 0
+                return f"{percent}% ({live}/{total}) live"
+            return f"{subs} subs"
         elif phase == 'live':
             live = stats.get('live', 0)
             total = stats.get('total_hosts', 0)
             return f"{live}/{total} live"
         elif phase == 'wp':
-            return f"scanning WP"
+            wp_count = stats.get('wp', 0)
+            return f"{wp_count} WP sites" if wp_count > 0 else "scanning WP"
         elif phase == 'crawl':
-            return f"{stats.get('eps', 0)} eps"
+            eps = stats.get('eps', 0)
+            # No total endpoints stored for crawl, just show count
+            return f"{eps} eps"
         elif phase == 'scan':
             tested = stats.get('payloads_tested', 0)
+            total = stats.get('total_payloads', 0)
+            # Show percentage with breakdown if total available
+            if total > 0:
+                percent = int((tested / total) * 100) if total else 0
+                return f"{percent}% ({tested}/{total})"
             return f"{tested} payloads"
+        elif phase == 'toolkit':
+            toolkit_m = data.get('toolkit_metrics', {})
+            # Show aggregated toolkit findings
+            tech = toolkit_m.get('tech', 0)
+            ports = toolkit_m.get('ports', 0)
+            dirs = toolkit_m.get('dirs', 0)
+            api = toolkit_m.get('api', 0)
+            # If any findings exist, show summary
+            if tech + ports + dirs + api > 0:
+                return f"{tech}t {ports}p {dirs}d {api}a"
+            return "scanning tools"
         elif phase == 'exploit':
             chains = data.get('chains', [])
             exploited = sum(1 for c in chains if c.get('exploited'))
@@ -257,15 +289,15 @@ class BatchDisplay:
         """Thread render liên tục - 4 lần/giây"""
         while self.running:
             current_time = time.time()
-            if current_time - self.last_render_time >= 0.25:
+            if current_time - self.last_render_time >= 1.0:
                 self._render()
                 self.last_render_time = current_time
-            time.sleep(0.05)
+            time.sleep(0.1)
     
     def _render(self):
         """Vẽ giao diện đơn giản"""
         with self.lock:
-            sys.stdout.write('\033[2J\033[H')
+            sys.stdout.write('\033[H\033[J')
             
             # Header
             elapsed = int(time.time() - self.start_time)
@@ -495,9 +527,50 @@ class BatchDisplay:
                             print(f"│  │  ├─ 👤 Users: {users_str:<58}   │")
                             findings_count += 1
                     
-                    # Progress/iteration
-                    print(f"│  │  ├─ 📊 Progress: Iteration {iter_info}                                                         │")
-                    
+                    # ── Phase Progress Bar ──────────────────────────────────
+                    PHASE_ORDER = [
+                        "recon", "live_hosts", "wordpress", "toolkit",
+                        "discovery", "auth", "classify", "rank",
+                        "scan", "analyze", "graph", "chain", "exploit", "learn", "report"
+                    ]
+                    PHASE_LABELS = {
+                        "recon": "Recon", "live_hosts": "Live", "wordpress": "WP",
+                        "toolkit": "Toolkit", "discovery": "Crawl", "auth": "Auth",
+                        "classify": "Classify", "rank": "Rank", "scan": "Scan",
+                        "analyze": "Analyze", "graph": "Graph", "chain": "Chain",
+                        "exploit": "Exploit", "learn": "Learn", "report": "Report"
+                    }
+                    completed_phases = set(
+                        (data.get('stats') or {}).get('completed_phases', [])
+                        or []
+                    )
+                    # Fallback: dùng phase hiện tại để ước tính completed
+                    current_p = phase
+                    if current_p in PHASE_ORDER:
+                        current_idx = PHASE_ORDER.index(current_p)
+                        # Các phase trước current_phase coi như done
+                        for p in PHASE_ORDER[:current_idx]:
+                            completed_phases.add(p)
+
+                    done_count = sum(1 for p in PHASE_ORDER if p in completed_phases)
+                    total_phases = len(PHASE_ORDER)
+                    phase_pct = int(done_count * 100 / total_phases)
+
+                    # Build visual bar: ✓ done, ▶ running, ░ todo
+                    bar_parts = []
+                    for p in PHASE_ORDER:
+                        lbl = PHASE_LABELS[p][:3]
+                        if p in completed_phases:
+                            bar_parts.append(f"✓{lbl}")
+                        elif p == current_p:
+                            bar_parts.append(f"▶{lbl}")
+                        else:
+                            bar_parts.append(f"░{lbl}")
+
+                    # Phase bar — 1 dòng đầy chiều ngang
+                    bar_str = " ".join(bar_parts)
+                    print(f"│  │  ├─ 📈 {phase_pct:>3}% [{done_count}/{total_phases}] {bar_str:<80}│")
+
                     # Phase & Tool info
                     phase_status = data.get('phase_status', 'idle')
                     status_icon = '▶️' if phase_status == 'running' else '⏸️' if phase_status == 'paused' else '✓' if phase_status == 'done' else '⚙️'
@@ -622,16 +695,9 @@ class BatchDisplay:
                     print(f"│  │  {timestamp} │ 🧠 {event:<18} │ {domain_short} │ {detail_display:<55} │")
                 print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────┘")
 
-            # Footer với stats tổng hợp chi tiết
-            total_scanned = len(self.completed) + len(self.failed)
-            total_targets = self.total_domains or (total_scanned + active_count + queue_count)
-            pct_done = int(total_scanned * 100 / total_targets) if total_targets > 0 else 0
-            bar_filled = int(pct_done / 5)
-            bar = "█" * bar_filled + "░" * (20 - bar_filled)
-            print("├──────────────────────────────────────────────────────────────────────────────────────────────────────┤")
-            print(f"│  TOTALS │ Vulns: {self.total_vulns:<4} │ Exploited: {self.total_exploited:<3} │ Endpoints: {self.total_endpoints:<5} │ Live: {self.total_live:<4} │ WP: {self.total_wordpress:<3} │ Progress: [{bar}] {pct_done:>3}% │")
+            # Footer đơn giản
             print("└──────────────────────────────────────────────────────────────────────────────────────────────────────┘")
-            
+
             sys.stdout.flush()
 
 
@@ -694,7 +760,7 @@ class DomainDisplay:
             time.sleep(0.1)
     
     def _render(self):
-        sys.stdout.write('\033[2J\033[H')
+        sys.stdout.write('\033[H\033[J')
         
         d = self.data
         stats = d['stats']
@@ -984,7 +1050,10 @@ class ReconAgent:
                 'phase_status': self.phase_status,
                 'iter': self.iteration_count,
                 'max_iter': self.max_iterations,
-                'stats': self.stats.copy(),
+                'stats': {
+                    **self.stats.copy(),
+                    'completed_phases': sorted(self.completed_phases)
+                },
                 'chains': self.chains_data,
                 'tech': self.tech_stack.copy(),
                 'endpoints': self.endpoint_stats.copy(),
@@ -3231,7 +3300,7 @@ Exploitability estimation:
             return ""
         try:
             body = json.dumps({
-                "model": "llama-3.3-70b-versatile",
+                "model": config.PRIMARY_AI_MODEL,
                 "messages": [
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_message}

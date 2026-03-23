@@ -10,7 +10,7 @@ import json
 import urllib.request
 import urllib.error
 from typing import Dict, List
-
+import config
 logger = logging.getLogger("recon.payload_gen")
 
 # ─── GROQ PROMPT: Payload Generation ──────────────────────────────────────────
@@ -217,7 +217,7 @@ class PayloadGenerator:
         # ai_client là groq_key (string) được pass từ agent.py
         self.ai_client = ai_client
         self._groq_key = ai_client if isinstance(ai_client, str) and len(ai_client) > 10 else None
-        self._groq_model = "llama-3.3-70b-versatile"
+        self._groq_model = config.PRIMARY_AI_MODEL
         self.waf_bypass_cache = {}
         # WAF context được set từ agent sau _ai_decide()
         self.waf_context = {"waf_name": None, "bypass_mode": "NONE", "failed_patterns": []}

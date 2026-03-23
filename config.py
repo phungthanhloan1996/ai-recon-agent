@@ -30,5 +30,5 @@ LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 SSL_VERIFY = os.getenv('SSL_VERIFY', 'false').lower() == 'true'
 
 # AI Models
-PRIMARY_AI_MODEL = 'mixtral'  # or 'llama'
+PRIMARY_AI_MODEL = 'mixtral-8x7b-32768'  # or 'llama'
 FALLBACK_AI_MODEL = 'anthropic'
