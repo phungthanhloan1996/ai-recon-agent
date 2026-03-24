@@ -7,6 +7,8 @@ except ImportError:
     pass
 import logging
 import os
+from dotenv import load_dotenv
+load_dotenv()
 import sys
 import json
 import time
@@ -44,6 +46,7 @@ from integrations.wp_advanced_scan import WordPressAdvancedScan
 
 # ─── AI Components ───────────────────────────────────────────────────────────
 from ai.endpoint_classifier import EndpointClassifier
+from ai.groq_client import GroqClient
 from ai.payload_gen import PayloadGenerator
 from ai.payload_mutation import PayloadMutator
 from ai.analyzer import AIAnalyzer
@@ -989,7 +992,7 @@ class ReconAgent:
         self.endpoint_classifier = EndpointClassifier()
         self.payload_gen = PayloadGenerator(groq_key)
         self.payload_mutator = PayloadMutator()
-        self.vuln_analyzer = AIAnalyzer(self.state, output_dir, groq_key)
+        self.vuln_analyzer = AIAnalyzer(self.state, output_dir, GroqClient(groq_key))
         self.chain_planner = ChainPlanner(
             self.state,
             learning_engine=self.learning_engine
@@ -3292,36 +3295,66 @@ Exploitability estimation:
 - success_rate == 0 AND total_failed > 50 → NONE"""
 
     def _call_groq(self, system_prompt: str, user_message: str, timeout: int = 15) -> str:
-        """Gọi Groq API. Trả về string rỗng nếu lỗi hoặc không có key."""
+        """Gọi Groq API với retry logic. Trả về string rỗng nếu lỗi hoặc không có key."""
         import urllib.request as _ureq
         import urllib.error as _uerr
+        import time
+        
         groq_key = os.environ.get("GROQ_API_KEY", "") or os.environ.get("GROQ_APIKEY", "")
         if not groq_key:
             return ""
-        try:
-            body = json.dumps({
-                "model": config.PRIMARY_AI_MODEL,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                "max_tokens": 512,
-                "temperature": 0.1
-            }).encode("utf-8")
-            req = _ureq.Request(
-                "https://api.groq.com/openai/v1/chat/completions",
-                data=body,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {groq_key}"
-                }
-            )
-            with _ureq.urlopen(req, timeout=timeout) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                return data["choices"][0]["message"]["content"].strip()
-        except Exception as e:
-            self.logger.debug(f"[GROQ] API call failed: {e}")
-            return ""
+        
+        max_retries = 3
+        base_delay = 1
+        
+        for attempt in range(max_retries):
+            try:
+                body = json.dumps({
+                    "model": config.PRIMARY_AI_MODEL,
+                    "messages": [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_message}
+                    ],
+                    "max_tokens": 512,
+                    "temperature": 0.1
+                }).encode("utf-8")
+                req = _ureq.Request(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    data=body,
+                    headers={
+                        "Content-Type": "application/json",
+                        "User-Agent": "python-requests/2.31.0",
+                        "Authorization": f"Bearer {groq_key}"
+                    }
+                )
+                with _ureq.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                    return data["choices"][0]["message"]["content"].strip()
+            except _uerr.HTTPError as e:
+                if e.code == 429:  # 429 = rate limit (not 403)
+                    # Rate limited - exponential backoff
+                    if attempt < max_retries - 1:
+                        delay = base_delay * (2 ** attempt)
+                        self.logger.debug(f"[GROQ] HTTP 429 rate-limit on attempt {attempt + 1}, backing off {delay}s...")
+                        time.sleep(delay)
+                        continue
+                    else:
+                        self.logger.warning(f"[GROQ] Exhausted retries for 429 after {max_retries} attempts")
+                else:
+                    self.logger.debug(f"[GROQ] HTTP error {e.code}: {e}")
+                    break
+            except _uerr.URLError as e:
+                if attempt < max_retries - 1:
+                    self.logger.debug(f"[GROQ] Network error on attempt {attempt + 1}: {e}, retrying...")
+                    time.sleep(base_delay * (2 ** attempt))
+                    continue
+                else:
+                    self.logger.debug(f"[GROQ] Network error exhausted retries: {e}")
+            except Exception as e:
+                self.logger.debug(f"[GROQ] API call failed attempt {attempt + 1}: {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt))
+        return ""
 
     def _build_ai_context(self) -> dict:
         """Build context dict để feed vào _GROQ_DECISION_PROMPT."""
@@ -3859,6 +3892,21 @@ def process_single_target(domain: str, output_dir: str, options: dict, args, bat
             api_status=check_api_keys()
         )
         agent.run()
+
+        groq = GroqClient(os.getenv("GROQ_API_KEY"))
+        analyzer = AIAnalyzer(agent.state, output_dir, ai_client=groq)
+
+        try:
+            ai_report = analyzer._generate_ai_report({
+                "target": domain,
+                "summary": agent.state.summary(),
+                "findings": agent.state.get("confirmed_vulnerabilities", []) or []
+            })
+
+            print("[AI REPORT]", ai_report)
+
+        except Exception as e:
+            print("[AI REPORT ERROR]", e)
     except Exception as e:
         logging.getLogger("batch").error(f"{domain} failed: {e}")
         batch_display.mark_failed(domain, str(e)[:30])

@@ -11,9 +11,13 @@ import time
 import base64
 import concurrent.futures
 import urllib.parse
+from urllib.parse import urlparse
+import config
+from urllib3.exceptions import NameResolutionError
 
 from core.state_manager import StateManager
 from core.http_engine import HTTPClient
+from ai.groq_client import GroqClient
 from ai.payload_gen import PayloadGenerator
 from ai.payload_mutation import PayloadMutator
 from learning.learning_engine import LearningEngine
@@ -45,6 +49,28 @@ class ScanningEngine:
 
         self.scan_results_file = os.path.join(output_dir, "scan_results.json")
 
+    def _is_valid_url(self, url: str) -> bool:
+        """Kiểm tra URL hợp lệ trước khi gửi request"""
+        if not url or not isinstance(url, str):
+            return False
+        if len(url) > config.MAX_URL_LENGTH:
+            return False
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.netloc or parsed.hostname or ''
+            invalid_chars = ['<', '>', '"', "'", '&lt;', '&gt;']
+            if any(c in hostname for c in invalid_chars):
+                return False
+            try:
+                port = parsed.port
+            except ValueError:
+                return False
+            if port is not None and not str(port).isdigit():
+                return False
+            return True
+        except Exception:
+            return False
+
     def run(self, progress_cb=None):
         """Execute vulnerability scanning pipeline"""
         logger.info("[SCANNING] Starting AI-driven vulnerability scanning")
@@ -74,7 +100,7 @@ class ScanningEngine:
             logger.error(f"[SCANNING] Cannot create scan_results.json: {e}")
 
         # Use parallel execution
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=config.SCANNING_MAX_WORKERS) as executor:
             futures = [
                 executor.submit(self.scan_endpoint, endpoint)
                 for endpoint in prioritized_endpoints[:self.max_endpoints]
@@ -143,6 +169,10 @@ class ScanningEngine:
         url = endpoint.get("url", "")
         url = url.replace('\\/', '/').replace('\\/','/')  # fix escaped slashes
 
+        if not self._is_valid_url(url):
+            logger.warning(f"[SCANNING] Skipping malformed URL: {url[:100]}")
+            return []
+
         categories = endpoint.get("categories", []) or []
         parameters = endpoint.get("parameters", []) or []
         
@@ -199,6 +229,11 @@ class ScanningEngine:
                 logger.debug(f"[SCANNING] No parameters found for {url} - will skip payload generation")
         
         logger.debug(f"[SCANNING] Scanning {url} (categories: {categories}, params: {parameters})")
+
+        host = _parsed.netloc or _parsed.hostname or url
+        if host in getattr(self.http_client, "_dead_hosts", set()):
+            logger.debug(f"[SCANNING] Skipping dead host before scan: {host}")
+            return []
         
         # Store first parameter for exploitation context
         first_param = parameters[0] if parameters else None
@@ -211,6 +246,8 @@ class ScanningEngine:
         if not baseline_response:
             logger.debug(f"[SCANNING] Failed to get baseline for {url}")
             return responses
+
+        endpoint_score = self._estimate_endpoint_score(url, categories, parameters)
 
         # Decision logic: auto-detect and call external tools
         if parameters:
@@ -232,7 +269,7 @@ class ScanningEngine:
         url_lower = url.lower()
         has_important_keyword = any(kw in url_lower for kw in important_keywords)
         
-        if (has_real_query_params or has_important_keyword):
+        if (has_real_query_params or has_important_keyword) and endpoint_score >= config.NUCLEI_MIN_ENDPOINT_SCORE:
             nuclei_result = self.nuclei_runner.run(url)
             if nuclei_result.get("success"):
                 vuln = {"type": "general", "url": url, "tool": "nuclei", "output": nuclei_result["output"]}
@@ -242,40 +279,41 @@ class ScanningEngine:
 
         # Generate payloads based on endpoint type
         if parameters:
-            # FIX (OPTIONAL): Estimate endpoint priority score to optimize mutation count
-            endpoint_score = 5  # Default baseline
-            if "api" in categories or "/api/" in url or "/json" in url:
-                endpoint_score = 8  # API endpoints are higher priority
-            if "authentication" in categories or "/login" in url or "/auth" in url:
-                endpoint_score = 7  # Auth endpoints are also important
-            if "command_injection" in categories or "sql_injection" in categories:
-                endpoint_score = 9  # Known high-risk categories
-            if len(parameters) > 2:
-                endpoint_score += 2  # Multiple parameters = higher priority
-            if "?" in url:
-                endpoint_score += 1  # Natural query strings are better
-            endpoint_score = min(10, endpoint_score)  # Cap at 10
-            
             for category in categories:
+                allow_ai_payloads = endpoint_score >= config.AI_PAYLOAD_MIN_SCORE
                 if category == "xss":
-                    context = self._detect_xss_context(baseline_response.get("content", ""))
-                    payloads = self.payload_gen.generate_xss(context, self.get_max_payloads_for_category(category))
+                    payload_values = self.payload_gen.generate_xss(
+                        self._detect_xss_context(baseline_response.get("content", "")),
+                        self.get_max_payloads_for_category(category)
+                    )
                 else:
-                    payloads = self.payload_gen.generate_for_category(category, parameters)
+                    payload_items = self.payload_gen.generate_for_category(
+                        category,
+                        parameters,
+                        include_ai=allow_ai_payloads,
+                    )
+                    payload_values = [
+                        item.get("value", "")
+                        for item in payload_items
+                        if isinstance(item, dict) and item.get("value")
+                    ]
 
-                # Apply mutations
-                mutated_payloads = self.payload_mutator.mutate_payloads(payloads)
-                
-                # FIX (OPTIONAL): Limit mutations based on endpoint priority score
-                score_based_max = max(5, min(30, endpoint_score * 3))  # Score 5→15 mutations, 10→30
-                mutated_payloads = mutated_payloads[:score_based_max]
-                logger.debug(f"[SCANNING] Endpoint score: {endpoint_score} → {score_based_max} mutations for {url}")
+                if not payload_values:
+                    continue
+
+                score_based_max = min(config.PAYLOAD_MUTATION_MAX, max(4, endpoint_score))
+                if endpoint_score >= config.PAYLOAD_MUTATION_MIN_SCORE:
+                    mutated_payloads = self.payload_mutator.mutate_payloads(payload_values)[:score_based_max]
+                    candidate_payloads = self._dedupe_payloads(payload_values + mutated_payloads)
+                else:
+                    candidate_payloads = self._dedupe_payloads(payload_values)[:score_based_max]
+                logger.debug(f"[SCANNING] Endpoint score: {endpoint_score} → {len(candidate_payloads)} payloads for {url}")
 
                 # Determine payload count based on category risk
                 max_payloads = self.get_max_payloads_for_category(category)
 
                 # Test payloads
-                for payload_item in mutated_payloads[:max_payloads]:
+                for payload_item in candidate_payloads[:max_payloads]:
                     payload = {}
                     try:
                         # Normalize payload to dictionary format
@@ -289,12 +327,15 @@ class ScanningEngine:
                             continue
                         payload = {"value": payload_value, "method": "GET", "params": {}}
 
+                        payload_succeeded = False
                         for auth_ctx in auth_contexts:
                             response = self.test_payload(url, payload, category, baseline_response, auth_ctx)
                             response["auth_role"] = auth_ctx.get("role")
                             responses.append(response)
+                            self._run_ai_scan(url, payload_value, response)
 
                             if response.get("vulnerable"):
+                                payload_succeeded = True
                                 # FIX: Mark exploitable if confidence is high
                                 if response.get("confidence", 0) >= 0.7:
                                     response["exploitable"] = True
@@ -303,12 +344,12 @@ class ScanningEngine:
                                     "injection_point": first_param or "url",
                                     "auth_role": auth_ctx.get("role", "anonymous")
                                 }
+                                self.learning_engine.add_successful_payload(payload, category)
                             else:
                                 response["exploitable"] = False
                                 response["exploit_context"] = {}
-                            
-                            self.learning_engine.add_successful_payload(payload, category)
-                        else:
+
+                        if not payload_succeeded and endpoint_score >= config.PAYLOAD_MUTATION_MIN_SCORE:
                             # Mutate and retry on failure - using the original string value
                             payload_value = payload.get("value", "")
                             if not isinstance(payload_value, str):
@@ -321,22 +362,54 @@ class ScanningEngine:
                                 resp = self.test_payload(url, p, category, baseline_response, auth_ctx)
                                 resp["auth_role"] = auth_ctx.get("role")
                                 responses.append(resp)
+                                self._run_ai_scan(url, p_str, resp)
                                 if resp.get("vulnerable"):
                                     self.learning_engine.add_successful_payload(p, category)
                                     break
 
                         # Small delay to avoid overwhelming
-                        time.sleep(0.1)
+                        time.sleep(config.SCAN_PAYLOAD_DELAY)
 
                     except Exception as e:
+                        if self._is_name_resolution_error(e):
+                            logger.warning(f"[SCANNING] DNS resolution failed for {url}; skipping remaining payloads")
+                            break
                         logger.error(f"[PAYLOAD] Failed to test payload on {url}: {e} (payload: {payload})")
         else:
             logger.debug(f"[SCANNING] Skipping payload generation for {url} - no parameters detected (00-param endpoint)")
 
         return responses
 
+    def _estimate_endpoint_score(self, url: str, categories: List[str], parameters: List[str]) -> int:
+        score = 5
+        if "api" in categories or "/api/" in url or "/json" in url:
+            score = 8
+        if "authentication" in categories or "/login" in url or "/auth" in url:
+            score = max(score, 7)
+        if "command_injection" in categories or "sql_injection" in categories:
+            score = max(score, 9)
+        if len(parameters) > 2:
+            score += 2
+        if "?" in url:
+            score += 1
+        return min(10, score)
+
+    def _dedupe_payloads(self, payloads: List[str]) -> List[str]:
+        seen = set()
+        merged = []
+        for payload in payloads:
+            if not payload or payload in seen:
+                continue
+            seen.add(payload)
+            merged.append(payload)
+        return merged
+
     def get_baseline_response(self, url: str) -> Dict[str, Any]:
         """Get baseline response for comparison and tech fingerprinting"""
+        if not self._is_valid_url(url):
+            logger.debug(f"[SCANNING] Skipping baseline for invalid URL: {url[:100]}")
+            return None
+
         try:
             response = self.http_client.get(url, timeout=10)
             
@@ -355,9 +428,27 @@ class ScanningEngine:
                 "headers": dict(response.headers),
                 "tech": tech_detected
             }
+        except ConnectionError as e:
+            if self._is_name_resolution_error(e) or "Skipping dead host:" in str(e):
+                logger.warning(f"[SCANNING] Skipping unreachable host {url}: {e}")
+                return None
+            logger.debug(f"[SCANNING] Baseline request failed for {url}: {e}")
+            return None
         except Exception as e:
             logger.debug(f"[SCANNING] Baseline request failed for {url}: {e}")
             return None
+
+    def _is_name_resolution_error(self, error: Exception) -> bool:
+        current = error
+        visited = set()
+        while current and id(current) not in visited:
+            visited.add(id(current))
+            if isinstance(current, NameResolutionError):
+                return True
+            if "name resolution" in str(current).lower() or "failed to resolve" in str(current).lower():
+                return True
+            current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+        return False
 
     def _detect_tech_stack(self, response) -> set:
         """Detect technology stack from response"""
@@ -456,6 +547,9 @@ class ScanningEngine:
                                 new_query = urllib.parse.urlencode(test_pairs, doseq=True)
                                 test_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
                                 try:
+                                    if not self._is_valid_url(test_url):
+                                        logger.debug(f"[SCANNING] Skipping invalid test URL: {test_url[:100]}")
+                                        continue
                                     response = self.http_client.get(test_url, timeout=10, headers=req_headers, cookies=req_cookies)
                                     if not self._is_waf_blocked(response):
                                         analysis = self.analyze_response(response, baseline, {"value": mutation}, category)
@@ -465,10 +559,13 @@ class ScanningEngine:
                                     pass
                         else:
                             inject_key = next(iter(params.keys()), "q") if isinstance(params, dict) else "q"
-                            query_pairs = [(inject_key, mutation)]
-                            new_query = urllib.parse.urlencode(query_pairs, doseq=True)
-                        test_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
-                        response = self.http_client.get(test_url, timeout=10, headers=req_headers, cookies=req_cookies)
+                            safe_mutation = urllib.parse.quote(mutation, safe='')
+                            new_query = f"{inject_key}={safe_mutation}"
+                            test_url = urllib.parse.urlunparse(parsed._replace(query=new_query))
+                            if not self._is_valid_url(test_url):
+                                logger.debug(f"[SCANNING] Skipping invalid test URL: {test_url[:100]}")
+                                continue
+                            response = self.http_client.get(test_url, timeout=10, headers=req_headers, cookies=req_cookies)
                     elif method == "POST":
                         post_data = dict(params) if isinstance(params, dict) else {}
                         if post_data:
@@ -546,6 +643,24 @@ class ScanningEngine:
                         "timestamp": time.time()
                     }
                 except Exception as e:
+                    if self._is_name_resolution_error(e):
+                        logger.warning(f"[SCANNING] DNS resolution failed for {url}; skipping remaining payloads")
+                        return {
+                            "endpoint": url,
+                            "payload": payload_value,
+                            "method": method,
+                            "status_code": 0,
+                            "content_length": 0,
+                            "response_time": 0,
+                            "baseline_status": baseline.get("status_code", 0),
+                            "baseline_length": baseline.get("content_length", 0),
+                            "baseline_time": baseline.get("response_time", 0),
+                            "category": category,
+                            "vulnerable": False,
+                            "confidence": 0,
+                            "reason": "DNS resolution failed - malformed URL",
+                            "timestamp": time.time()
+                        }
                     if attempt == max_retries - 1:
                         logger.debug(f"[SCANNING] Payload test failed after {max_retries} attempts: {e}")
                         # Return a failed result
@@ -824,3 +939,48 @@ class ScanningEngine:
             return "attribute"
         else:
             return "html"
+
+    def _run_ai_scan(self, url: str, payload: str, response: Dict[str, Any]):
+        """Run best-effort AI analysis for each tested response."""
+        if not config.ENABLE_AI_RESPONSE_SCAN:
+            return
+
+        if not hasattr(self, "_ai_response_scan_calls"):
+            self._ai_response_scan_calls = 0
+        if self._ai_response_scan_calls >= config.AI_RESPONSE_SCAN_MAX_CALLS:
+            return
+
+        suspicious = (
+            response.get("vulnerable")
+            or response.get("confidence", 0) >= config.AI_RESPONSE_SCAN_MIN_CONFIDENCE
+            or response.get("status_code", 0) >= 500
+        )
+        if not suspicious:
+            return
+
+        if not hasattr(self, "_groq"):
+            self._groq = GroqClient(os.getenv("GROQ_API_KEY"))
+
+        try:
+            self._ai_response_scan_calls += 1
+            ai_result = self._groq.generate(f"""
+Analyze this HTTP response for vulnerabilities.
+
+Payload: {payload}
+URL: {url}
+Response:
+{str(response)[:1000]}
+
+Return JSON:
+{{
+    "vulnerable": true/false,
+    "type": "...",
+    "confidence": 0-1,
+    "next_payload": "..."
+}}
+""")
+
+            print("[AI SCAN]", ai_result)
+
+        except Exception as e:
+            print("[AI ERROR]", e)

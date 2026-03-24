@@ -12,6 +12,8 @@ from typing import Dict, List, Set, Tuple, Callable, Optional
 from urllib.parse import urlparse, parse_qs
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
+import time
+import config
 from core.executor import check_tools, run_command
 from core.state_manager import StateManager
 from core.http_engine import HTTPClient
@@ -178,45 +180,76 @@ class DiscoveryEngine:
         logger.info(f"[DISCOVERY] Discovered {len(classified)} unique endpoints")
 
     def _discover_with_katana(self, seed_urls: List[str]) -> List[Dict]:
-        """Use katana CLI for deeper JS-aware crawling."""
+        """Use katana CLI for deeper JS-aware crawling with retry mechanism."""
         if not check_tools(["katana"]).get("katana"):
             return []
         seeds = [u for u in seed_urls[:30] if u.startswith(("http://", "https://"))]
         if not seeds:
             return []
-        rc, stdout, stderr = run_command(
-            ["katana", "-silent", "-d", str(CRAWL_DEPTH), "-list", "-"],
-            timeout=180,
-            stdin_data="\n".join(seeds) + "\n"
-        )
-        if rc != 0 or not stdout:
-            return []
-        found = []
-        for line in stdout.splitlines():
-            u = line.strip()
-            if not u:
-                continue
-            found.append({"url": u, "type": "katana", "source": "katana", "method": "GET"})
-        logger.info(f"[DISCOVERY] Katana discovered {len(found)} endpoints")
-        return found
+        
+        max_retries = max(1, config.CRAWLER_TOOL_MAX_RETRIES)
+        for attempt in range(max_retries):
+            rc, stdout, stderr = run_command(
+                [
+                    "katana", "-silent", "-d", "3", "-list", "-",
+                    "-c", str(config.KATANA_CONCURRENCY),
+                    "-rl", str(config.KATANA_RATE_LIMIT),
+                    "-timeout", str(config.KATANA_TIMEOUT),
+                    "-retry", "1",
+                    "-mrs", "2000000"
+                ],
+                timeout=config.KATANA_RUN_TIMEOUT,
+                stdin_data="\n".join(seeds) + "\n"
+            )
+            if rc == 0 and stdout:
+                found = []
+                for line in stdout.splitlines():
+                    u = line.strip()
+                    if not u:
+                        continue
+                    found.append({"url": u, "type": "katana", "source": "katana", "method": "GET"})
+                logger.info(f"[DISCOVERY] Katana discovered {len(found)} endpoints")
+                return found
+            if rc == -2:
+                logger.warning("[DISCOVERY] Katana timed out; skipping immediate retry")
+                if not config.CRAWLER_RETRY_ON_TIMEOUT:
+                    break
+            if attempt < max_retries - 1:
+                logger.debug(f"[DISCOVERY] Katana attempt {attempt + 1} failed (rc={rc}): {stderr[:120]}")
+                time.sleep(1 + attempt)
+            else:
+                logger.warning(f"[DISCOVERY] Katana exhausted {max_retries} attempts")
+        return []
 
     def _discover_with_hakrawler(self, seed_urls: List[str]) -> List[Dict]:
-        """Use hakrawler for alternate crawl strategy."""
+        """Use hakrawler for alternate crawl strategy with retry mechanism."""
         if not check_tools(["hakrawler"]).get("hakrawler"):
             return []
         seeds = [u for u in seed_urls[:30] if u.startswith(("http://", "https://"))]
         if not seeds:
             return []
-        rc, stdout, _ = run_command(
-            ["hakrawler", "-subs", "-d", "3", "-t", "15", "-u"],
-            timeout=180,
-            stdin_data="\n".join(seeds) + "\n"
-        )
-        if rc != 0 or not stdout:
-            return []
-        found = self._parse_plain_url_output(stdout, source="hakrawler")
-        logger.info(f"[DISCOVERY] Hakrawler discovered {len(found)} endpoints")
-        return found
+        
+        max_retries = max(1, config.CRAWLER_TOOL_MAX_RETRIES)
+        for attempt in range(max_retries):
+            rc, stdout, stderr = run_command(
+                ["hakrawler", "-subs", "-d", "3", "-t", str(config.HAKRAWLER_THREADS), "-u"],
+                timeout=config.HAKRAWLER_RUN_TIMEOUT,
+                stdin_data="\n".join(seeds) + "\n"
+            )
+            if rc == 0 and stdout:
+                found = self._parse_plain_url_output(stdout, source="hakrawler")
+                logger.info(f"[DISCOVERY] Hakrawler discovered {len(found)} endpoints")
+                return found
+            if rc == -2:
+                logger.warning("[DISCOVERY] Hakrawler timed out; skipping immediate retry")
+                if not config.CRAWLER_RETRY_ON_TIMEOUT:
+                    break
+            if attempt < max_retries - 1:
+                logger.debug(f"[DISCOVERY] Hakrawler attempt {attempt + 1} failed (rc={rc}): {stderr[:120]}")
+                time.sleep(1 + attempt)
+            else:
+                logger.warning(f"[DISCOVERY] Hakrawler exhausted {max_retries} attempts")
+        return []
 
     def _discover_with_param_tools(self, seed_urls: List[str]) -> List[Dict]:
         """Discover hidden parameters and convert to testable endpoints."""
@@ -365,6 +398,15 @@ class DiscoveryEngine:
     def discover_from_url(self, url: str) -> List[Dict]:
         """Discover endpoints from a single URL"""
         endpoints = []
+        
+        # Skip binary files to avoid parsing errors
+        binary_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.zip', '.tar', '.gz', 
+                            '.mp4', '.avi', '.mov', '.pdf', '.exe', '.dll', '.so',
+                            '.bin', '.iso', '.deb', '.rpm', '.woff', '.woff2', '.ttf'}
+        url_lower = url.lower()
+        if any(url_lower.endswith(ext) for ext in binary_extensions):
+            logger.debug(f"[DISCOVERY] Skipping binary asset: {url}")
+            return endpoints
 
         try:
             response = self.http_client.get(url, timeout=10)

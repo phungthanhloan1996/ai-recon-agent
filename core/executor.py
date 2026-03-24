@@ -105,9 +105,23 @@ def run_command(
 
     except subprocess.TimeoutExpired:
         logger.error(f"[EXEC] TIMEOUT after {timeout}s: {cmd_str}")
+        
+        # Fallback cho các tool crawl - không làm dừng pipeline
+        if tool in ["katana", "hakrawler", "gau", "waybackurls"]:
+            logger.warning(f"[EXEC] {tool} timeout, using cached/archived data instead")
+            return -2, "", f"Timeout after {timeout}s"
+        
         return -2, "", f"Timeout after {timeout}s"
     except Exception as e:
         logger.error(f"[EXEC] Exception running {tool}: {e}")
+        
+        # Xử lý đặc biệt cho arjun
+        if tool == "arjun":
+            error_msg = str(e).lower()
+            if "argument" in error_msg or "exit code -2" in error_msg:
+                logger.warning(f"[EXEC] Arjun argument error - likely malformed URL, skipping")
+                return 0, "", ""
+        
         return -3, "", str(e)
 
 

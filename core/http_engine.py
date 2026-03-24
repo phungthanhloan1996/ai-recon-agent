@@ -6,12 +6,14 @@ Core network layer with connection pooling, retries, and rate limiting
 import requests
 import logging
 import time
+import threading
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from urllib3.exceptions import HeaderParsingError
+from urllib3.exceptions import HeaderParsingError, NameResolutionError
 import random
-from config import SSL_VERIFY
+import config
 import urllib3
+from urllib.parse import urlparse
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 logger = logging.getLogger("recon.http_engine")
@@ -27,31 +29,37 @@ class HTTPClient:
     - Proxy support
     """
 
-    def __init__(self, session_manager=None, timeout: int = 30, max_retries: int = 3):
+    def __init__(self, session_manager=None, timeout: int = None, max_retries: int = 3):
         self.session = requests.Session()
-        self.timeout = timeout
+        self.timeout = timeout or config.HTTP_TIMEOUT
         self.max_retries = max_retries
         self.session_manager = session_manager
         self.last_request_time = 0
-        self.min_delay = 0.5  # Reduced from 1 - more efficient for local testing
+        self.min_delay = config.HTTP_MIN_DELAY
+        self.max_delay = config.HTTP_MAX_DELAY
         self.scheme_cache = {}
         self.unreachable_ports = set()
         self.error_count = 0  # Track consecutive errors
-        self.current_concurrency = 50  # Default connection pool
+        self.current_concurrency = config.HTTP_POOL_SIZE
+        self._rate_lock = threading.Lock()
+        self._dead_hosts = set()
+        self._dead_host_errors = {}
 
         # ENHANCED: Connection pool of 50, with exponential backoff
         retry_strategy = Retry(
             total=max_retries,  # Retry up to 3 times
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE"],
-            backoff_factor=2  # Exponential backoff: 2s, 4s, 8s
+            backoff_factor=config.HTTP_BACKOFF_FACTOR,
+            respect_retry_after_header=True,
+            raise_on_status=False
         )
 
         # Mount adapters with larger pool
         adapter = HTTPAdapter(
             max_retries=retry_strategy,
-            pool_connections=50,  # Connection pool size
-            pool_maxsize=50  # Max connections per pool
+            pool_connections=config.HTTP_POOL_SIZE,
+            pool_maxsize=config.HTTP_POOL_SIZE
         )
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
@@ -76,8 +84,12 @@ class HTTPClient:
         url = self._normalize_url(url)
         
         # Check cache for unreachable ports - fail fast
-        from urllib.parse import urlparse
         parsed = urlparse(url)
+        host = parsed.netloc or parsed.hostname or ""
+        if host in self._dead_hosts:
+            error = ConnectionError(f"Skipping dead host: {host}")
+            logger.debug(f"[HTTP] {error}")
+            raise error
         host_port = (parsed.hostname, parsed.port or (443 if parsed.scheme == 'https' else 80))
         if host_port in self.unreachable_ports:
             error = ConnectionError(f"Port {host_port[1]} on {host_port[0]} is unreachable (cached)")
@@ -86,13 +98,19 @@ class HTTPClient:
         
         kwargs.setdefault('timeout', self.timeout)
         kwargs.setdefault('allow_redirects', True)
-        kwargs.setdefault('verify', SSL_VERIFY)
+        kwargs.setdefault('verify', config.SSL_VERIFY)
         
         try:
             response = self.session.get(url, **kwargs)
+            self._clear_dead_host_error(host)
+            self._handle_rate_limit_response(response, url)
             self._update_session(response)
             return response
         except ConnectionError as e:
+            if self._is_name_resolution_error(e):
+                self._record_dead_host_error(host)
+                logger.error(f"GET request failed for {url}: {e}")
+                raise
             # Cache connection refused errors
             if 'Connection refused' in str(e):
                 self.unreachable_ports.add(host_port)
@@ -116,12 +134,15 @@ class HTTPClient:
             logger.warning(f"Failed to parse headers (url={url}): {e}")
             try:
                 response = self.session.get(url, **kwargs)
+                self._clear_dead_host_error(host)
                 self._update_session(response)
                 return response
             except Exception as e2:
                 logger.error(f"GET request failed for {url}: {e2}")
                 raise e2
         except Exception as e:
+            if self._is_name_resolution_error(e):
+                self._record_dead_host_error(host)
             logger.error(f"GET request failed for {url}: {e}")
             raise
 
@@ -132,24 +153,76 @@ class HTTPClient:
         
         # Normalize URL for localhost - skip HTTPS
         url = self._normalize_url(url)
+        parsed = urlparse(url)
+        host = parsed.netloc or parsed.hostname or ""
+        if host in self._dead_hosts:
+            raise ConnectionError(f"Skipping dead host: {host}")
         
         kwargs.setdefault('timeout', self.timeout)
-        kwargs.setdefault('verify', SSL_VERIFY)
+        kwargs.setdefault('verify', config.SSL_VERIFY)
         
         try:
             response = self.session.post(url, data=data, json=json, **kwargs)
+            self._clear_dead_host_error(host)
+            self._handle_rate_limit_response(response, url)
             self._update_session(response)
             return response
         except Exception as e:
+            if self._is_name_resolution_error(e):
+                self._record_dead_host_error(host)
             logger.error(f"POST request failed for {url}: {e}")
             raise
 
+    def _record_dead_host_error(self, host: str):
+        if not host:
+            return
+        self._dead_host_errors[host] = self._dead_host_errors.get(host, 0) + 1
+        if self._dead_host_errors[host] >= 3 and host not in self._dead_hosts:
+            self._dead_hosts.add(host)
+            logger.warning(f"[HTTP] Marking {host} as dead after 3 failures")
+
+    def _clear_dead_host_error(self, host: str):
+        if not host:
+            return
+        self._dead_host_errors.pop(host, None)
+        self._dead_hosts.discard(host)
+
+    def _is_name_resolution_error(self, error: Exception) -> bool:
+        current = error
+        visited = set()
+        while current and id(current) not in visited:
+            visited.add(id(current))
+            if isinstance(current, NameResolutionError):
+                return True
+            if "name resolution" in str(current).lower() or "failed to resolve" in str(current).lower():
+                return True
+            current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
+        return False
+
     def _rate_limit(self):
         """Implement rate limiting"""
-        elapsed = time.time() - self.last_request_time
-        if elapsed < self.min_delay:
-            time.sleep(self.min_delay - elapsed)
-        self.last_request_time = time.time()
+        with self._rate_lock:
+            elapsed = time.time() - self.last_request_time
+            if elapsed < self.min_delay:
+                time.sleep(self.min_delay - elapsed)
+            self.last_request_time = time.time()
+
+    def _handle_rate_limit_response(self, response: requests.Response, url: str):
+        if response.status_code == 429:
+            self.error_count += 1
+            retry_after = response.headers.get("Retry-After")
+            sleep_for = min(self.max_delay, self.min_delay * (1 + self.error_count))
+            if retry_after:
+                try:
+                    sleep_for = max(sleep_for, float(retry_after))
+                except ValueError:
+                    pass
+            self.min_delay = min(self.max_delay, max(self.min_delay, sleep_for))
+            logger.warning(f"[HTTP] 429 received for {url}; increasing min_delay to {self.min_delay:.2f}s")
+            time.sleep(sleep_for)
+        elif self.error_count:
+            self.error_count = 0
+            self.min_delay = max(config.HTTP_MIN_DELAY, self.min_delay * 0.9)
 
     def _normalize_url(self, url: str) -> str:
         """
@@ -160,7 +233,6 @@ class HTTPClient:
             return url
         
         # Extract host from URL
-        from urllib.parse import urlparse
         parsed = urlparse(url)
         host = parsed.hostname or ''
         

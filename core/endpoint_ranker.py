@@ -78,8 +78,43 @@ class EndpointRanker:
     def __init__(self, ai_client=None):
         self.ai_client = ai_client
 
+    def validate_url_structure(self, url: str) -> bool:
+        """Kiểm tra URL có cấu trúc hợp lệ, không chứa ký tự HTML"""
+        if not url:
+            return False
+
+        invalid_patterns = ['<', '>', '"', "'", '&lt;', '&gt;', 'script', 'alert']
+
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.netloc or parsed.hostname or ''
+
+            for pattern in invalid_patterns:
+                if pattern in hostname.lower():
+                    logger.debug(f"[RANKER] Invalid URL (host contains {pattern}): {url[:100]}")
+                    return False
+
+            try:
+                port = parsed.port
+            except ValueError:
+                return False
+            if port is not None and not str(port).isdigit():
+                return False
+
+            return True
+        except Exception:
+            return False
+
     def score_endpoint(self, url: str) -> Dict:
         """Score a single endpoint and return detailed scoring info"""
+        if not self.validate_url_structure(url):
+            return {
+                "url": url,
+                "score": 0,
+                "risk_level": "INFO",
+                "reasons": ["invalid_url_structure"]
+            }
+
         score = 0
         reasons = []
 

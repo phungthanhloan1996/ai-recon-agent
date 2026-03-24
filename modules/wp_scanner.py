@@ -533,44 +533,68 @@ class WordPressScannerEngine:
             return {}
 
         os.makedirs(self.wpscan_cache_dir, exist_ok=True)
+        
+        # Build command with proper parameters for WPScan 3.x
         cmd = [
             "wpscan",
             "--url", url,
             "--format", "json",
             "--cache-dir", self.wpscan_cache_dir,
-            "-e", "vp,u,m"
+            "--disable-tls-checks",  # Skip SSL verification
+            "-e", "vp,u,m"  # Enumerate vulnerable plugins, users, media
         ]
 
-        if self.wps_token:
+        # Only add API token if provided - skip if invalid
+        if self.wps_token and len(self.wps_token) > 10:
             cmd.extend(["--api-token", self.wps_token])
         else:
-            logger.debug("[WP] No WPScan API token - will use cache only")
+            # Exit code 5 often means missing/invalid API token - use cache only mode
+            logger.debug("[WP] No valid WPScan API token - using cache only")
+            cmd.append("--no-update")  # Skip update check when no token
+            cmd.append("--stealthy")  # More conservative scanning
 
         # FAIL FAST: Only try once, no endless retries
-        try:
-            cmd_env = os.environ.copy()
-            cmd_env["WPSCAN_CACHE_DIR"] = self.wpscan_cache_dir
-            
-            ret, out, err = run_command(cmd, timeout=60, env=cmd_env)
-            
-            # Any error means skip WPScan
-            if ret != 0:
-                logger.debug(f"[WP] WPScan failed with code {ret} - skipping (not critical)")
-                return {}
-            
-            # Parse output
-            if out:
-                try:
-                    data = json.loads(out)
-                    logger.info(f"[WP] WPScan enrichment successful")
-                    return data
-                except json.JSONDecodeError:
-                    logger.debug("[WP] Failed to parse WPScan output - skipping")
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                cmd_env = os.environ.copy()
+                cmd_env["WPSCAN_CACHE_DIR"] = self.wpscan_cache_dir
+                
+                ret, out, err = run_command(cmd, timeout=config.WPSCAN_TIMEOUT, env=cmd_env)
+                
+                # Handle specific exit codes
+                if ret == 5:
+                    logger.warning(f"[WP] WPScan exit code 5 - API token or parameter issue")
+                    # Try without API token on retry
+                    if self.wps_token and attempt == 0:
+                        logger.debug("[WP] Retrying WPScan without API token...")
+                        self.wps_token = ""
+                        cmd = [c for c in cmd if c != "--api-token" and not (cmd[cmd.index(c)-1:cmd.index(c)+2] if cmd.index(c) > 0 else False)]
+                        continue
+                    else:
+                        logger.debug(f"[WP] WPScan failed with code 5 - skipping (likely API token invalid)")
+                        return {}
+                
+                if ret != 0:
+                    logger.debug(f"[WP] WPScan failed with code {ret} - skipping (not critical)")
                     return {}
-                    
-        except Exception as e:
-            logger.debug(f"[WP] WPScan execution failed: {str(e)[:50]} - skipping")
-            return {}
+                
+                # Parse output
+                if out:
+                    try:
+                        data = json.loads(out)
+                        logger.info(f"[WP] WPScan enrichment successful")
+                        return data
+                    except json.JSONDecodeError:
+                        logger.debug("[WP] Failed to parse WPScan output - skipping")
+                        return {}
+                
+                # Success - exit retry loop
+                break
+                        
+            except Exception as e:
+                logger.debug(f"[WP] WPScan execution failed: {str(e)[:50]} - skipping")
+                return {}
         
         return {}
 

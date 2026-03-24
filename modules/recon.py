@@ -15,6 +15,7 @@ import urllib.request
 from typing import List, Set, Dict, Callable, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import config
 from core.state_manager import StateManager
 from core.executor import check_tools, run_command, tool_available
 from integrations.subfinder_runner import SubfinderRunner
@@ -92,6 +93,11 @@ class ReconEngine:
         if progress_cb:
             progress_cb("recon", "http-validate", "running")
         live_hosts = self.validate_live_hosts(all_urls)
+
+        if len(live_hosts) < config.MIN_LIVE_HOSTS_FOR_FALLBACK and len(all_urls) > 100:
+            logger.warning(f"[RECON] Only {len(live_hosts)} live hosts, attempting fallback validation")
+            live_hosts = self.validate_live_hosts(all_urls[:500], timeout=10)
+
         self.state.update(live_hosts=live_hosts)
         if progress_cb:
             progress_cb("recon", "http-validate", "done")
@@ -146,6 +152,15 @@ class ReconEngine:
             self.state.update(urls=all_urls)
 
         logger.info(f"[RECON] Completed: {len(subdomains)} subdomains, {len(archived_urls)} archived URLs, {len(live_hosts)} live hosts")
+
+    def _fallback_to_archived_data(self, urls: List[str]) -> List[str]:
+        """Khi crawler timeout, sử dụng dữ liệu đã crawl từ Wayback/GAU"""
+        logger.info("[RECON] Using archived data as fallback")
+        archived = self.state.get("archived_urls", [])
+        if archived:
+            logger.info(f"[RECON] Fallback: using {len(archived)} archived URLs")
+            return archived
+        return urls
 
     def _load_recon_cache(self) -> Optional[Dict[str, List[str]]]:
         ttl_hours = int(self.budget.get("recon_cache_ttl_hours", 24))
@@ -360,7 +375,7 @@ class ReconEngine:
         logger.info(f"[RECON] Merged to {len(normalized)} unique URLs (using {target_scheme}:// scheme)")
         return normalized
 
-    def validate_live_hosts(self, urls: List[str]) -> List[Dict]:
+    def validate_live_hosts(self, urls: List[str], timeout: Optional[int] = None) -> List[Dict]:
         """Validate which hosts are live"""
         logger.info("[RECON] Validating live hosts")
 
@@ -390,7 +405,7 @@ class ReconEngine:
             return None
 
         max_urls = int(self.budget.get("recon_validate_urls", 120))
-        timeout = int(self.budget.get("live_timeout", 6))
+        timeout = int(timeout if timeout is not None else self.budget.get("live_timeout", 6))
         workers = int(self.budget.get("recon_validate_workers", 16))
 
         # Use ThreadPoolExecutor for parallel checking

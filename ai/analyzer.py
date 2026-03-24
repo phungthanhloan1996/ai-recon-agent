@@ -142,6 +142,12 @@ class AIAnalyzer:
             if any(ext in url for ext in ['.css', '.js', '.png', '.jpg', '.svg', '.woff']):
                 logger.debug(f"[FILTER] Rejecting {v.get('type')} @ {url} (static file)")
                 continue
+
+            # Rule 2.5: Skip URLs with malformed structure
+            malformed_patterns = ['&lt;', '&gt;', '<script', '>script', 'nameresolutionerror']
+            if any(pattern in url for pattern in malformed_patterns):
+                logger.debug(f"[FILTER] Rejecting {v.get('type')} @ {url[:80]} (malformed URL)")
+                continue
             
             # Rule 3: Must have evidence
             evidence = v.get('evidence', []) or v.get('indicators', [])

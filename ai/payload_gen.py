@@ -5,8 +5,11 @@ Mutate payload để bypass WAF
 """
 
 import logging
+import threading
+import time
 import base64
 import json
+import random
 import urllib.request
 import urllib.error
 from typing import Dict, List
@@ -216,54 +219,135 @@ class PayloadGenerator:
     def __init__(self, ai_client=None):
         # ai_client là groq_key (string) được pass từ agent.py
         self.ai_client = ai_client
+        # Giới hạn concurrent Groq calls tránh 429
+        self._groq_semaphore = threading.Semaphore(max(1, config.GROQ_MAX_CONCURRENCY))
+        self._groq_lock = threading.Lock()
+        self._last_groq_call = 0
+        self._groq_min_interval = max(0.0, config.GROQ_MIN_INTERVAL)
         self._groq_key = ai_client if isinstance(ai_client, str) and len(ai_client) > 10 else None
         self._groq_model = config.PRIMARY_AI_MODEL
+        self._groq_cache = {}
+        self._groq_disabled_until = 0.0
+        self._groq_consecutive_429 = 0
         self.waf_bypass_cache = {}
         # WAF context được set từ agent sau _ai_decide()
         self.waf_context = {"waf_name": None, "bypass_mode": "NONE", "failed_patterns": []}
 
+    def _groq_cache_key(self, vuln_type: str, parameters: List[str]) -> str:
+        return json.dumps({
+            "vuln_type": vuln_type.lower(),
+            "parameters": sorted({str(p).lower() for p in parameters[:5]}),
+            "waf": self.waf_context.get("waf_name"),
+            "bypass": self.waf_context.get("bypass_mode", "NONE"),
+            "failed": self.waf_context.get("failed_patterns", [])[:4],
+        }, sort_keys=True)
+
     def _call_groq_for_payloads(self, vuln_type: str, parameters: List[str]) -> List[str]:
         """Gọi Groq API để sinh payload thông minh. Trả về [] nếu lỗi."""
-        if not self._groq_key:
+        category = (vuln_type or "").lower()
+        if (
+            not self._groq_key
+            or not config.GROQ_ENABLE_PAYLOADS
+            or category not in config.GROQ_ALLOWED_CATEGORIES
+        ):
             return []
+
+        cache_key = self._groq_cache_key(vuln_type, parameters)
+        cached = self._groq_cache.get(cache_key)
+        now = time.time()
+        if cached and (now - cached["ts"]) < config.GROQ_CACHE_TTL_SECONDS:
+            logger.debug(f"[GROQ] Cache hit for {category}")
+            return list(cached["payloads"])
+
+        if now < self._groq_disabled_until:
+            logger.debug(f"[GROQ] Circuit breaker active for {category}")
+            return []
+
+        # Throttle: max 2 concurrent + 1s giữa các call
+        self._groq_semaphore.acquire()
         try:
-            user_msg = json.dumps({
-                "vuln_type": vuln_type,
-                "parameters": parameters[:5],
-                "waf_detected": self.waf_context.get("waf_name"),
-                "bypass_mode": self.waf_context.get("bypass_mode", "NONE"),
-                "failed_patterns": self.waf_context.get("failed_patterns", [])[:8],
-                "existing_sample": []
-            })
-            payload = json.dumps({
-                "model": self._groq_model,
-                "messages": [
-                    {"role": "system", "content": _PAYLOAD_GEN_SYSTEM},
-                    {"role": "user", "content": user_msg}
-                ],
-                "max_tokens": 800,
-                "temperature": 0.4
-            }).encode("utf-8")
-            req = urllib.request.Request(
-                "https://api.groq.com/openai/v1/chat/completions",
-                data=payload,
-                headers={
-                    "Content-Type": "application/json",
-                    "Authorization": f"Bearer {self._groq_key}"
-                }
-            )
-            with urllib.request.urlopen(req, timeout=12) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-                raw = data["choices"][0]["message"]["content"].strip()
-                # Strip markdown fences nếu có
-                raw = raw.lstrip("```json").lstrip("```").rstrip("```").strip()
-                result = json.loads(raw)
-                if isinstance(result, list):
-                    logger.info(f"[GROQ] Generated {len(result)} AI payloads for {vuln_type}")
-                    return [str(p) for p in result if p]
-        except Exception as e:
-            logger.debug(f"[GROQ] Payload gen failed: {e}")
-        return []
+            with self._groq_lock:
+                now = time.time()
+                elapsed = now - self._last_groq_call
+                if elapsed < self._groq_min_interval:
+                    time.sleep(self._groq_min_interval - elapsed)
+                self._last_groq_call = time.time()
+
+            max_retries = max(1, config.GROQ_MAX_RETRIES)
+            base_delay = 1
+
+            for attempt in range(max_retries):
+                try:
+                    user_msg = json.dumps({
+                        "vuln_type": vuln_type,
+                        "parameters": parameters[:5],
+                        "waf_detected": self.waf_context.get("waf_name"),
+                        "bypass_mode": self.waf_context.get("bypass_mode", "NONE"),
+                        "failed_patterns": self.waf_context.get("failed_patterns", [])[:8],
+                        "existing_sample": []
+                    })
+                    payload = json.dumps({
+                        "model": self._groq_model,
+                        "messages": [
+                            {"role": "system", "content": _PAYLOAD_GEN_SYSTEM},
+                            {"role": "user", "content": user_msg}
+                        ],
+                        "max_tokens": 800,
+                        "temperature": 0.4
+                    }).encode("utf-8")
+                    req = urllib.request.Request(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        data=payload,
+                        headers={
+                            "Content-Type": "application/json",
+                            "User-Agent": "python-requests/2.31.0",
+                            "Authorization": f"Bearer {self._groq_key}"
+                        }
+                    )
+                    with urllib.request.urlopen(req, timeout=12) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                        raw = data["choices"][0]["message"]["content"].strip()
+                        raw = raw.lstrip("```json").lstrip("```").rstrip("```").strip()
+                        result = json.loads(raw)
+                        if isinstance(result, list):
+                            self._groq_consecutive_429 = 0
+                            payloads = [str(p) for p in result if p]
+                            self._groq_cache[cache_key] = {"ts": time.time(), "payloads": payloads}
+                            logger.info(f"[GROQ] Generated {len(result)} AI payloads for {vuln_type}")
+                            return payloads
+                except urllib.error.HTTPError as e:
+                    if e.code == 429:
+                        self._groq_consecutive_429 += 1
+                        if self._groq_consecutive_429 >= config.GROQ_429_CIRCUIT_BREAKER:
+                            self._groq_disabled_until = time.time() + config.GROQ_429_COOLDOWN_SECONDS
+                            logger.warning(
+                                f"[GROQ] Circuit breaker enabled for {config.GROQ_429_COOLDOWN_SECONDS}s after repeated 429s"
+                            )
+                            return []
+                        if attempt < max_retries - 1:
+                            delay = (base_delay * (2 ** attempt)) + random.uniform(0.1, 0.5)
+                            logger.debug(f"[GROQ] HTTP 429 on attempt {attempt + 1}, backing off {delay}s...")
+                            time.sleep(delay)
+                            continue
+                        else:
+                            logger.warning(f"[GROQ] Exhausted retries for 429 after {max_retries} attempts")
+                    else:
+                        logger.debug(f"[GROQ] HTTP error {e.code}: {e}")
+                        break
+                except urllib.error.URLError as e:
+                    if attempt < max_retries - 1:
+                        logger.debug(f"[GROQ] Network error attempt {attempt + 1}: {e}, retrying...")
+                        time.sleep(base_delay * (2 ** attempt))
+                        continue
+                    else:
+                        logger.debug(f"[GROQ] Network error exhausted retries: {e}")
+                except Exception as e:
+                    logger.debug(f"[GROQ] Payload gen failed attempt {attempt + 1}: {e}")
+                    if attempt < max_retries - 1:
+                        time.sleep(base_delay * (2 ** attempt))
+            return []
+        finally:
+            self._groq_semaphore.release()
 
     def generate_xss(self, context: str = "html", count: int = 10) -> List[str]:
         """Generate XSS payloads for a given context"""
@@ -432,7 +516,7 @@ class PayloadGenerator:
             return shells["php_obf"]
         return shells.get(language, shells["php"])
 
-    def generate_for_category(self, category: str, parameters: List[str] = None) -> List[Dict]:
+    def generate_for_category(self, category: str, parameters: List[str] = None, include_ai: bool = True) -> List[Dict]:
         """Generate payloads for a specific vulnerability category"""
         if parameters is None:
             parameters = []
@@ -453,7 +537,7 @@ class PayloadGenerator:
             strings = self.generate_xss(count=5)
 
         # Bổ sung payload thông minh từ Groq nếu có key
-        ai_payloads = self._call_groq_for_payloads(category, parameters)
+        ai_payloads = self._call_groq_for_payloads(category, parameters) if include_ai else []
         if ai_payloads:
             existing = set(strings)
             strings = strings + [p for p in ai_payloads if p not in existing]

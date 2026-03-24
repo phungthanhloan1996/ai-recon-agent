@@ -36,8 +36,8 @@ class ErrorRecovery:
             'mitigations': ['prepend https://', 'validate URL format', 'extract domain properly']
         },
         'invalid_url': {
-            'causes': ['malformed URL', 'invalid characters', 'encoding issue'],
-            'mitigations': ['URL encode parameters', 'validate URL structure', 'use URL normalizer']
+            'causes': ['malformed URL', 'invalid characters', 'NameResolutionError', 'label empty'],
+            'mitigations': ['URL-encode payload', 'skip malformed URL', 'validate URL structure']
         },
         'ssl_error': {
             'causes': ['invalid certificate', 'self-signed cert'],
@@ -127,6 +127,13 @@ class ErrorRecovery:
             pattern = self.ERROR_PATTERNS[error_type]
             recovery['mitigations'] = pattern['mitigations']
 
+        if error_type == 'invalid_url':
+            recovery['recommended_action'] = 'skip'
+            recovery['skip'] = True
+            recovery['retry'] = False
+            recovery['reason'] = 'Malformed URL detected - skipping to avoid cascading errors'
+            return recovery
+
         # Decide on action based on error count
         error_count = self.error_count[phase]
         
@@ -209,6 +216,12 @@ class ErrorRecovery:
             return 'ssl_error'
         elif 'scheme' in error_lower or 'no scheme' in error_lower:
             return 'no_scheme_supplied'
+        elif 'nameresolutionerror' in error_lower or 'failed to resolve' in error_lower:
+            return 'invalid_url'
+        elif 'label empty' in error_lower or 'too long' in error_lower:
+            return 'invalid_url'
+        elif 'port could not be cast' in error_lower:
+            return 'invalid_url'
         elif 'url' in error_lower or 'invalid' in error_lower or 'malformed' in error_lower:
             return 'invalid_url'
         elif 'permission' in error_lower or 'denied' in error_lower or 'forbidden' in error_lower:
