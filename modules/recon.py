@@ -9,6 +9,7 @@ import logging
 import ssl
 import socket
 import time
+import posixpath
 from urllib.parse import urlparse
 from urllib.parse import urljoin, quote
 import urllib.request
@@ -25,6 +26,11 @@ from integrations.wayback_runner import WaybackRunner
 logger = logging.getLogger("recon.engine")
 # Constants
 RECON_TOOLS = ["subfinder", "assetfinder", "crtsh", "gau", "waybackurls"]
+STATIC_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".ico", ".bmp",
+    ".pdf", ".zip", ".rar", ".7z", ".tar", ".gz", ".mp3", ".mp4", ".avi",
+    ".mov", ".woff", ".woff2", ".ttf", ".eot", ".css", ".map", ".js"
+}
 
 class ReconEngine:
     """
@@ -303,6 +309,8 @@ class ReconEngine:
                 }
                 urls.update(wb_urls)
 
+        urls = set(self._filter_useful_urls(urls))
+
         # Save to file
         archived_file = os.path.join(self.output_dir, "archived_urls.txt")
         with open(archived_file, 'w') as f:
@@ -365,12 +373,13 @@ class ReconEngine:
             all_urls.add(f"{target_scheme}://{sub}")
         
         # Add archived URLs (already include scheme from sources)
-        all_urls.update(archived_urls)
+        all_urls.update(self._filter_useful_urls(archived_urls))
 
         # Normalize URLs
         from core.url_normalizer import URLNormalizer
         normalizer = URLNormalizer()
         normalized = normalizer.normalize_urls(list(all_urls))
+        normalized = self._filter_useful_urls(normalized)
 
         logger.info(f"[RECON] Merged to {len(normalized)} unique URLs (using {target_scheme}:// scheme)")
         return normalized
@@ -410,7 +419,7 @@ class ReconEngine:
 
         # Use ThreadPoolExecutor for parallel checking
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            sample_urls = urls[:max_urls]
+            sample_urls = self._select_validation_candidates(urls, max_urls)
             futures = [executor.submit(check_url, url) for url in sample_urls]
             for future in as_completed(futures):
                 result = future.result()
@@ -450,7 +459,10 @@ class ReconEngine:
                 query = f"%25.{self.target}"
                 url = f"https://crt.sh/?q={quote(query)}&output=json"
                 with urllib.request.urlopen(url, timeout=10) as resp:
-                    data = json.loads(resp.read().decode('utf-8'))
+                    raw = resp.read().decode('utf-8', errors='replace').strip()
+                    if not raw.startswith("["):
+                        raise ValueError(f"Unexpected CT response prefix: {raw[:80]}")
+                    data = json.loads(raw)
                 
                 subdomains = set()
                 for entry in data[:50]:  # Limit to first 50
@@ -469,6 +481,58 @@ class ReconEngine:
                 logger.warning(f"[RECON] CT lookup failed after retry: {e}")
                 return []
         return []
+
+    def _filter_useful_urls(self, urls) -> List[str]:
+        filtered: List[str] = []
+        seen = set()
+        for raw_url in urls:
+            url = (raw_url or "").strip()
+            if not url or url in seen:
+                continue
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                continue
+            path = parsed.path or "/"
+            ext = os.path.splitext(path.lower())[1]
+            if ext in STATIC_EXTENSIONS:
+                continue
+            if len(url) > 2048:
+                continue
+            if parsed.query.count("*") > 2:
+                continue
+            if any(seg in {"wp-content", "uploads"} for seg in path.lower().split("/")) and ext:
+                continue
+            normalized_path = posixpath.normpath(path)
+            if normalized_path.startswith("/../"):
+                continue
+            seen.add(url)
+            filtered.append(url)
+        return filtered
+
+    def _select_validation_candidates(self, urls: List[str], max_urls: int) -> List[str]:
+        candidates = []
+        seen_hosts = set()
+
+        def score(url: str):
+            parsed = urlparse(url)
+            path = parsed.path or "/"
+            ext = os.path.splitext(path.lower())[1]
+            path_depth = len([part for part in path.split("/") if part])
+            query_penalty = 1 if parsed.query else 0
+            static_penalty = 3 if ext in STATIC_EXTENSIONS else 0
+            return (static_penalty, query_penalty, path_depth, len(path), len(url))
+
+        for url in sorted(self._filter_useful_urls(urls), key=score):
+            host = urlparse(url).hostname or ""
+            if not host:
+                continue
+            if host in seen_hosts and len(candidates) >= max_urls // 2:
+                continue
+            seen_hosts.add(host)
+            candidates.append(url)
+            if len(candidates) >= max_urls:
+                break
+        return candidates
 
     def fallback_dns_enumeration(self) -> List[str]:
         """Bruteforce common subdomains with DNS resolution"""

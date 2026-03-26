@@ -8,6 +8,7 @@ import os
 import logging
 import tempfile
 import shutil
+import time
 from datetime import datetime
 from typing import Any, Dict, List
 from dataclasses import dataclass, field, asdict
@@ -40,6 +41,7 @@ class ScanState:
 
     # Phase 4 - Prioritized endpoints
     prioritized_endpoints: List[Dict] = field(default_factory=list)
+    endpoint_probe_results: List[Dict] = field(default_factory=list)
     tech_stack: List[str] = field(default_factory=list)
 
     # Phase 5 - Vulnerabilities & Findings
@@ -60,6 +62,8 @@ class ScanState:
     wp_users: List[str] = field(default_factory=list)
     wp_vulns: List[Dict] = field(default_factory=list)
     wp_vulnerabilities: List[Dict] = field(default_factory=list)
+    wp_core: Dict[str, Any] = field(default_factory=dict)
+    core_vulnerabilities: List[Dict] = field(default_factory=list)
     wp_conditioned_findings: List[Dict] = field(default_factory=list)
     wp_version: str = "unknown"
     wp_scan_confidence: float = 0.0
@@ -84,6 +88,9 @@ class StateManager:
     def __init__(self, target: str, output_dir: str):
         self.output_dir = output_dir
         self.state_file = os.path.join(output_dir, "state.json")
+        self._last_save_ts = 0.0
+        self._dirty = False
+        self._save_interval = float(os.getenv("STATE_SAVE_INTERVAL_SECONDS", "2"))
         self.state = ScanState(
             target=target,
             scan_id=os.path.basename(output_dir),
@@ -106,7 +113,8 @@ class StateManager:
                     setattr(self.state, key, merged)
                 else:
                     setattr(self.state, key, value)
-        self.save()
+        self._dirty = True
+        self.save(force=False)
 
     def add_subdomain(self, subdomain: str):
         if subdomain not in self.state.subdomains:
@@ -139,13 +147,19 @@ class StateManager:
     def set_phase(self, phase: str):
         self.state.current_phase = phase
         logger.info(f"[STATE] Phase → {phase}")
-        self.save()
+        self._dirty = True
+        self.save(force=True)
 
     def get(self, key: str, default=None) -> Any:
         return getattr(self.state, key, default)
 
-    def save(self):
+    def save(self, force: bool = True):
         """Save state atomically (write to temp, then rename) to prevent corruption"""
+        now = time.time()
+        if not force and not self._dirty:
+            return
+        if not force and (now - self._last_save_ts) < self._save_interval:
+            return
         try:
             os.makedirs(self.output_dir, exist_ok=True)
             
@@ -157,6 +171,8 @@ class StateManager:
                 
                 # Atomic rename
                 shutil.move(temp_path, self.state_file)
+                self._last_save_ts = now
+                self._dirty = False
                 logger.debug(f"[STATE] State saved atomically to {self.state_file}")
             except Exception as e:
                 # Clean up temp file if something went wrong
@@ -172,6 +188,8 @@ class StateManager:
             try:
                 with open(self.state_file, "w") as f:
                     json.dump(asdict(self.state), f, indent=2, default=str)
+                self._last_save_ts = now
+                self._dirty = False
                 logger.warning("[STATE] Saved state using fallback method")
             except Exception as e2:
                 logger.error(f"[STATE] Fallback save also failed: {e2}")
@@ -246,6 +264,23 @@ class StateManager:
                 return False
         return False
 
+
+
+    def __getitem__(self, key: str):
+        """Cho phép đọc: state['some_key']"""
+        return getattr(self.state, key, None)
+
+    def __setitem__(self, key: str, value: Any):
+        """Cho phép gán: state['some_key'] = value   ← Đây là fix chính"""
+        # Allow setting both existing and new keys
+        setattr(self.state, key, value)
+        self.save()
+
+    def __contains__(self, key: str) -> bool:
+        """Cho phép kiểm tra: if 'key' in state"""
+        return hasattr(self.state, key)
+
+
     def summary(self) -> Dict:
         s = self.state
         return {
@@ -259,3 +294,5 @@ class StateManager:
             "wordpress": s.wordpress_detected,
             "wp_plugins": len(s.wp_plugins),
         }
+
+

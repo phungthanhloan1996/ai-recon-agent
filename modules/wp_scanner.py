@@ -20,6 +20,7 @@ from core.state_manager import StateManager
 from core.http_engine import HTTPClient
 from core.executor import tool_available, run_command
 from core.cve_matcher import match_any_range
+from integrations.cve_lookup import CVELookup
 
 logger = logging.getLogger("recon.wordpress")
 
@@ -607,6 +608,7 @@ class WordPressScannerEngine:
             "themes": [],
             "users": [],
             "vulnerabilities": [],
+            "core_vulnerabilities": [],
             "source": "wp_advanced_scan"  # Track source
         }
 
@@ -674,9 +676,65 @@ class WordPressScannerEngine:
         # ✅ STEP 5: Check for known vulnerabilities
         known_vulns = self._check_known_vulnerabilities(url, site_info)
         site_info["vulnerabilities"].extend(known_vulns)
+
+        # ✅ STEP 6: Enrich detected components with CVEs without changing scan flow
+        self._enrich_site_info_with_cves(site_info)
         site_info["conditioned_findings"] = self._build_conditioned_findings(site_info)
 
         return site_info
+
+    def _enrich_site_info_with_cves(self, site_info: Dict[str, Any]):
+        """Attach CVEs to detected WordPress components using fail-safe lookups."""
+        try:
+            cve_lookup = CVELookup()
+        except Exception as e:
+            logger.warning(f"[WP] CVE lookup initialization failed: {e}")
+            return
+
+        for plugin in site_info.get("plugins", []):
+            if not isinstance(plugin, dict):
+                continue
+            plugin.setdefault("vulnerabilities", [])
+            if plugin["vulnerabilities"]:
+                continue
+            name = plugin.get("name")
+            version = plugin.get("version")
+            if not name or not version or str(version).lower() == "unknown":
+                continue
+            try:
+                cves = cve_lookup.get_wp_plugin_cves(name, version)
+                if cves:
+                    plugin["vulnerabilities"] = cves
+                    logger.warning(f"[WP] {name} v{version} has {len(cves)} CVEs")
+            except Exception as e:
+                logger.warning(f"[WP] Plugin CVE lookup failed for {name}: {e}")
+
+        for theme in site_info.get("themes", []):
+            if not isinstance(theme, dict):
+                continue
+            theme.setdefault("vulnerabilities", [])
+            if theme["vulnerabilities"]:
+                continue
+            name = theme.get("name")
+            version = theme.get("version")
+            if not name or not version or str(version).lower() == "unknown":
+                continue
+            try:
+                cves = cve_lookup.get_wp_theme_cves(name, version)
+                if cves:
+                    theme["vulnerabilities"] = cves
+                    logger.warning(f"[WP] Theme {name} v{version} has {len(cves)} CVEs")
+            except Exception as e:
+                logger.warning(f"[WP] Theme CVE lookup failed for {name}: {e}")
+
+        if site_info.get("version") and not site_info.get("core_vulnerabilities"):
+            try:
+                cves = cve_lookup.get_wp_core_cves(site_info["version"])
+                if cves:
+                    site_info["core_vulnerabilities"] = cves
+                    logger.warning(f"[WP] WordPress {site_info['version']} has {len(cves)} CVEs")
+            except Exception as e:
+                logger.warning(f"[WP] Core CVE lookup failed for {site_info.get('version')}: {e}")
 
     def _normalize_component_name(self, name: str) -> str:
         return (name or "").strip().lower().replace("_", "-")
@@ -1105,6 +1163,8 @@ class WordPressScannerEngine:
         all_users = []
         all_vulns = []
         all_conditioned = []
+        all_core_vulns = []
+        wp_core = {}
 
         for site_result in results.values():
             all_plugins.extend(site_result.get("plugins", []))
@@ -1112,6 +1172,13 @@ class WordPressScannerEngine:
             all_users.extend(site_result.get("users", []))
             all_vulns.extend(site_result.get("vulnerabilities", []))
             all_conditioned.extend(site_result.get("conditioned_findings", []))
+            all_core_vulns.extend(site_result.get("core_vulnerabilities", []))
+            if not wp_core and (site_result.get("version") or site_result.get("core_vulnerabilities")):
+                wp_core = {
+                    "version": site_result.get("version"),
+                    "vulnerabilities": site_result.get("core_vulnerabilities", []),
+                    "url": site_result.get("url"),
+                }
 
         self.state.update(
             wordpress_detected=True,
@@ -1120,6 +1187,9 @@ class WordPressScannerEngine:
             wp_themes=all_themes,
             wp_users=list(set(all_users)),
             wp_vulnerabilities=all_vulns,
+            wp_core=wp_core,
+            core_vulnerabilities=all_core_vulns,
+            wp_version=(wp_core.get("version") or self.state.get("wp_version", "unknown")),
             wp_conditioned_findings=all_conditioned
         )
 

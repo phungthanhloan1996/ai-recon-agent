@@ -7,6 +7,7 @@ import requests
 import logging
 import time
 import threading
+from requests.exceptions import ConnectTimeout, ConnectionError as RequestsConnectionError, ReadTimeout
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib3.exceptions import HeaderParsingError, NameResolutionError
@@ -31,7 +32,15 @@ class HTTPClient:
 
     def __init__(self, session_manager=None, timeout: int = None, max_retries: int = 3):
         self.session = requests.Session()
-        self.timeout = timeout or config.HTTP_TIMEOUT
+        self.base_timeout = timeout or config.HTTP_TIMEOUT
+
+        # Adaptive timeout profiles
+        self.timeouts = {
+            "fast": self.base_timeout,
+            "normal": int(self.base_timeout * 1.5),
+            "slow": int(self.base_timeout * 3),
+            "exploit": int(self.base_timeout * 5)
+        }
         self.max_retries = max_retries
         self.session_manager = session_manager
         self.last_request_time = 0
@@ -47,7 +56,11 @@ class HTTPClient:
 
         # ENHANCED: Connection pool of 50, with exponential backoff
         retry_strategy = Retry(
-            total=max_retries,  # Retry up to 3 times
+            total=max_retries,
+            connect=0,
+            read=0,
+            redirect=0,
+            other=0,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE"],
             backoff_factor=config.HTTP_BACKOFF_FACTOR,
@@ -82,10 +95,14 @@ class HTTPClient:
         
         # Normalize URL for localhost - skip HTTPS
         url = self._normalize_url(url)
+        is_valid, msg = self._validate_url(url)
+        if not is_valid:
+            logger.warning(f"[HTTP] Skipping invalid URL: {msg}")
+            raise ValueError(f"Invalid URL: {msg}")
         
         # Check cache for unreachable ports - fail fast
         parsed = urlparse(url)
-        host = parsed.netloc or parsed.hostname or ""
+        host = parsed.hostname or parsed.netloc or ""
         if host in self._dead_hosts:
             error = ConnectionError(f"Skipping dead host: {host}")
             logger.debug(f"[HTTP] {error}")
@@ -96,7 +113,10 @@ class HTTPClient:
             logger.debug(f"[HTTP] Skipping unreachable {url}: {error}")
             raise error
         
-        kwargs.setdefault('timeout', self.timeout)
+        timeout_mode = kwargs.pop("timeout_mode", "normal")
+        timeout_value = self.timeouts.get(timeout_mode, self.base_timeout)
+
+        kwargs.setdefault('timeout', timeout_value)
         kwargs.setdefault('allow_redirects', True)
         kwargs.setdefault('verify', config.SSL_VERIFY)
         
@@ -106,9 +126,9 @@ class HTTPClient:
             self._handle_rate_limit_response(response, url)
             self._update_session(response)
             return response
-        except ConnectionError as e:
+        except (ConnectionError, RequestsConnectionError) as e:
             if self._is_name_resolution_error(e):
-                self._record_dead_host_error(host)
+                self._record_dead_host_error(host, hard=True)
                 logger.error(f"GET request failed for {url}: {e}")
                 raise
             # Cache connection refused errors
@@ -130,6 +150,9 @@ class HTTPClient:
             
             logger.error(f"GET request failed for {url}: {e}")
             raise
+        except (ReadTimeout, ConnectTimeout) as e:
+            logger.error(f"GET request timed out for {url}: {e}")
+            raise
         except HeaderParsingError as e:
             logger.warning(f"Failed to parse headers (url={url}): {e}")
             try:
@@ -142,7 +165,7 @@ class HTTPClient:
                 raise e2
         except Exception as e:
             if self._is_name_resolution_error(e):
-                self._record_dead_host_error(host)
+                self._record_dead_host_error(host, hard=True)
             logger.error(f"GET request failed for {url}: {e}")
             raise
 
@@ -153,12 +176,19 @@ class HTTPClient:
         
         # Normalize URL for localhost - skip HTTPS
         url = self._normalize_url(url)
+        is_valid, msg = self._validate_url(url)
+        if not is_valid:
+            logger.warning(f"[HTTP] Skipping invalid URL: {msg}")
+            raise ValueError(f"Invalid URL: {msg}")
         parsed = urlparse(url)
         host = parsed.netloc or parsed.hostname or ""
         if host in self._dead_hosts:
             raise ConnectionError(f"Skipping dead host: {host}")
         
-        kwargs.setdefault('timeout', self.timeout)
+        timeout_mode = kwargs.pop("timeout_mode", "normal")
+        timeout_value = self.timeouts.get(timeout_mode, self.base_timeout)
+
+        kwargs.setdefault('timeout', timeout_value)
         kwargs.setdefault('verify', config.SSL_VERIFY)
         
         try:
@@ -167,16 +197,22 @@ class HTTPClient:
             self._handle_rate_limit_response(response, url)
             self._update_session(response)
             return response
+        except (ReadTimeout, ConnectTimeout) as e:
+            logger.error(f"POST request timed out for {url}: {e}")
+            raise
         except Exception as e:
             if self._is_name_resolution_error(e):
-                self._record_dead_host_error(host)
+                self._record_dead_host_error(host, hard=True)
             logger.error(f"POST request failed for {url}: {e}")
             raise
 
-    def _record_dead_host_error(self, host: str):
+    def _record_dead_host_error(self, host: str, hard: bool = False):
         if not host:
             return
-        self._dead_host_errors[host] = self._dead_host_errors.get(host, 0) + 1
+        if hard:
+            self._dead_host_errors[host] = 3
+        else:
+            self._dead_host_errors[host] = self._dead_host_errors.get(host, 0) + 1
         if self._dead_host_errors[host] >= 3 and host not in self._dead_hosts:
             self._dead_hosts.add(host)
             logger.warning(f"[HTTP] Marking {host} as dead after 3 failures")
@@ -250,6 +286,33 @@ class HTTPClient:
                 url = url.replace(f'{parsed.scheme}://', f'{preferred_scheme}://', 1)
         
         return url
+
+    def _validate_url(self, url: str) -> tuple[bool, str]:
+        """Validate URL before sending request"""
+        if not url:
+            return False, "Empty URL"
+        try:
+            parsed = urlparse(url)
+            if not parsed.scheme or not parsed.netloc:
+                return False, f"Missing scheme or netloc: {url[:100]}"
+
+            invalid_patterns = ['<', '>', '"', "'", '&lt;', '&gt;', 'script', 'alert']
+            netloc_lower = parsed.netloc.lower()
+            for pattern in invalid_patterns:
+                if pattern in netloc_lower:
+                    return False, f"Hostname contains invalid characters: {parsed.netloc}"
+
+            try:
+                parsed.port
+            except ValueError as e:
+                return False, f"Invalid port: {e}"
+
+            if len(url) > config.MAX_URL_LENGTH:
+                return False, f"URL too long: {len(url)} chars"
+
+            return True, "OK"
+        except Exception as e:
+            return False, f"Parse error: {e}"
 
     def _rotate_headers(self):
         """Rotate user agent and other headers"""

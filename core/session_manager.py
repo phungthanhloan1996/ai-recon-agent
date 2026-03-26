@@ -7,6 +7,7 @@ import json
 import os
 import logging
 import requests
+import time
 from typing import Dict, Any
 
 logger = logging.getLogger("recon.session")
@@ -18,6 +19,9 @@ class SessionManager:
         self.cookies = {}
         self.headers = {}
         self.roles = {}
+        self._last_saved_payload = None
+        self._last_save_ts = 0.0
+        self._save_interval = float(os.getenv("SESSION_SAVE_INTERVAL_SECONDS", "5"))
 
     def login(self, login_url: str, credentials: Dict[str, str]) -> bool:
         """Attempt login and save session"""
@@ -28,7 +32,7 @@ class SessionManager:
             if response.status_code == 200 and "login" not in response.url.lower():
                 self.cookies = dict(session.cookies)
                 self.headers = {"Authorization": f"Bearer {self.cookies.get('token', '')}"} if "token" in self.cookies else {}
-                self._save_session()
+                self._save_session(force=True)
                 logger.info(f"[SESSION] Login successful at {login_url}")
                 return True
             else:
@@ -45,15 +49,22 @@ class SessionManager:
     def set_role_session(self, role: str, cookies: Dict[str, Any], headers: Dict[str, Any]):
         """Store authenticated session data for a role."""
         self.roles[role] = {"cookies": cookies or {}, "headers": headers or {}}
-        self._save_session()
+        self._save_session(force=True)
 
-    def _save_session(self):
+    def _save_session(self, force: bool = False):
+        payload = {"cookies": self.cookies, "headers": self.headers, "roles": self.roles}
+        serialized = json.dumps(payload, sort_keys=True, default=str)
+        now = time.time()
+        if not force:
+            if serialized == self._last_saved_payload:
+                return
+            if now - self._last_save_ts < self._save_interval:
+                return
+
         with open(self.session_file, "w") as f:
-            json.dump(
-                {"cookies": self.cookies, "headers": self.headers, "roles": self.roles},
-                f,
-                indent=2
-            )
+            json.dump(payload, f, indent=2)
+        self._last_saved_payload = serialized
+        self._last_save_ts = now
         logger.info(f"[SESSION] Saved session → {self.session_file}")
 
     def load_session(self):
@@ -76,5 +87,5 @@ class SessionManager:
                     self.cookies[key] = value
                     changed = True
             if changed:
-                self._save_session()
+                self._save_session(force=False)
                 logger.debug("[SESSION] Updated cookies from response")

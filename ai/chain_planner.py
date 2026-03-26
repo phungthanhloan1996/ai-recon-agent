@@ -4,8 +4,10 @@ Lên kế hoạch exploit chain dựa trên findings
 Ví dụ: user enum → password brute → login → upload plugin → reverse shell
 """
 
+import json
 import logging
-from typing import Dict, List, Optional
+import re
+from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
 from core.executor import run_command  # Thêm import để exec tools
@@ -340,6 +342,227 @@ class ChainPlanner:
         chains = self.smart_prioritize(chains)
 
         return chains
+
+
+class AIPoweredChainPlanner:
+    """
+    AI-powered chain planning bổ sung bên cạnh ChainPlanner cũ.
+    Không thay thế graph-based planner hiện tại, chỉ enrich thêm chains.
+    """
+
+    def __init__(self, groq_client=None):
+        self.groq = groq_client
+        self._ai_call_count = 0
+
+    def plan_chains(self, state: Dict) -> List[Dict]:
+        """Build additional chains from state without depending on the old planner API."""
+        vulnerabilities = state.get("vulnerabilities", []) or []
+        wp_plugins = state.get("wp_plugins", []) or []
+        wp_themes = state.get("wp_themes", []) or []
+        wp_core = state.get("wp_core", {}) or {}
+        tech_stack = state.get("tech_stack", []) or []
+        users = state.get("wp_users", []) or []
+        wordpress_detected = bool(state.get("wordpress_detected", False))
+
+        cves = self._collect_cves(wp_plugins, wp_themes, wp_core)
+        rule_chains = self._rule_based_chains(
+            wordpress_detected=wordpress_detected,
+            plugins=wp_plugins,
+            themes=wp_themes,
+            core=wp_core,
+            users=users,
+            vulns=vulnerabilities,
+        )
+
+        ai_chains: List[Dict] = []
+        if self.groq and (cves or vulnerabilities):
+            ai_chains = self._ai_chains(
+                {
+                    "target": state.get("target"),
+                    "tech_stack": tech_stack,
+                    "wordpress": {
+                        "detected": wordpress_detected,
+                        "version": wp_core.get("version") or state.get("wp_version"),
+                        "plugins": wp_plugins,
+                        "themes": wp_themes,
+                        "users": users,
+                    },
+                    "vulnerabilities": vulnerabilities[:10],
+                    "cves": cves[:10],
+                    "endpoints": state.get("prioritized_endpoints", [])[:10],
+                }
+            )
+
+        return self._merge_and_rank(rule_chains + ai_chains)
+
+    def _collect_cves(self, plugins: List[Dict], themes: List[Dict], core: Dict) -> List[Dict]:
+        cves: List[Dict] = []
+        for plugin in plugins:
+            for vuln in plugin.get("vulnerabilities", []) or []:
+                if vuln.get("cve"):
+                    cves.append(vuln)
+        for theme in themes:
+            for vuln in theme.get("vulnerabilities", []) or []:
+                if vuln.get("cve"):
+                    cves.append(vuln)
+        for vuln in core.get("vulnerabilities", []) or []:
+            if vuln.get("cve"):
+                cves.append(vuln)
+        return cves
+
+    def _rule_based_chains(
+        self,
+        wordpress_detected: bool,
+        plugins: List[Dict],
+        themes: List[Dict],
+        core: Dict,
+        users: List[str],
+        vulns: List[Dict],
+    ) -> List[Dict]:
+        chains: List[Dict] = []
+
+        if wordpress_detected:
+            for plugin in plugins:
+                plugin_vulns = plugin.get("vulnerabilities", []) or []
+                if plugin_vulns:
+                    first_vuln = plugin_vulns[0]
+                    chains.append(
+                        {
+                            "name": f"Exploit {plugin.get('name', 'plugin')} CVE -> RCE",
+                            "severity": "CRITICAL",
+                            "steps": [
+                                {"action": "verify_plugin_version", "target": plugin.get("name", "")},
+                                {"action": "exploit_cve", "cve": first_vuln.get("cve", "Unknown")},
+                                {"action": "get_shell"},
+                            ],
+                            "confidence": 0.8,
+                            "reasoning": f"Detected plugin {plugin.get('name')} with known CVE-backed issues.",
+                        }
+                    )
+
+            if core.get("vulnerabilities"):
+                first_vuln = core["vulnerabilities"][0]
+                chains.append(
+                    {
+                        "name": "Exploit WordPress Core CVE",
+                        "severity": "HIGH",
+                        "steps": [
+                            {"action": "verify_core_version", "target": core.get("version", "")},
+                            {"action": "exploit_cve", "cve": first_vuln.get("cve", "Unknown")},
+                        ],
+                        "confidence": 0.7,
+                        "reasoning": "Detected WordPress core version with known vulnerabilities.",
+                    }
+                )
+
+            if users:
+                chains.append(
+                    {
+                        "name": "WordPress Admin Takeover -> RCE",
+                        "severity": "CRITICAL",
+                        "steps": [
+                            {"action": "enum_users"},
+                            {"action": "bruteforce_password"},
+                            {"action": "upload_shell"},
+                        ],
+                        "confidence": 0.6,
+                        "reasoning": f"Found {len(users)} enumerated users and WordPress attack surface.",
+                    }
+                )
+
+        if any("xmlrpc" in (v.get("type", "") or "").lower() for v in vulns):
+            chains.append(
+                {
+                    "name": "XML-RPC Multicall Bruteforce",
+                    "severity": "HIGH",
+                    "steps": [
+                        {"action": "verify_xmlrpc"},
+                        {"action": "bruteforce_users"},
+                    ],
+                    "confidence": 0.7,
+                    "reasoning": "XML-RPC related behavior detected in vulnerabilities.",
+                }
+            )
+
+        for theme in themes:
+            theme_vulns = theme.get("vulnerabilities", []) or []
+            if theme_vulns:
+                first_vuln = theme_vulns[0]
+                chains.append(
+                    {
+                        "name": f"Exploit theme {theme.get('name', 'theme')} vulnerability",
+                        "severity": "HIGH",
+                        "steps": [
+                            {"action": "verify_theme_version", "target": theme.get("name", "")},
+                            {"action": "exploit_cve", "cve": first_vuln.get("cve", "Unknown")},
+                        ],
+                        "confidence": 0.65,
+                        "reasoning": "Detected theme with associated vulnerabilities.",
+                    }
+                )
+
+        return chains
+
+    def _ai_chains(self, context: Dict[str, Any]) -> List[Dict]:
+        if self._ai_call_count >= 2:
+            return []
+        self._ai_call_count += 1
+
+        prompt = f"""
+Phan tich context sau va de xuat chuoi tan cong hop ly.
+
+Target: {context.get('target')}
+Tech Stack: {', '.join(context.get('tech_stack', []))}
+WordPress detected: {context.get('wordpress', {}).get('detected')}
+WordPress version: {context.get('wordpress', {}).get('version')}
+Plugins detected: {len(context.get('wordpress', {}).get('plugins', []))}
+Themes detected: {len(context.get('wordpress', {}).get('themes', []))}
+Users detected: {len(context.get('wordpress', {}).get('users', []))}
+
+CVEs:
+{json.dumps(context.get('cves', []), indent=2, default=str)}
+
+Vulnerabilities:
+{json.dumps(context.get('vulnerabilities', []), indent=2, default=str)}
+
+Return ONLY a JSON list. Each item must contain:
+- name
+- severity
+- steps
+- confidence
+- reasoning
+"""
+        try:
+            response = self.groq.generate(prompt)
+            match = re.search(r"\[[\s\S]*\]", response)
+            if not match:
+                return []
+            parsed = json.loads(match.group(0))
+            return [item for item in parsed if isinstance(item, dict)]
+        except Exception as e:
+            logger.error(f"[AI-CHAIN] Failed: {e}")
+            return []
+
+    def _merge_and_rank(self, chains: List[Dict]) -> List[Dict]:
+        def rank(chain: Dict) -> float:
+            severity_score = {"CRITICAL": 100, "HIGH": 70, "MEDIUM": 40, "LOW": 10}.get(
+                str(chain.get("severity", "MEDIUM")).upper(),
+                0,
+            )
+            confidence_score = float(chain.get("confidence", 0) or 0) * 50
+            return severity_score + confidence_score
+
+        unique: List[Dict] = []
+        seen = set()
+        for chain in chains:
+            name = chain.get("name", "")
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            unique.append(chain)
+
+        unique.sort(key=rank, reverse=True)
+        return unique
 
     def smart_prioritize(self, chains: List[ExploitChain]) -> List[ExploitChain]:
         """AI-like prioritization based on impact, feasibility, and state data"""
@@ -1088,3 +1311,31 @@ class ChainPlanner:
             lines.append("=" * 60)
 
         return "\n".join(lines)
+
+
+# Restore legacy ChainPlanner helpers after introducing AIPoweredChainPlanner.
+for _method_name in [
+    "smart_prioritize",
+    "_build_conditioned_wp_chains",
+    "_calculate_impact_score",
+    "_calculate_likelihood_score",
+    "execute_chain",
+    "_check_prerequisites",
+    "_execute_step",
+    "_build_wp_admin_chain",
+    "_build_xmlrpc_chain",
+    "_build_sqli_chain",
+    "_build_upload_chain",
+    "_build_lfi_chain",
+    "_build_xss_chain",
+    "_build_wp_plugin_chain",
+    "combine_chains",
+    "_chains_overlap",
+    "_merge_chains",
+    "_detect_chain_patterns",
+    "_build_upload_admin_chain",
+    "_build_auth_bypass_chain",
+    "_build_lfi_log_poison_chain",
+    "format_chain_report",
+]:
+    setattr(ChainPlanner, _method_name, getattr(AIPoweredChainPlanner, _method_name))
