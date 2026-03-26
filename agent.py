@@ -103,6 +103,15 @@ from modules.live_hosts import LiveHostEngine
 from modules.auth_scanner import AuthScannerEngine
 from modules.toolkit_scanner import ToolkitScanner
 from modules.endpoint_probe import run_endpoint_probe
+from modules.js_endpoint_hunter import hunt_js_endpoints
+from modules.parameter_miner import mine_endpoint_parameters
+
+# ─── Core Intelligence Engines ──────────────────────────────────────────────
+from core.privilege_pivot_engine import analyze_privilege_escalation
+from core.automatic_exploit_selector import select_exploitation_strategy, select_all_strategies
+
+# ─── AI Intelligence Engines ────────────────────────────────────────────────
+from ai.adaptive_payload_engine import generate_adaptive_payloads
 
 
 # ─── API Key Check ───────────────────────────────────────────────────────────
@@ -1196,6 +1205,26 @@ class ReconAgent:
                     self._update_display()
                     self._run_wordpress_detection_from_state()
 
+                # Phase 4.3: JavaScript Endpoint Hunter
+                # Extract hidden endpoints from JS files
+                if self.iteration_count == 1 and not self._should_skip_phase("js_hunter"):
+                    self.current_phase = "hunt"
+                    self.phase_detail = "js-extraction"
+                    self.phase_tool = "endpoint-hunter"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_js_endpoint_hunt_phase()
+
+                # Phase 4.4: Parameter Miner
+                # Discover hidden parameters on endpoints
+                if self.iteration_count == 1 and not self._should_skip_phase("param_mine"):
+                    self.current_phase = "mine"
+                    self.phase_detail = "parameter-discovery"
+                    self.phase_tool = "param-fuzzer"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_parameter_mining_phase()
+
                 # Phase 4.5: Authenticated sessions bootstrap
                 if self.iteration_count == 1 and self.auth_file and not self._should_skip_phase("auth"):
                     self.current_phase = "auth"
@@ -1241,6 +1270,15 @@ class ReconAgent:
                     self._update_display()
                     self._run_analysis_phase()
                 
+                # Phase 8.5: Privilege Escalation Analysis
+                if "priv_pivot" not in self.completed_phases:
+                    self.current_phase = "pivot"
+                    self.phase_detail = "privilege-chains"
+                    self.phase_tool = "privilege-analyzer"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_privilege_pivot_phase()
+                
                 # Phase 9: Attack Graph
                 if "graph" not in self.completed_phases:
                     self.current_phase = "graph"
@@ -1258,6 +1296,15 @@ class ReconAgent:
                     self.phase_status = "running"
                     self._update_display()
                     self._run_chain_planning_phase(attack_graph)
+                
+                # Phase 10.5: Automatic Exploit Selection (LEVEL BOSS)
+                if "exploit_select" not in self.completed_phases:
+                    self.current_phase = "select"
+                    self.phase_detail = "strategy-selection"
+                    self.phase_tool = "exploit-selector"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_exploit_selection_phase()
                 
                 # Phase 11: Exploit Testing
                 if not self._should_skip_phase("exploit"):
@@ -3909,6 +3956,216 @@ Exploitability estimation:
         ranked_file = os.path.join(self.output_dir, "endpoints_ranked.json")
         with open(ranked_file, "w") as f:
             json.dump(final_targets, f, indent=2)
+
+    def _run_js_endpoint_hunt_phase(self):
+        """Phase 4.3: JavaScript Endpoint Hunting"""
+        self.phase_detail = "[HUNT] Extracting endpoints from JavaScript files..."
+        self._update_display()
+        
+        try:
+            # Get JS URLs from discovered endpoints
+            endpoints = self.state.get("endpoints", []) or []
+            js_urls = [
+                ep.get('url', '') for ep in endpoints 
+                if ep.get('url', '').endswith('.js')
+            ]
+            
+            if js_urls:
+                self.logger.info(f"[JS_HUNTER] Found {len(js_urls)} JS files to analyze")
+                self.last_action = f"hunting endpoints in {len(js_urls)} JS files"
+                self.phase_detail = f"[HUNT] Analyzing {len(js_urls)} JavaScript files..."
+                self._update_display()
+                
+                # Hunt for endpoints
+                results = hunt_js_endpoints(self.state, js_urls)
+                
+                new_endpoints = results.get('endpoints', [])
+                new_params = results.get('parameters', [])
+                
+                self.logger.warning(f"[JS_HUNTER] Found {len(new_endpoints)} new endpoints, {len(new_params)} parameters")
+                self.phase_detail = f"[HUNT] Extracted {len(new_endpoints)} endpoints, {len(new_params)} parameters"
+                self._update_display()
+                
+                if self.batch_display:
+                    self.batch_display._add_to_ai_feed(
+                        "JS Discovery",
+                        f"Found {len(new_endpoints)} JS endpoints",
+                        self.target
+                    )
+            else:
+                self.logger.info("[JS_HUNTER] No JS files found in endpoints")
+                self.phase_detail = "[HUNT] No JavaScript files to analyze"
+                self._update_display()
+        
+        except Exception as e:
+            self.logger.error(f"[JS_HUNTER] Error: {e}")
+            self.phase_detail = f"[HUNT] Error: {str(e)[:50]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("js_hunter")
+
+    def _run_parameter_mining_phase(self):
+        """Phase 4.4: Parameter Mining"""
+        self.phase_detail = "[MINE] Discovering hidden parameters..."
+        self._update_display()
+        
+        try:
+            endpoints = self.state.get("endpoints", []) or []
+            
+            if endpoints:
+                self.logger.info(f"[PARAM_MINER] Mining parameters on {len(endpoints)} endpoints")
+                self.last_action = f"mining parameters on {len(endpoints)} endpoints"
+                self.phase_detail = f"[MINE] Testing {min(50, len(endpoints))} endpoints for parameters..."
+                self._update_display()
+                
+                # Mine parameters
+                results = mine_endpoint_parameters(
+                    self.state, 
+                    endpoints,
+                    self.state.get('scan_metadata', {}).get('budget')
+                )
+                
+                mining_results = results.get('mining_results', [])
+                discovered = sum(
+                    len(r.get('discovered_parameters', [])) 
+                    for r in mining_results
+                )
+                
+                self.logger.warning(f"[PARAM_MINER] Discovered {discovered} parameters on {len(mining_results)} endpoints")
+                self.phase_detail = f"[MINE] Discovered {discovered} parameters"
+                self._update_display()
+                
+                if self.batch_display:
+                    self.batch_display._add_to_ai_feed(
+                        "Parameter Discovery",
+                        f"Found {discovered} parameters",
+                        self.target
+                    )
+            else:
+                self.logger.info("[PARAM_MINER] No endpoints available for mining")
+                self.phase_detail = "[MINE] No endpoints to mine"
+                self._update_display()
+        
+        except Exception as e:
+            self.logger.error(f"[PARAM_MINER] Error: {e}")
+            self.phase_detail = f"[MINE] Error: {str(e)[:50]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("param_mine")
+
+    def _run_privilege_pivot_phase(self):
+        """Phase 8.5: Privilege Escalation Analysis"""
+        self.phase_detail = "[PIVOT] Analyzing privilege escalation chains..."
+        self._update_display()
+        
+        try:
+            endpoints = self.state.get("endpoints", []) or []
+            vulnerabilities = self.state.get("vulnerabilities", []) or []
+            
+            if endpoints and vulnerabilities:
+                self.logger.info(f"[PIVOT] Analyzing {len(endpoints)} endpoints for privesc chains")
+                self.last_action = f"building privilege escalation chains"
+                self.phase_detail = f"[PIVOT] Building chains from {len(vulnerabilities)} vulnerabilities..."
+                self._update_display()
+                
+                # Analyze privilege escalation
+                chains = analyze_privilege_escalation(endpoints, vulnerabilities)
+                
+                self.logger.warning(f"[PIVOT] Generated {len(chains)} exploitation chains")
+                self.phase_detail = f"[PIVOT] Built {len(chains)} attack chains"
+                self._update_display()
+                
+                # Store chains in state
+                self.state.update(privilege_escalation_chains=chains)
+                
+                if self.batch_display:
+                    self.batch_display._add_to_ai_feed(
+                        "Privilege Escalation",
+                        f"Built {len(chains)} chains",
+                        self.target
+                    )
+            else:
+                self.logger.info("[PIVOT] Insufficient data for privilege escalation analysis")
+        
+        except Exception as e:
+            self.logger.error(f"[PIVOT] Error: {e}")
+            self.phase_detail = f"[PIVOT] Error: {str(e)[:50]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("priv_pivot")
+
+    def _run_exploit_selection_phase(self):
+        """Phase 10.5: Automatic Exploit Selection (LEVEL BOSS)"""
+        self.phase_detail = "[SELECT] Selecting best exploitation strategy..."
+        self._update_display()
+        
+        try:
+            vulnerabilities = self.state.get("vulnerabilities", []) or []
+            endpoints = self.state.get("endpoints", []) or []
+            technologies = self.state.get("technologies", {}) or {}
+            chains = self.state.get("exploit_chains", []) or []
+            
+            if chains and vulnerabilities:
+                self.logger.info(f"[AUTO_EXPLOIT] Selecting from {len(chains)} chains")
+                self.last_action = f"selecting best exploitation strategy"
+                self.phase_detail = f"[SELECT] Ranking {len(chains)} exploitation strategies..."
+                self._update_display()
+                
+                # Convert technologies dict to list
+                tech_list = technologies.keys() if isinstance(technologies, dict) else technologies
+                
+                # Select best strategy
+                selected = select_exploitation_strategy(
+                    vulnerabilities,
+                    chains,
+                    endpoints,
+                    list(tech_list)
+                )
+                
+                if selected:
+                    self.logger.warning(f"[AUTO_EXPLOIT] Selected: {selected.chain_name}")
+                    self.phase_detail = f"[SELECT] Selected: {selected.chain_name[:40]}"
+                    self._update_display()
+                    
+                    # Get all strategies
+                    all_strategies = select_all_strategies(
+                        vulnerabilities,
+                        chains,
+                        endpoints,
+                        list(tech_list)
+                    )
+                    
+                    # Store strategies
+                    self.state.update(
+                        selected_exploit_strategy=selected.to_dict(),
+                        alternative_strategies=[s.to_dict() for s in all_strategies[1:]]
+                    )
+                    
+                    if self.batch_display:
+                        self.batch_display._add_to_ai_feed(
+                            "Exploit Selection",
+                            f"Selected: {selected.chain_name}",
+                            self.target
+                        )
+                else:
+                    self.logger.warning("[AUTO_EXPLOIT] No suitable strategy found")
+                    self.phase_detail = "[SELECT] No suitable strategy found"
+                    self._update_display()
+            else:
+                self.logger.info("[AUTO_EXPLOIT] Insufficient chains for selection")
+                self.phase_detail = "[SELECT] Insufficient chains"
+                self._update_display()
+        
+        except Exception as e:
+            self.logger.error(f"[AUTO_EXPLOIT] Error: {e}")
+            self.phase_detail = f"[SELECT] Error: {str(e)[:50]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("exploit_select")
 
     def _generate_final_report(self):
         report_gen = ReportGenerator(self.state, self.output_dir)
