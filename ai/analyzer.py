@@ -61,6 +61,255 @@ class AIAnalyzer:
 
         return report_text
 
+    def build_attack_context(self) -> Dict:
+        """
+        Build comprehensive attack context for chain planning and AI reasoning.
+        
+        Returns:
+            Dictionary with structured intelligence for chain generation
+        """
+        s = self.state
+        
+        # Collect endpoints with enhanced context
+        endpoints = s.get("prioritized_endpoints", []) or []
+        technologies = s.get("technologies", {})
+        
+        # Process endpoints to include comprehensive context
+        endpoint_context = []
+        for ep in endpoints[:30]:  # Top 30 endpoints
+            ep_data = dict(ep) if isinstance(ep, dict) else {"url": str(ep)}
+            
+            # Enrich with technologies
+            technologies_list = []
+            if technologies and isinstance(technologies, dict):
+                for url, techs in technologies.items():
+                    if url in ep_data.get('url', '') or ep_data.get('url', '') in url:
+                        technologies_list = techs if isinstance(techs, list) else [techs]
+                        break
+            
+            ep_data['technologies'] = technologies_list
+            
+            # Add vulnerability insights
+            if 'vulnerability_hints' not in ep_data:
+                ep_data['vulnerability_hints'] = []
+            
+            # Calculate risk score
+            ep_data['risk_score'] = self._score_endpoint_risk(ep_data)
+            
+            endpoint_context.append(ep_data)
+        
+        # Collect vulnerability hints across system
+        all_hints = set()
+        discovered_vulns = []
+        
+        for ep in endpoint_context:
+            hints = ep.get('vulnerability_hints', [])
+            all_hints.update(hints)
+            
+            # If specific vulnerabilities found
+            vuln_info = {
+                'endpoint': ep.get('url'),
+                'hints': hints,
+                'parameters': ep.get('parameters', []),
+                'technologies': ep.get('technologies', [])
+            }
+            if hints:
+                discovered_vulns.append(vuln_info)
+        
+        # Collect confirmed vulnerabilities
+        confirmed_vulns = s.get("confirmed_vulnerabilities", []) or []
+        confirmed_vulns.extend(s.get("vulnerabilities", []) or [])
+        
+        # WordPress-specific context
+        wp_context = {
+            'detected': s.get("wordpress_detected", False),
+            'users': s.get("wp_users", []),
+            'plugins': [p for p in (s.get("wp_plugins", []) or []) if p.get('vulnerabilities')],
+            'version': s.get("wp_version", "unknown"),
+            'themes': s.get("wp_themes", [])
+        }
+        
+        # Build context object for chain planner
+        context = {
+            'target': s.get("target", ""),
+            'endpoints': endpoint_context,
+            'parameters': self._extract_all_parameters(endpoint_context),
+            'technologies': technologies if isinstance(technologies, list) else list(technologies.keys() if isinstance(technologies, dict) else []),
+            'vulnerability_hints': list(all_hints),
+            'discovered_vulnerabilities': discovered_vulns,
+            'confirmed_vulnerabilities': confirmed_vulns,
+            'wordpress': wp_context,
+            'misconfigurations': self._detect_misconfigurations(endpoint_context),
+            'attack_surface': {
+                'file_upload_endpoints': [e for e in endpoint_context if 'file_upload' in e.get('vulnerability_hints', [])],
+                'auth_endpoints': [e for e in endpoint_context if 'auth' in e.get('endpoint_type', '')],
+                'api_endpoints': [e for e in endpoint_context if 'api' in e.get('endpoint_type', '')],
+                'admin_endpoints': [e for e in endpoint_context if 'admin' in e.get('endpoint_type', '')]
+            },
+            'chain_patterns': self._identify_chain_patterns(endpoint_context, all_hints)
+        }
+        
+        return context
+
+    def _extract_all_parameters(self, endpoint_context: List[Dict]) -> List[Dict]:
+        """Extract and deduplicate all parameters from endpoints."""
+        all_params = {}
+        
+        for ep in endpoint_context:
+            params = ep.get('parameters', [])
+            for param in params:
+                param_name = param.get('name', '')
+                param_key = param_name.lower()
+                
+                if param_key not in all_params:
+                    all_params[param_key] = {
+                        'name': param_name,
+                        'sources': [],
+                        'types': set(),
+                        'endpoints': []
+                    }
+                
+                all_params[param_key]['sources'].append(param.get('source', 'unknown'))
+                all_params[param_key]['types'].add(param.get('type', 'unknown'))
+                all_params[param_key]['endpoints'].append(ep.get('url', ''))
+        
+        # Convert back to list format
+        result = []
+        for param_info in all_params.values():
+            result.append({
+                'name': param_info['name'],
+                'sources': list(set(param_info['sources'])),
+                'types': list(param_info['types']),
+                'endpoints_count': len(param_info['endpoints'])
+            })
+        
+        return result
+
+    def _detect_misconfigurations(self, endpoint_context: List[Dict]) -> List[Dict]:
+        """Detect common misconfigurations in endpoints."""
+        misconfigs = []
+        
+        for ep in endpoint_context:
+            url = ep.get('url', '').lower()
+            endpoint_type = ep.get('endpoint_type', '')
+            
+            # Debug endpoints exposed
+            if 'debug' in url or 'test' in url or 'dev' in url:
+                misconfigs.append({
+                    'type': 'debug_endpoint_exposed',
+                    'endpoint': url,
+                    'severity': 'MEDIUM',
+                    'description': 'Debug/test endpoint accessible in production'
+                })
+            
+            # Backup files
+            if url.endswith(('.bak', '.backup', '.sql', '.tar', '.zip')):
+                misconfigs.append({
+                    'type': 'backup_file_exposed',
+                    'endpoint': url,
+                    'severity': 'HIGH',
+                    'description': 'Backup file accessible'
+                })
+            
+            # Admin panels without authentication indicator
+            if 'admin' in endpoint_type and ep.get('status_code', 0) != 401:
+                misconfigs.append({
+                    'type': 'admin_panel_unauthenticated',
+                    'endpoint': url,
+                    'severity': 'CRITICAL',
+                    'description': 'Admin panel accessible without authentication'
+                })
+            
+            # Directory listing
+            if endpoint_type == 'html' and any(x in url for x in ['/', '/files', '/downloads']):
+                misconfigs.append({
+                    'type': 'directory_listing_possible',
+                    'endpoint': url,
+                    'severity': 'MEDIUM',
+                    'description': 'Directory listing may be enabled'
+                })
+        
+        return misconfigs
+
+    def _identify_chain_patterns(self, endpoint_context: List[Dict], all_hints: set) -> List[Dict]:
+        """Identify attack chain patterns from endpoints and hints."""
+        patterns = []
+        
+        # Pattern: file upload + execution
+        if 'file_upload' in all_hints:
+            upload_eps = [e for e in endpoint_context if 'file_upload' in e.get('vulnerability_hints', [])]
+            if upload_eps:
+                # Check if any endpoints can execute files
+                exec_possible = any('rce' in e.get('vulnerability_hints', []) for e in endpoint_context)
+                if exec_possible or 'rce_via_upload' in all_hints:
+                    patterns.append({
+                        'name': 'file_upload_to_rce',
+                        'description': 'File upload leading to RCE',
+                        'upload_endpoint': upload_eps[0].get('url'),
+                        'probability': 0.8
+                    })
+        
+        # Pattern: auth bypass + escalation
+        if 'auth_bypass' in all_hints and 'privilege_escalation' in all_hints:
+            patterns.append({
+                'name': 'auth_bypass_to_privilege_escalation',
+                'description': 'Authentication bypass leading to privilege escalation',
+                'probability': 0.7
+            })
+        
+        # Pattern: SSRF + internal access
+        if 'ssrf' in all_hints:
+            patterns.append({
+                'name': 'ssrf_chain',
+                'description': 'SSRF to internal resource access',
+                'probability': 0.6
+            })
+        
+        # Pattern: information disclosure + exploitation
+        if 'user_enumeration' in all_hints or 'information_disclosure' in all_hints:
+            if 'auth_bypass' in all_hints:
+                patterns.append({
+                    'name': 'enum_then_attack',
+                    'description': 'Enumerate users/info then attack specific target',
+                    'probability': 0.7
+                })
+        
+        return patterns
+
+    def _score_endpoint_risk(self, endpoint: Dict) -> float:
+        """Score endpoint risk based on characteristics."""
+        score = 0.0
+        
+        # Base score from endpoint type
+        ep_type = endpoint.get('endpoint_type', '').lower()
+        if ep_type == 'upload':
+            score += 0.3
+        elif ep_type == 'admin':
+            score += 0.25
+        elif ep_type == 'auth':
+            score += 0.2
+        elif ep_type == 'api':
+            score += 0.15
+        
+        # Vulnerability hints
+        hints = endpoint.get('vulnerability_hints', [])
+        score += len(hints) * 0.05
+        
+        # Parameters
+        params = endpoint.get('parameters', [])
+        score += len([p for p in params if p.get('type') not in ['hidden', 'submit']]) * 0.02
+        
+        # Status code risk
+        status = endpoint.get('status_code', 0)
+        if status == 200:
+            score += 0.1
+        elif 300 <= status < 400:
+            score += 0.05
+        elif status >= 400:
+            score -= 0.1
+        
+        return min(score, 1.0)
+
     def _collect_report_data(self) -> Dict:
         """Collect all scan data for report"""
         s = self.state

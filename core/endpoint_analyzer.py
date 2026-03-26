@@ -133,7 +133,10 @@ class EndpointAnalyzer:
             'has_query_params': False,
             'params': [],
             'confidence': 0.0,
-            'error': ''
+            'error': '',
+            'technologies': [],
+            'vulnerability_hints': [],
+            'parameters': []
         }
 
         try:
@@ -204,6 +207,12 @@ class EndpointAnalyzer:
 
         # Step 8: Calculate confidence
         result['confidence'] = EndpointAnalyzer._calculate_confidence(result)
+        
+        # Step 9: Generate vulnerability hints based on endpoint characteristics
+        result['vulnerability_hints'] = EndpointAnalyzer.generate_vulnerability_hints(result)
+        
+        # Step 10: Extract detailed parameter information
+        result['parameters'] = EndpointAnalyzer.extract_parameter_details(result)
 
         return result
 
@@ -301,3 +310,153 @@ class EndpointAnalyzer:
         # Don't send POST/PUT to static files
         no_payload_types = {'static', 'image', 'css', 'javascript', 'pdf'}
         return endpoint_type not in no_payload_types
+
+    @staticmethod
+    def generate_vulnerability_hints(result: Dict) -> List[str]:
+        """
+        Generate vulnerability hints based on endpoint characteristics.
+        Returns list of vulnerability classes that may apply.
+        """
+        hints = []
+        endpoint_type = result.get('endpoint_type', 'unknown')
+        has_form = result.get('has_form', False)
+        is_upload = result.get('is_upload', False)
+        params = result.get('params', [])
+        forms = result.get('forms', [])
+
+        # File upload endpoints
+        if endpoint_type == 'upload' or is_upload:
+            hints.extend(['file_upload', 'rce_via_upload', 'arbitrary_file_upload'])
+
+        # Form-based endpoints
+        if endpoint_type == 'form' or has_form:
+            hints.append('form_injection')
+            # Check for specific parameters
+            all_params = params + [f.get('name', '') for form in forms for f in form.get('fields', [])]
+            for param in all_params:
+                param_lower = param.lower()
+                if 'file' in param_lower or 'path' in param_lower:
+                    hints.append('lfi')
+                if 'url' in param_lower or 'redirect' in param_lower:
+                    hints.append('ssrf')
+                if 'search' in param_lower or 'q' in param_lower:
+                    hints.append('injection')
+
+        # API endpoints
+        if endpoint_type == 'api':
+            hints.extend(['api_abuse', 'injection', 'auth_bypass'])
+
+        # Authentication endpoints
+        if endpoint_type == 'auth':
+            hints.extend(['auth_bypass', 'credential_leak', 'user_enumeration'])
+
+        # Admin endpoints
+        if endpoint_type == 'admin':
+            hints.extend(['privilege_escalation', 'auth_bypass', 'admin_access'])
+
+        # Search/query endpoints
+        if endpoint_type == 'search':
+            hints.extend(['injection', 'xss'])
+
+        # Parameter-based hints
+        for param in params:
+            param_lower = param.lower()
+            if param_lower in ('id', 'user_id', 'userid', 'uid'):
+                hints.append('enumeration')
+            elif param_lower in ('file', 'path', 'dir', 'include', 'page', 'template'):
+                hints.append('lfi')
+            elif param_lower in ('url', 'redirect', 'callback', 'forward'):
+                hints.append('ssrf')
+            elif param_lower in ('cmd', 'exec', 'command', 'shell'):
+                hints.append('rce')
+
+        # Remove duplicates and return
+        return list(set(hints))
+
+    @staticmethod
+    def extract_parameter_details(result: Dict) -> List[Dict]:
+        """
+        Extract detailed parameter information from forms and query strings.
+        Returns list of parameter dictionaries with metadata.
+        """
+        parameters = []
+        
+        # From query string parameters
+        for param in result.get('params', []):
+            parameters.append({
+                'name': param,
+                'source': 'query_string',
+                'required': False,
+                'type': 'unknown'
+            })
+        
+        # From form fields
+        for form in result.get('forms', []):
+            form_method = form.get('method', 'GET').upper()
+            fields = form.get('fields', [])
+            for field in fields:
+                field_type = field.get('type', 'text')
+                parameters.append({
+                    'name': field.get('name', ''),
+                    'source': f'form_{form_method}',
+                    'required': field.get('required', False),
+                    'type': field_type,
+                    'value': field.get('value', '')
+                })
+        
+        return parameters
+
+    @staticmethod
+    def enrich_with_technologies(result: Dict, technologies: List[str]) -> Dict:
+        """
+        Enrich endpoint result with technology information.
+        Updates result dict in-place with tech-based hints.
+        """
+        result['technologies'] = technologies
+        
+        # Add tech-based vulnerability hints
+        tech_hints = EndpointAnalyzer._get_tech_hints(technologies)
+        existing_hints = EndpointAnalyzer.generate_vulnerability_hints(result)
+        result['vulnerability_hints'] = list(set(existing_hints + tech_hints))
+        
+        return result
+
+    @staticmethod
+    def _get_tech_hints(technologies: List[str]) -> List[str]:
+        """Map technologies to vulnerability classes."""
+        hints = []
+        techs_lower = [t.lower() for t in (technologies or [])]
+        
+        # WordPress
+        if any('wordpress' in t or 'wp' in t for t in techs_lower):
+            hints.extend(['file_upload', 'plugin_vuln', 'rce_via_plugin', 'privilege_escalation'])
+        
+        # PHP
+        if any('php' in t for t in techs_lower):
+            hints.extend(['file_inclusion', 'file_upload_rce', 'insecure_deserialization'])
+        
+        # Apache
+        if any('apache' in t for t in techs_lower):
+            hints.extend(['path_traversal', 'directory_listing', 'htaccess_bypass'])
+        
+        # Nginx
+        if any('nginx' in t for t in techs_lower):
+            hints.append('path_normalization_bypass')
+        
+        # IIS/ASP
+        if any('iis' in t or 'asp' in t for t in techs_lower):
+            hints.extend(['path_traversal', 'null_byte_injection'])
+        
+        # Node.js
+        if any('node' in t or 'express' in t for t in techs_lower):
+            hints.extend(['prototype_pollution', 'injection'])
+        
+        # Java
+        if any('java' in t or 'tomcat' in t for t in techs_lower):
+            hints.append('deserialization_rce')
+        
+        # MySQL
+        if any('mysql' in t or 'mariadb' in t for t in techs_lower):
+            hints.append('sqli')
+        
+        return hints
