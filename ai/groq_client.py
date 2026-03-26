@@ -5,7 +5,8 @@ class GroqClient:
         self.api_key = api_key
         self.model = model
 
-    def generate(self, prompt: str) -> str:
+    def generate(self, prompt: str, system: str = None, temperature: float = 0.3) -> str:
+        """Generate response from Groq API with optional system prompt"""
         url = "https://api.groq.com/openai/v1/chat/completions"
 
         headers = {
@@ -13,12 +14,16 @@ class GroqClient:
             "Content-Type": "application/json"
         }
 
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        
+        messages.append({"role": "user", "content": prompt})
+
         data = {
             "model": self.model,
-            "messages": [
-                {"role": "user", "content": prompt}
-            ],
-            "temperature": 0.3
+            "messages": messages,
+            "temperature": temperature
         }
 
         res = requests.post(url, headers=headers, json=data, timeout=15)

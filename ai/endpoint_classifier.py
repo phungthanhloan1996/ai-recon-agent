@@ -1,32 +1,77 @@
 """
 ai/endpoint_classifier.py - Endpoint Classifier
-Rule-based endpoint classification for vulnerability scanning
+Rule-based and AI-based endpoint classification for vulnerability scanning
 """
 
 import logging
-from typing import Dict, Any, List
+import json
+from typing import Dict, Any, List, Optional
 
 logger = logging.getLogger("recon.endpoint_classifier")
+
+# ─── SYSTEM PROMPT FOR ENDPOINT CLASSIFICATION ──────────────────────────────────
+_ENDPOINT_CLASSIFIER_SYSTEM = """You are an elite web security reconnaissance AI.
+
+Your task is to classify discovered URLs and identify potential attack surfaces.
+
+Analyze the given endpoint and determine:
+
+1. endpoint_type
+Choose one:
+- api
+- admin_panel
+- authentication
+- upload
+- file_download
+- data_import
+- form
+- static
+- unknown
+
+2. technologies
+Identify possible technologies if visible:
+wordpress, php, laravel, node, java, asp, nginx, apache
+
+3. attack_surface
+Detect possible attack surfaces:
+- parameters
+- file upload
+- authentication
+- database interaction
+- admin functionality
+- api endpoint
+- file handling
+
+4. interest_level
+Score the endpoint:
+- high (write operations, upload, import, admin)
+- medium (API or forms)
+- low (static content)
+
+5. notes
+Short reasoning (1 sentence).
+
+Return ONLY valid JSON."""
 
 
 class EndpointClassifier:
     """
-    Rule-based endpoint classification.
+    Rule-based and AI-based endpoint classification.
     Classifies URLs by potential vulnerabilities and risk levels.
     """
 
-    def __init__(self):
-        pass  # No API key needed
+    def __init__(self, groq_client=None):
+        self.groq = groq_client  # Optional Groq client for AI classification
 
     def classify(self, endpoint_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Classify an endpoint using rule-based analysis
+        Classify an endpoint using AI or rule-based analysis
 
         Args:
             endpoint_data: Dict containing 'url', 'path', 'parameters', 'context'
 
         Returns:
-            Dict with 'categories', 'risk_level', 'confidence', 'reasoning'
+            Dict with 'categories', 'risk_level', 'confidence', 'reasoning', 'endpoint_type', etc.
         """
         url = endpoint_data.get('url', '').lower()
         path = endpoint_data.get('path', '').lower()
@@ -39,9 +84,31 @@ class EndpointClassifier:
                 'categories': ['static_file'],
                 'risk_level': 'INFO',
                 'confidence': 0,
-                'reasoning': 'Static file - excluded from scanning'
+                'reasoning': 'Static file - excluded from scanning',
+                'endpoint_type': 'static',
+                'attack_surface': [],
+                'interest_level': 'low'
             }
 
+        # Try AI classification if Groq client available
+        if self.groq:
+            try:
+                ai_result = self._classify_with_ai(endpoint_data)
+                if ai_result:
+                    # Merge AI results with rule-based confidence
+                    rule_result = self._classify_rules_based(url, path, params, context)
+                    return self._merge_classifications(ai_result, rule_result)
+            except Exception as e:
+                logger.debug(f"[CLASSIFIER] AI classification failed: {e}, falling back to rules")
+
+        # Fallback to rule-based classification
+        return self._classify_rules_based(url, path, params, context)
+
+    def _classify_rules_based(self, url: str, path: str, params: List[str], context: str) -> Dict[str, Any]:
+        """Rule-based classification method"""
+
+    def _classify_rules_based(self, url: str, path: str, params: List[str], context: str) -> Dict[str, Any]:
+        """Rule-based classification method"""
         categories = self._determine_categories(url, path, params, context)
         risk_level = self._calculate_risk_level(categories, params)
         confidence = self._calculate_confidence(categories, params)
@@ -50,11 +117,109 @@ class EndpointClassifier:
             'categories': categories,
             'risk_level': risk_level,
             'confidence': confidence,
-            'reasoning': self._build_reasoning(categories, params)
+            'reasoning': self._build_reasoning(categories, params),
+            'endpoint_type': self._map_categories_to_type(categories),
+            'attack_surface': categories,
+            'interest_level': self._map_risk_to_interest(risk_level)
         }
 
+    def _classify_with_ai(self, endpoint_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Use Groq AI to classify endpoint.
+        Returns enriched classification with AI insights.
+        """
+        try:
+            endpoint_str = json.dumps({
+                'url': endpoint_data.get('url', ''),
+                'path': endpoint_data.get('path', ''),
+                'parameters': endpoint_data.get('parameters', []),
+                'context': endpoint_data.get('context', '')
+            }, indent=2)
+            
+            prompt = f"""Classify this endpoint:
+
+{endpoint_str}
+
+Provide classification in JSON format with endpoint_type, technologies, attack_surface, interest_level, and notes."""
+
+            response = self.groq.generate(
+                prompt=prompt,
+                system=_ENDPOINT_CLASSIFIER_SYSTEM,
+                temperature=0.2
+            )
+            
+            # Parse JSON response
+            try:
+                result = json.loads(response)
+                logger.debug(f"[CLASSIFIER] AI classification: {result}")
+                return result
+            except json.JSONDecodeError:
+                logger.debug(f"[CLASSIFIER] Failed to parse AI response: {response}")
+                return None
+        except Exception as e:
+            logger.debug(f"[CLASSIFIER] AI classification error: {e}")
+            return None
+
+    def _merge_classifications(self, ai_result: Dict, rule_result: Dict) -> Dict[str, Any]:
+        """Merge AI and rule-based classifications"""
+        merged = rule_result.copy()
+        
+        if ai_result:
+            # Use AI endpoint_type if available
+            if 'endpoint_type' in ai_result:
+                merged['endpoint_type'] = ai_result['endpoint_type']
+            
+            # Merge technologies
+            if 'technologies' in ai_result:
+                merged['technologies'] = ai_result['technologies']
+            
+            # Use AI attack_surface if more comprehensive
+            if 'attack_surface' in ai_result and len(ai_result['attack_surface']) > len(merged.get('attack_surface', [])):
+                merged['attack_surface'] = ai_result['attack_surface']
+            
+            # Use AI interest_level
+            if 'interest_level' in ai_result:
+                merged['interest_level'] = ai_result['interest_level']
+            
+            # Add AI notes
+            if 'notes' in ai_result:
+                merged['ai_notes'] = ai_result['notes']
+            
+            # Boost confidence for AI-confirmed classifications
+            merged['confidence'] = min(merged.get('confidence', 0.5) + 0.15, 1.0)
+        
+        return merged
+
+    def _map_categories_to_type(self, categories: List[str]) -> str:
+        """Map categories to endpoint type"""
+        if not categories:
+            return 'unknown'
+        
+        category = categories[0]  # Use first/primary category
+        
+        mapping = {
+            'admin_panel': 'admin_panel',
+            'authentication': 'authentication',
+            'file_upload': 'upload',
+            'file_download': 'file_download',
+            'api_endpoint': 'api',
+            'static_file': 'static',
+            'dynamic_endpoint': 'form'
+        }
+        
+        return mapping.get(category, 'unknown')
+
+    def _map_risk_to_interest(self, risk_level: str) -> str:
+        """Map risk level to interest level"""
+        mapping = {
+            'HIGH': 'high',
+            'MEDIUM': 'medium',
+            'LOW': 'low',
+            'INFO': 'low'
+        }
+        return mapping.get(risk_level, 'low')
+
     def _determine_categories(self, url: str, path: str, params: List[str], context: str) -> List[str]:
-        """Determine vulnerability categories based on rules"""
         categories = []
 
         # STRICT RULE: admin/auth ONLY for wp-admin or specific endpoints

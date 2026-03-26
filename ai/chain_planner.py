@@ -14,6 +14,41 @@ from core.executor import run_command  # Thêm import để exec tools
 
 logger = logging.getLogger("recon.chain_planner")
 
+# ─── SYSTEM PROMPT FOR CHAIN PLANNING ───────────────────────────────────────
+_CHAIN_PLANNER_SYSTEM = """You are an advanced offensive security AI.
+
+Your job is to design exploitation chains from discovered vulnerabilities and endpoints.
+
+Think like a penetration tester.
+
+Goal: achieve one of the following:
+
+- remote code execution
+- file upload webshell
+- admin takeover
+- database dump
+- authentication bypass
+
+Analyze the vulnerabilities and endpoints.
+
+Create attack chains.
+
+Each chain must contain:
+
+1. entry_point
+The initial vulnerable endpoint
+
+2. steps
+Ordered exploitation steps
+
+3. technique
+Main exploitation technique
+
+4. expected_impact
+What attacker gains
+
+Return JSON only."""
+
 
 @dataclass
 class ExploitStep:
@@ -45,11 +80,13 @@ class ChainPlanner:
     """
     Plans exploit chains based on discovered vulnerabilities and findings.
     Prioritizes chains by impact and feasibility.
+    Uses AI for enhanced chain generation when Groq client available.
     """
 
-    def __init__(self, state, learning_engine=None):
+    def __init__(self, state, learning_engine=None, groq_client=None):
         self.state = state
         self.learning_engine = learning_engine
+        self.groq = groq_client
 
     def _get_base_url(self) -> str:
         """
@@ -121,7 +158,7 @@ class ChainPlanner:
     def plan_chains_from_context(self, attack_context: Dict) -> List[ExploitChain]:
         """
         Plan exploit chains from enriched attack context.
-        Uses vulnerability hints, parameters, and technologies to generate smart chains.
+        Uses AI if available, falls back to heuristic-based generation.
         
         Args:
             attack_context: Dict from AIAnalyzer.build_attack_context()
@@ -138,6 +175,16 @@ class ChainPlanner:
         attack_surface = attack_context.get('attack_surface', {})
         
         logger.info(f"[CHAIN] Planning chains from context with {len(all_hints)} hint types and {len(patterns)} patterns")
+        
+        # Try AI-assisted chain generation first
+        if self.groq:
+            try:
+                ai_chains = self._generate_chains_with_ai(attack_context)
+                if ai_chains:
+                    chains.extend(ai_chains)
+                    logger.info(f"[CHAIN] AI generated {len(ai_chains)} chains")
+            except Exception as e:
+                logger.debug(f"[CHAIN] AI chain generation failed: {e}, falling back to heuristics")
         
         # Process identified patterns
         for pattern in patterns:
@@ -1289,6 +1336,89 @@ Return ONLY a JSON list. Each item must contain:
 
         unique.sort(key=rank, reverse=True)
         return unique
+
+    def _generate_chains_with_ai(self, attack_context: Dict) -> List[ExploitChain]:
+        """
+        Generate exploitation chains using AI/Groq analysis.
+        Focuses on realistic multi-step attack paths.
+        """
+        try:
+            # Build prompt with attack context
+            context_str = json.dumps({
+                'target': attack_context.get('target', ''),
+                'endpoints': [(e.get('url', ''), e.get('endpoint_type', '')) for e in attack_context.get('endpoints', [])[:10]],
+                'vulnerability_hints': list(attack_context.get('vulnerability_hints', [])[:10]),
+                'technologies': attack_context.get('technologies', []),
+                'chain_patterns': [p.get('name', '') for p in attack_context.get('chain_patterns', [])],
+            }, indent=2)
+
+            prompt = f"""Analyze this target infrastructure and design exploitation chains:
+
+{context_str}
+
+Generate 3-5 realistic attack chains that could lead to:
+- RCE (Remote Code Execution)
+- Admin access
+- Database compromise
+- Sensitive data exposure
+
+Format each chain as JSON with:
+- entry_point: Starting endpoint
+- steps: Array of attack steps (in order)
+- technique: Main technique used
+- expected_impact: What attacker gains"""
+
+            response = self.groq.generate(
+                prompt=prompt,
+                system=_CHAIN_PLANNER_SYSTEM,
+                temperature=0.3
+            )
+
+            # Parse and convert AI response to ExploitChain objects
+            chains = self._parse_ai_chains_response(response)
+            logger.info(f"[CHAIN] AI generated {len(chains)} chains")
+            return chains
+        except Exception as e:
+            logger.debug(f"[CHAIN] AI chain generation error: {e}")
+            return []
+
+    def _parse_ai_chains_response(self, response: str) -> List[ExploitChain]:
+        """Parse AI-generated chains from response text."""
+        chains = []
+        try:
+            # Try to extract JSON from response
+            json_matches = re.findall(r'\{[^{}]*"entry_point"[^{}]*\}', response, re.DOTALL)
+            
+            for match in json_matches:
+                try:
+                    chain_data = json.loads(match)
+                    
+                    # Build steps
+                    steps = []
+                    for step_text in chain_data.get('steps', []):
+                        steps.append(ExploitStep(
+                            name=step_text,
+                            action=step_text,
+                            target="target",
+                            success_indicator="success"
+                        ))
+                    
+                    # Build chain
+                    chain = ExploitChain(
+                        name=chain_data.get('technique', 'ai_generated_chain'),
+                        description=chain_data.get('expected_impact', ''),
+                        steps=steps,
+                        risk_level="HIGH",
+                        prerequisites=[chain_data.get('entry_point', '')],
+                        postconditions=[chain_data.get('expected_impact', '')]
+                    )
+                    chains.append(chain)
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        except Exception as e:
+            logger.debug(f"[CHAIN] Failed to parse AI response: {e}")
+        
+        return chains
 
     def smart_prioritize(self, chains: List[ExploitChain]) -> List[ExploitChain]:
         """AI-like prioritization based on impact, feasibility, and state data"""

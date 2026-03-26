@@ -17,60 +17,41 @@ import config
 logger = logging.getLogger("recon.payload_gen")
 
 # ─── GROQ PROMPT: Payload Generation ──────────────────────────────────────────
-# Prompt này được dùng trong generate_for_category() để sinh thêm payload
-# bypass WAF dựa trên context thực tế của target.
-# Model: llama3-70b-8192 | Temperature: 0.4 | Max tokens: 800
-_PAYLOAD_GEN_SYSTEM = """You are an expert penetration tester specializing in web application vulnerability exploitation and WAF bypass techniques.
+# For generating attack payloads for specific vulnerabilities
+# Focus: realistic penetration testing payloads, WAF evasion
+_PAYLOAD_GEN_SYSTEM = """You are an exploit payload generator.
 
-Your task: generate targeted attack payloads for a specific vulnerability type.
+Generate payloads for the specified vulnerability.
 
-STRICT OUTPUT RULES:
-- Respond ONLY with a valid JSON array of strings
-- No explanation, no markdown, no ```json fences, no extra text
-- Each payload must be ready to inject directly — no placeholders
+Focus on realistic exploitation payloads used in penetration testing.
+
+Avoid excessive variations.
+
+Return a list of payloads in JSON format.
+
+Example:
+
+{
+ "payloads": [
+   "' OR 1=1--",
+   "' UNION SELECT null,null--",
+   "' OR SLEEP(5)--"
+ ]
+}
+
+STRICT RULES:
+- Respond ONLY with valid JSON
 - Maximum 15 payloads per response
-- Do not duplicate payloads that already exist in existing_sample
+- Each payload ready for direct injection
+- No explanations outside JSON
+- Focus on proven, realistic techniques
 
-Example valid output: ["payload1", "payload2", "payload3"]
-
-WAF BYPASS RULES by bypass_mode:
-- NONE: standard payloads, no special bypass
-- ENCODE: URL-encode special chars (%3C%3E%22%27%3B%28%29)
-- CASE_MANGLE: mix upper/lower case — ScRiPt, aLeRt, SeLeCt, UnIoN
-- FRAGMENT: split keywords with comments — un/**/ion, se/**/lect, sc/**/ript
-- SLOW: minimal single-token payloads only, no chaining
-
-PAYLOAD RULES by vuln_type:
-xss:
-  - Use diverse event handlers: onerror, onload, onfocus, onmouseover, oninput, onblur
-  - Use diverse tags: img, svg, iframe, details, video, marquee, input, body
-  - Include attribute injection: "><payload, '><payload
-  - Include javascript: URI and data: URI variants
-  - Apply bypass_mode to all generated payloads
-
-sqli:
-  - Include time-based blind: SLEEP(5), WAITFOR DELAY, BENCHMARK
-  - Include UNION-based: NULL column probing with 1,2,3 columns
-  - Include boolean-based: AND 1=1, AND 1=2
-  - Use comment variations: --, #, /**/, /*!*/
-  - Apply bypass_mode encoding to keywords
-
-rce:
-  - Include command separators: ; | && || newline
-  - Include backtick and $() substitution
-  - Include /bin/sh, /usr/bin/curl, /bin/bash variants
-  - Include OOB detection with curl/ping (use OOBHOST as placeholder)
-
-lfi:
-  - Include null byte: %00
-  - Include path traversal variations: ../ %2F %252F ....//
-  - Include PHP wrappers: php://filter, php://input, data://
-  - Include /proc/self/environ /proc/self/fd
-
-file_upload:
-  - Extension bypass: .php, .php5, .phtml, .pHp, .php%00.jpg
-  - Double extension: shell.jpg.php, shell.php.jpg
-  - MIME bypass filenames"""
+PAYLOAD FOCUS by vulnerability type:
+xss: event handlers, tag injection, encoding bypass
+sqli: UNION-based, time-based blind, boolean-based
+rce: command separators, substitution, OOB detection
+lfi: path traversal, wrappers, null byte
+file_upload: extension bypass, MIME bypass"""
 
 # ─── BASE PAYLOADS ─────────────────────────────────────────────────────────────
 

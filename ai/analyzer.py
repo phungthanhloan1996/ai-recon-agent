@@ -1,5 +1,5 @@
 """
-ai/analyzer.py - AI Report Generator
+ai/analyzer.py - AI Report Generator and Response Analyzer
 Tổng hợp toàn bộ scan results và tạo báo cáo cuối
 """
 
@@ -13,17 +13,57 @@ from core.state_manager import StateManager
 
 logger = logging.getLogger("recon.analyzer")
 
+# ─── SYSTEM PROMPT FOR RESPONSE ANALYSIS ─────────────────────────────────────
+_RESPONSE_ANALYZER_SYSTEM = """You are a senior penetration tester AI.
+
+Analyze the endpoint response and determine potential vulnerabilities.
+
+Focus on real exploitation opportunities.
+
+Check for:
+
+1. input vectors
+GET parameters
+POST body
+JSON payload
+file upload
+cookies
+headers
+
+2. possible vulnerabilities
+Identify potential issues:
+
+- SQL injection
+- command injection
+- file upload abuse
+- path traversal
+- SSRF
+- IDOR
+- authentication bypass
+- insecure deserialization
+- XSS
+
+3. confidence level
+low
+medium
+high
+
+4. exploitation_hint
+Describe how the vulnerability could be exploited.
+
+Return ONLY JSON."""
+
 
 class AIAnalyzer:
     """
     Generates the final AI-powered security report.
-    Uses Claude API if available, falls back to structured static report.
+    Uses Groq API if available, falls back to structured static report.
     """
 
     def __init__(self, state: StateManager, output_dir: str, ai_client=None):
         self.state = state
         self.output_dir = output_dir
-        self.ai_client = ai_client
+        self.ai_client = ai_client  # Could be Groq or other AI client
         self.report_file = os.path.join(output_dir, "ai_final_report.txt")
         self.cache_file = os.path.join(output_dir, "ai_cache.json")
 
@@ -707,6 +747,57 @@ Format the report clearly with sections and subsections."""
                 return response
 
         return None
+
+    def analyze_response(self, endpoint_url: str, response_data: Dict) -> Dict:
+        """
+        Analyze endpoint response for vulnerabilities using AI.
+        
+        Args:
+            endpoint_url: Target URL
+            response_data: Contains 'status_code', 'headers', 'body', 'parameters'
+        
+        Returns:
+            Dict with vulnerabilities and confidence levels
+        """
+        if not self.ai_client or not hasattr(self.ai_client, "generate"):
+            return {"vulnerabilities": [], "analysis_method": "skipped"}
+
+        try:
+            response_summary = {
+                'url': endpoint_url,
+                'status_code': response_data.get('status_code', 0),
+                'content_type': response_data.get('headers', {}).get('Content-Type', ''),
+                'content_length': len(response_data.get('body', '')),
+                'body_sample': response_data.get('body', '')[:500],
+                'parameters': response_data.get('parameters', []),
+            }
+
+            prompt = f"""Analyze this HTTP response for vulnerabilities:
+
+{json.dumps(response_summary, indent=2)}
+
+Identify potential vulnerabilities based on response patterns, error messages, and behavior."""
+
+            response = self.ai_client.generate(
+                prompt=prompt,
+                system=_RESPONSE_ANALYZER_SYSTEM,
+                temperature=0.2
+            )
+
+            try:
+                analysis = json.loads(response)
+                logger.debug(f"[ANALYZER] Response analysis: {len(analysis.get('vulnerabilities', []))} vulns found")
+                return analysis
+            except json.JSONDecodeError:
+                logger.debug(f"[ANALYZER] Failed to parse response analysis JSON")
+                return {
+                    "vulnerabilities": [],
+                    "raw_analysis": response,
+                    "analysis_method": "text"
+                }
+        except Exception as e:
+            logger.debug(f"[ANALYZER] Response analysis failed: {e}")
+            return {"vulnerabilities": [], "error": str(e)}
 
     def save_ai_cache(self, data: Dict):
         """Save intermediate AI analysis cache"""

