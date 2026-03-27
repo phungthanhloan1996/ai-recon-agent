@@ -1,5 +1,1 @@
-https://www.bvntd.gov.vn/
-https://dolphin-vc.com/
-https://vec.com.vn/
-https://theky.vn/
-https://elo.edu.vn/
+http://localhost:8000/

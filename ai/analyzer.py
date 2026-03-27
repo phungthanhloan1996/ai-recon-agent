@@ -14,42 +14,86 @@ from core.state_manager import StateManager
 logger = logging.getLogger("recon.analyzer")
 
 # ─── SYSTEM PROMPT FOR RESPONSE ANALYSIS ─────────────────────────────────────
-_RESPONSE_ANALYZER_SYSTEM = """You are a senior penetration tester AI.
+_RESPONSE_ANALYZER_SYSTEM = """You are a senior penetration tester conducting real-world assessment.
 
-Analyze the endpoint response and determine potential vulnerabilities.
+Your goal: identify realistic exploitation paths, not random vulnerability scanning.
 
-Focus on real exploitation opportunities.
+ANALYZE WITH ATTACKER MINDSET:
+- How can I achieve RCE, admin access, data theft, or privilege escalation?
+- What are the chaining opportunities?
+- What's the realistic business impact?
 
-Check for:
+HIGH-VALUE TARGETS (prioritize these):
+- File upload endpoints (direct RCE)
+- Authentication flaws (bypass = access)
+- Authorization bypass / IDOR (privilege escalation)
+- API endpoints without proper validation
+- Plugin/extension management
+- Webhook/callback endpoints (SSRF potential)
+- File inclusion / path traversal (config/credential theft)
+- Deserialization (often leads to RCE)
+- Command injection (direct server compromise)
+- File write operations
 
-1. input vectors
-GET parameters
-POST body
-JSON payload
-file upload
-cookies
-headers
+1. input_vectors
+Identify ALL entry points:
+- GET parameters (often unvalidated)
+- POST body fields (especially file uploads, imports)
+- HTTP headers (cookies, content-type, X-forwarded-*)
+- JSON payloads (nested objects, arrays)
+- File upload handlers
+- API keys / authentication tokens
+- Hidden parameters (common: id, admin, debug, api_key)
 
-2. possible vulnerabilities
-Identify potential issues:
+2. exploitation_analysis
+Think in CHAINS, not single vulnerabilities:
 
-- SQL injection
-- command injection
-- file upload abuse
-- path traversal
-- SSRF
-- IDOR
-- authentication bypass
-- insecure deserialization
-- XSS
+FILE UPLOAD CHAIN:
+- Upload PHP/JSP/ASP → webshell → whoami/RCE
+- Upload archive → extract to webroot → code execution
+- Polyglot files (JPG+PHP) bypass simple validation
 
-3. confidence level
-low
-medium
-high
+AUTH/IDOR CHAIN:
+- Enumerate users via API → password attack → login → privilege escalation
+- Modify ID parameter → access other user data → admin account
 
-4. exploitation_hint
-Describe how the vulnerability could be exploited.
+COMMAND INJECTION CHAIN:
+- Parameter reaches shell command → reverse shell → full compromise
+
+LFI/TRAVERSAL CHAIN:
+- Read ../../../etc/passwd → read config → DB credentials
+- Include local file for code execution
+
+SSRF CHAIN:
+- Webhook/callback URL → access internal services → metadata/tokens → AWS compromise
+
+DESERIALIZATION CHAIN:
+- Malicious serialized object → gadget chain → RCE
+
+PLUGIN CHAIN:
+- Enumerate plugins → find vulnerable version → exploit → admin code execution
+
+3. confidence_level
+Rate based on:
+- Required preconditions (low barriers = higher confidence)
+- Impact if successful (high = prioritize)
+- Technical feasibility
+
+HIGH: Direct exploitation path visible (upload, obvious SQL injection, auth bypass)
+MEDIUM: Likely vulnerable but requires some setup (e.g., first enumerate, then attack)
+LOW: Possible but requires multiple steps or assumptions
+
+4. business_impact
+What can attacker achieve:
+- RCE? (CRITICAL)
+- Data theft? (HIGH)
+- Admin access? (CRITICAL)
+- Privilege escalation? (HIGH)
+- File write? (HIGH if webroot)
+- Information disclosure? (MEDIUM-HIGH)
+
+5. chain_opportunities
+How could this chain with other vulnerabilities to maximize impact?
 
 Return ONLY JSON."""
 
@@ -226,48 +270,134 @@ class AIAnalyzer:
         return result
 
     def _detect_misconfigurations(self, endpoint_context: List[Dict]) -> List[Dict]:
-        """Detect common misconfigurations in endpoints."""
+        """
+        Detect HIGH-IMPACT misconfigurations that lead to real compromise.
+        
+        Focus on: unauthenticated functionality, file operations, admin access
+        """
         misconfigs = []
         
         for ep in endpoint_context:
             url = ep.get('url', '').lower()
-            endpoint_type = ep.get('endpoint_type', '')
+            endpoint_type = ep.get('endpoint_type', '').lower()
+            status_code = ep.get('status_code', 0)
+            params = ep.get('parameters', [])
             
-            # Debug endpoints exposed
-            if 'debug' in url or 'test' in url or 'dev' in url:
+            # ─── CRITICAL MISCONFIGURATIONS ──────────────────────────────────────────
+            
+            # Admin panel completely unauthenticated
+            if 'admin' in endpoint_type and status_code == 200:
                 misconfigs.append({
-                    'type': 'debug_endpoint_exposed',
+                    'type': 'unauthenticated_admin_panel',
                     'endpoint': url,
-                    'severity': 'MEDIUM',
-                    'description': 'Debug/test endpoint accessible in production'
+                    'severity': 'CRITICAL',
+                    'description': 'Admin panel accessible without authentication - full platform compromise',
+                    'exploitation': 'Direct admin access, bypass all controls'
                 })
             
-            # Backup files
-            if url.endswith(('.bak', '.backup', '.sql', '.tar', '.zip')):
+            # File upload without proper protection
+            if 'upload' in endpoint_type or 'upload' in url:
+                if status_code == 200:
+                    misconfigs.append({
+                        'type': 'unprotected_file_upload',
+                        'endpoint': url,
+                        'severity': 'CRITICAL',
+                        'description': 'File upload endpoint accessible - likely RCE vector',
+                        'exploitation': 'Upload webshell, bypass filters, execute code'
+                    })
+            
+            # API endpoints without authentication
+            if 'api' in endpoint_type and status_code == 200:
+                # Check for sensitive operations
+                if any(x in url for x in ['user', 'data', 'admin', 'config']):
+                    misconfigs.append({
+                        'type': 'unauthenticated_api_endpoint',
+                        'endpoint': url,
+                        'severity': 'CRITICAL',
+                        'description': 'API endpoint with sensitive operations accessible without auth',
+                        'exploitation': 'Modify data, escalate privileges, steal information'
+                    })
+            
+            # ─── HIGH MISCONFIGURATIONS ──────────────────────────────────────────────
+            
+            # Backup files exposed
+            if url.endswith(('.bak', '.backup', '.sql', '.tar', '.zip', '.tar.gz')):
                 misconfigs.append({
                     'type': 'backup_file_exposed',
                     'endpoint': url,
                     'severity': 'HIGH',
-                    'description': 'Backup file accessible'
+                    'description': 'Backup file publicly accessible',
+                    'exploitation': 'Extract database, credentials, source code'
                 })
             
-            # Admin panels without authentication indicator
-            if 'admin' in endpoint_type and ep.get('status_code', 0) != 401:
+            # Debug endpoints in production
+            if any(x in url for x in ['/debug', '?debug=', 'test_', '/test']):
                 misconfigs.append({
-                    'type': 'admin_panel_unauthenticated',
+                    'type': 'debug_endpoint_exposed',
                     'endpoint': url,
-                    'severity': 'CRITICAL',
-                    'description': 'Admin panel accessible without authentication'
+                    'severity': 'HIGH',
+                    'description': 'Debug endpoint enabled in production',
+                    'exploitation': 'Information disclosure, potential code execution'
                 })
             
-            # Directory listing
-            if endpoint_type == 'html' and any(x in url for x in ['/', '/files', '/downloads']):
+            # Source code exposure
+            if any(x in url.split('/')[-1] for x in ['.php~', '.bak', '.old', '.src', '.source']):
                 misconfigs.append({
-                    'type': 'directory_listing_possible',
+                    'type': 'source_code_exposed',
+                    'endpoint': url,
+                    'severity': 'HIGH',
+                    'description': 'Source code file accessible',
+                    'exploitation': 'Understand application logic, find vulnerabilities'
+                })
+            
+            # Configuration file exposure
+            if any(x in url for x in ['config', 'settings', '.env', 'web.config']):
+                if status_code == 200:
+                    misconfigs.append({
+                        'type': 'configuration_exposed',
+                        'endpoint': url,
+                        'severity': 'HIGH',
+                        'description': 'Configuration file accessible',
+                        'exploitation': 'Extract database credentials, API keys, secrets'
+                    })
+            
+            # Directory listing enabled
+            if status_code == 200 and url.endswith('/'):
+                misconfigs.append({
+                    'type': 'directory_listing_enabled',
                     'endpoint': url,
                     'severity': 'MEDIUM',
-                    'description': 'Directory listing may be enabled'
+                    'description': 'Directory listing enabled',
+                    'exploitation': 'Enumerate files and hidden resources'
                 })
+            
+            # ─── MEDIUM MISCONFIGURATIONS ────────────────────────────────────────────
+            
+            # File download without restrictions
+            if any(x in endpoint_type for x in ['download', 'file_download']):
+                if any(x in params for x in [{'name': 'path'}, {'name': 'file'}, {'name': 'name'}]):
+                    misconfigs.append({
+                        'type': 'file_download_lfi_risk',
+                        'endpoint': url,
+                        'severity': 'MEDIUM-HIGH',
+                        'description': 'File download endpoint may allow path traversal',
+                        'exploitation': 'Read sensitive files via ../ traversal'
+                    })
+            
+            # Backup/restore functionality
+            if any(x in url for x in ['backup', 'restore', 'import', 'export']):
+                if status_code == 200:
+                    misconfigs.append({
+                        'type': 'backup_restore_unprotected',
+                        'endpoint': url,
+                        'severity': 'MEDIUM-HIGH',
+                        'description': 'Backup/restore functionality accessible',
+                        'exploitation': 'Data manipulation, injection, potential RCE'
+                    })
+        
+        # Sort by severity for prioritization
+        severity_order = {'CRITICAL': 0, 'HIGH': 1, 'MEDIUM-HIGH': 2, 'MEDIUM': 3, 'LOW': 4}
+        misconfigs.sort(key=lambda x: severity_order.get(x.get('severity', 'LOW'), 5))
         
         return misconfigs
 
@@ -317,36 +447,127 @@ class AIAnalyzer:
         return patterns
 
     def _score_endpoint_risk(self, endpoint: Dict) -> float:
-        """Score endpoint risk based on characteristics."""
+        """
+        Score endpoint risk based on REALISTIC EXPLOITATION IMPACT.
+        
+        Framework: Penetration tester mindset
+        - Prioritize endpoints leading to RCE, admin access, data breach
+        - Score reflects exploitation chain potential, not generic risk
+        """
         score = 0.0
-        
-        # Base score from endpoint type
+        url = endpoint.get('url', '').lower()
         ep_type = endpoint.get('endpoint_type', '').lower()
-        if ep_type == 'upload':
-            score += 0.3
-        elif ep_type == 'admin':
-            score += 0.25
-        elif ep_type == 'auth':
-            score += 0.2
-        elif ep_type == 'api':
-            score += 0.15
-        
-        # Vulnerability hints
-        hints = endpoint.get('vulnerability_hints', [])
-        score += len(hints) * 0.05
-        
-        # Parameters
         params = endpoint.get('parameters', [])
-        score += len([p for p in params if p.get('type') not in ['hidden', 'submit']]) * 0.02
-        
-        # Status code risk
+        hints = endpoint.get('vulnerability_hints', [])
         status = endpoint.get('status_code', 0)
+        
+        # ─── CRITICAL EXPLOITATION VECTORS (0.8-1.0) ─────────────────────────────────
+        
+        # File upload = direct RCE vector
+        if any(x in ep_type for x in ['file_upload', 'upload', 'import']):
+            score = 0.95  # CRITICAL: fastest path to RCE
+            # Upload with accessible directory = even higher
+            if any(x in url for x in ['upload', 'media', 'files', 'public', 'static']):
+                score = 0.98
+        
+        # Plugin/theme management = code execution capability
+        elif any(x in ep_type for x in ['plugin_management', 'theme_upload', 'extension']):
+            score = 0.92
+        
+        # Authentication endpoints without proper protection
+        elif 'auth' in ep_type and status == 200:
+            # Unprotected auth = bypass opportunity = access
+            score = 0.85
+        
+        # Admin functionality without auth indicators
+        elif 'admin' in ep_type:
+            if status != 401 and status != 403:
+                # Unauthenticated admin = instant compromise
+                score = 0.95
+            else:
+                # Protected admin = escalation target
+                score = 0.70
+        
+        # API endpoints (often weak auth)
+        elif 'api' in ep_type:
+            score = 0.75  # High-value target for manipulation
+            # API with file operations = even higher
+            if any(x in url for x in ['upload', 'create', 'execute', 'import']):
+                score = 0.88
+        
+        # ─── HIGH-IMPACT PATTERNS (0.6-0.8) ──────────────────────────────────────────
+        
+        # Webhook/callback endpoints (SSRF vector)
+        elif any(x in url for x in ['webhook', 'callback', 'fetch', 'remote']):
+            score = 0.78
+        
+        # File operations (LFI, download, view)
+        elif any(x in ep_type for x in ['file_download', 'download', 'file_view']):
+            if any(x in url for x in ['file', 'path', 'page', 'template', 'view']):
+                score = 0.72  # LFI potential
+        
+        # Data endpoints (IDOR potential)
+        elif 'data' in ep_type or 'endpoint' in ep_type:
+            if any(str(p.get('name', '')).lower() in ['id', 'user_id', 'item_id'] 
+                   for p in params):
+                score = 0.65  # IDOR exploitation likely
+        
+        # Export/Import features
+        elif any(x in url for x in ['export', 'import', 'backup', 'restore']):
+            score = 0.70
+        
+        # Configuration endpoints
+        elif any(x in url for x in ['config', 'settings', 'admin', 'manage']):
+            score = 0.68
+        
+        # ─── VULNERABILITY HINTS AMPLIFICATION ────────────────────────────────────
+        
+        if hints:
+            # Chain potential: what vulnerabilities are present?
+            for hint in hints:
+                if hint in ['rce', 'command_injection', 'file_upload', 'web_shell']:
+                    score = min(score + 0.25, 1.0)  # Direct RCE
+                elif hint in ['auth_bypass', 'idor', 'privilege_escalation']:
+                    score = min(score + 0.20, 1.0)  # Access/escalation
+                elif hint in ['ssrf', 'lfi', 'path_traversal']:
+                    score = min(score + 0.15, 1.0)  # Data access potential
+                elif hint in ['sqli', 'injection']:
+                    score = min(score + 0.10, 1.0)  # Database access
+        
+        # ─── PARAMETER ANALYSIS ──────────────────────────────────────────────────────
+        
+        # Count dangerous parameters (likely injection vectors)
+        dangerous_params = [
+            p for p in params 
+            if any(x in p.get('name', '').lower() 
+                   for x in ['cmd', 'exec', 'id', 'path', 'file', 'page', 'url', 'callback'])
+        ]
+        score += len(dangerous_params) * 0.08  # Each dangerous param = higher risk
+        
+        # ─── STATUS CODE ANALYSIS ────────────────────────────────────────────────────
+        
         if status == 200:
-            score += 0.1
-        elif 300 <= status < 400:
-            score += 0.05
-        elif status >= 400:
-            score -= 0.1
+            score += 0.12  # Endpoint is active and responding
+        elif status == 401:
+            score += 0.05  # Protected but accessible (auth brute target)
+        elif status >= 500:
+            score -= 0.10  # Endpoint broken
+        
+        # ─── URL PATTERN ANALYSIS ────────────────────────────────────────────────────
+        
+        # High-value URL patterns
+        high_value_patterns = [
+            'upload', 'plugin', 'execute', 'cmd', 'shell', 'rce',
+            'admin', 'api', 'webhook', 'callback', 'import', 'export',
+            'execute', 'system', 'run'
+        ]
+        
+        if any(pattern in url for pattern in high_value_patterns):
+            score += 0.10
+        
+        # Debug endpoints are high-value for info gathering
+        if any(x in url for x in ['debug', 'test', 'dev']):
+            score += 0.08
         
         return min(score, 1.0)
 
