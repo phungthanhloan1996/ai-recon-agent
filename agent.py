@@ -329,7 +329,7 @@ class BatchDisplay:
             time.sleep(0.1)
     
     def _render(self):
-        """Vẽ giao diện đơn giản"""
+        """Vẽ giao diện tối ưu - output ngang hơn"""
         with self.lock:
             sys.stdout.write('\033[H\033[J')
             
@@ -344,95 +344,83 @@ class BatchDisplay:
             completed_count = len(self.completed)
             failed_count = len(self.failed)
             
-            print("┌──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐")
-            print(f"│  ⚡ AI RECON AGENT ⚡  [CONTINUOUS BATCH MODE]                                 uptime: {hours:02d}:{minutes:02d}:{seconds:02d}                        │")
-            
-            # API Status
-            api_parts = [f"{k}: {v}" for k, v in self.api_status.items()]
-            api_line = " | ".join(api_parts)
-            print(f"│  API: {api_line:<125} │")
-            
-            # Config
-            print(f"│  Config: max-workers={self.max_workers} | iterations=3 | timeout=30s | self-healing=ON | HTTP_TIMEOUT=20s          │")
+            # Giảm chiều dài header
+            print("┌────────────────────────────────────────────────────────────────────────────────────────────────┐")
+            print(f"│ ⚡ AI RECON AGENT [BATCH]  uptime: {hours:02d}:{minutes:02d}:{seconds:02d}  Workers: {active_count}/{self.max_workers}  Waiting: {queue_count}          │")
             
             # Targets file info
-            print(f"│  Targets file: {self.targets_file} ({self.total_domains} domains total)                                                           │")
-            print("├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤")
-            print("│                                                                                                                                      │")
-            print("│  ┌─ QUEUE ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐")
+            print(f"│ Targets: {self.targets_file[:30]:<30} ({self.total_domains} total)                            │")
+            print("├────────────────────────────────────────────────────────────────────────────────────────────────┤")
             
-            # Active targets
-            print("│  │                                                                                                                                      │")
-            print(f"│  │  ▶️  ACTIVE ({active_count}/{self.max_workers}):                                                                                               │")
+            # Active targets - compact
+            print(f"│ ▶️  ACTIVE ({active_count}/{self.max_workers}):                                                          │")
             if active_count > 0:
                 for idx, (domain, data) in enumerate(list(self.domains.items())[:self.max_workers], 1):
                     phase = data.get('phase', 'init')
-                    phase_tool = data.get('phase_tool', '') or 'n/a'
-                    phase_status = data.get('phase_status', 'idle')
-                    iter_info = f"iter {data.get('iter', 1)}/{data.get('max_iter', 5)}"
+                    iter_info = f"{data.get('iter', 1)}/{data.get('max_iter', 5)}"
                     
                     phase_icon = {
                         'recon': '🔍', 'live': '🌐', 'wp': '🎯', 'crawl': '📁',
-                        'auth': '🔐',
-                        'toolkit': '🛠️',
-                        'classify': '🤖', 'rank': '📊', 'scan': '⚡', 'analyze': '🔬',
-                        'graph': '🕸️', 'chain': '🔗', 'exploit': '💥', 'learn': '🧠',
-                        'init': '⚙️', 'report': '📋'
+                        'auth': '🔐', 'toolkit': '🛠️', 'classify': '🤖', 'rank': '📊',
+                        'scan': '⚡', 'analyze': '🔬', 'graph': '🕸️', 'chain': '🔗',
+                        'exploit': '💥', 'learn': '🧠', 'init': '⚙️', 'report': '📋'
                     }.get(phase, '⚙️')
                     
                     progress = self._get_progress_text(data)
-                    domain_display = domain[:40] if len(domain) <= 40 else domain[:37] + "..."
+                    domain_display = domain[:25] if len(domain) <= 25 else domain[:22] + "..."
                     
-                    print(f"│  │     #{idx} {domain_display:<40} [{phase_icon} {phase.capitalize()}] {iter_info:<10} | {progress:<15} │")
-                    print(f"│  │        tool={phase_tool[:30]:<30} status={phase_status[:20]:<20}                    │")
+                    print(f"│  #{idx} {domain_display:<25} [{phase_icon}] {iter_info:<6} | {progress:<20} │")
             else:
-                print("│  │     No active targets                                                                                                         │")
+                print("│  (no active targets)                                                                       │")
             
-            # Waiting queue
-            print("│  │                                                                                                                                      │")
-            print(f"│  │  ⏳ WAITING ({queue_count}):                                                                                                        │")
+            # Waiting queue - compact
             if queue_count > 0:
-                for domain, added_time in list(self.queue)[:3]:
+                print(f"│ ⏳ WAITING ({queue_count}):                                                                    │")
+                for domain, added_time in list(self.queue)[:2]:
                     wait_time = int((time.time() - added_time.timestamp()) / 60)
-                    domain_display = domain[:40] if len(domain) <= 40 else domain[:37] + "..."
-                    print(f"│  │     • {domain_display:<40} (added {wait_time}m ago)                                                 │")
-                if queue_count > 3:
-                    print(f"│  │     • ... and {queue_count - 3} more                                                                    │")
-            else:
-                print("│  │     No waiting targets                                                                                                         │")
+                    domain_display = domain[:20] if len(domain) <= 20 else domain[:17] + "..."
+                    print(f"│  • {domain_display:<20} ({wait_time}m ago)                                     │")
+                if queue_count > 2:
+                    print(f"│  • ... and {queue_count - 2} more                                                        │")
             
-            # Completed
-            print("│  │                                                                                                                                      │")
-            print(f"│  │  ✅ DONE ({completed_count}):                                                                                                   │")
+            # Completed - one line
             if completed_count > 0:
-                completed_text = []
-                for domain, vulns, exploited, chains, top_chain, ts in list(self.completed)[:3]:
-                    if chains:
-                        completed_text.append(f"{domain} ({vulns}v/{chains}c)")
-                    else:
-                        completed_text.append(f"{domain} ({vulns} vulns)")
-                print(f"│  │     • {'  • '.join(completed_text)}                                                          │")
-                if completed_count > 3:
-                    print(f"│  │     • ... and {completed_count - 3} more                                                                        │")
-            else:
-                print("│  │     No completed targets                                                                                                  │")
+                completed_brief = ", ".join([d[:15] for d, _, _, _, _, _ in list(self.completed)[:2]])
+                print(f"│ ✅ DONE ({completed_count}): {completed_brief:50}│")
             
-            # Failed
-            print("│  │                                                                                                                                      │")
-            print(f"│  │  ❌ FAILED ({failed_count}):                                                                                                   │")
+            # Failed - one line
             if failed_count > 0:
-                for domain, reason, ts in list(self.failed)[:2]:
-                    domain_display = domain[:35] if len(domain) <= 35 else domain[:32] + "..."
-                    print(f"│  │     • {domain_display:<35} ({reason})                                                   │")
-            else:
-                print("│  │     No failed targets                                                                                                      │")
+                failed_brief = ", ".join([d[:15] for d, _, _ in list(self.failed)[:2]])
+                print(f"│ ❌ FAILED ({failed_count}): {failed_brief:48}│")
             
-            print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘")
+            print("├────────────────────────────────────────────────────────────────────────────────────────────────┤")
             
-            # Details section - chỉ hiển thị cho 2 domain active đầu tiên
+            # Details section - hiển thị ngắn gọn cho 2 domain active
             if active_count > 0:
-                print("│                                                                                                                                      │")
-                print("│  ┌─ DETAILS ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐")
+                print("│")
+                print("│ ─ DETAILS ────────────────────────────────────────────────────────────────────────────────────────────────")
+                
+                for domain, data in list(self.domains.items())[:2]:
+                    stats = data.get('stats', {})
+                    phase = data.get('phase', 'init')
+                    
+                    print(f"│ {domain}:")
+                    
+                    if phase == 'recon':
+                        print(f"│   📋 Recon: {stats.get('subs', 0)} subs | {stats.get('live', 0)} live")
+                    elif phase == 'live':
+                        print(f"│   🌐 Live: {stats.get('live', 0)}/{stats.get('total_hosts', 0)} hosts")
+                    elif phase == 'crawl':
+                        print(f"│   📁 Crawl: {stats.get('eps', 0)} endpoints")
+                    elif phase == 'toolkit':
+                        toolkit_m = data.get('toolkit_metrics', {})
+                        print(f"│   🛠️  Tools: Tech={toolkit_m.get('tech', 0)} Ports={toolkit_m.get('ports', 0)} Dirs={toolkit_m.get('dirs', 0)}")
+                    elif phase == 'scan':
+                        print(f"│   ⚡ Scan: {stats.get('vulns', 0)} vulns | {stats.get('eps', 0)} eps")
+                    elif phase == 'exploit':
+                        print(f"│   💥 Exploit: {stats.get('exploited', 0)} exploited")
+                
+                print("├────────────────────────────────────────────────────────────────────────────────────────────────┤")
                 
                 for idx, (domain, data) in enumerate(list(self.domains.items())[:self.max_workers], 1):
                     stats = data.get('stats', {})
@@ -734,29 +722,16 @@ class BatchDisplay:
                 
                 print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘")
             
-            # Live feed
+            # Live feed - compact
             if self.live_feed:
-                print("│                                                                                                                                                              │")
-                print("│  ┌─ LIVE ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐")
-                for timestamp, icon, event, domain, detail in list(self.live_feed)[:8]:
-                    domain_display = domain[:20] + ".." if len(domain) > 20 else domain.ljust(22)
-                    detail_display = detail[:35] if len(detail) > 35 else detail.ljust(35)
-                    print(f"│  │  {timestamp} │ {icon} {event:<12} │ {domain_display} │ {detail_display} │")
-                print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘")
-
-            # AI / Groq activity panel
-            if self.ai_feed:
-                print("│                                                                                                                                                              │")
-                print("│  ┌─ AI LAYER ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐")
-                for timestamp, event, domain, detail in list(self.ai_feed)[:6]:
-                    domain_short = domain[:18] + ".." if len(domain) > 18 else domain.ljust(20)
-                    detail_display = detail[:55] if len(detail) > 55 else detail
-                    print(f"│  │  {timestamp} │ 🧠 {event:<18} │ {domain_short} │ {detail_display:<55} │")
-                print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────┘")
-
-            # Footer đơn giản
-                print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘")
-
+                print("│ ─ EVENTS ────────────────────────────────────────────────────────────────────────────────────────────────")
+                for timestamp, icon, event, domain, detail in list(self.live_feed)[:4]:
+                    domain_short = domain[:15] if len(domain) <= 15 else domain[:12] + ".."
+                    detail_short = detail[:40] if len(detail) > 40 else detail
+                    print(f"│ {timestamp} {icon} {event:<10} | {domain_short:<15} | {detail_short:<40} │")
+            
+            print("└────────────────────────────────────────────────────────────────────────────────────────────────┘")
+            
             sys.stdout.flush()
 
 
