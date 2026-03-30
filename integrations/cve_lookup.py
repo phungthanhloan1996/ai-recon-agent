@@ -13,6 +13,10 @@ from typing import Dict, List, Optional
 
 import requests
 
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
+
 logger = logging.getLogger("recon.cve")
 
 

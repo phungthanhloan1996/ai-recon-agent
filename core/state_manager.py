@@ -79,6 +79,71 @@ class ScanState:
     manual_validation_completed: List[Dict] = field(default_factory=list)
     manual_attack_playbook: List[Dict] = field(default_factory=list)
     
+    # Phase 8 - Authentication Attacks (NEW)
+    auth_endpoints: List[Dict] = field(default_factory=list)
+    mfa_findings: List[Dict] = field(default_factory=list)  # MFA mechanisms detected
+    oauth_endpoints: List[Dict] = field(default_factory=list)  # OAuth/SAML auth points
+    oauth_saml_findings: List[Dict] = field(default_factory=list)  # OAuth/SAML exploitation results
+    token_theft_vectors: List[Dict] = field(default_factory=list)  # Token stealing methods
+    
+    # Phase 9 - Persistence & Post-Exploitation (NEW)
+    persistence_vectors: List[Dict] = field(default_factory=list)  # Backdoor placement options
+    persistence_findings: List[Dict] = field(default_factory=list)  # Persistence deployment results
+    backdoors_deployed: List[Dict] = field(default_factory=list)  # Deployed backdoors
+    web_shells: List[Dict] = field(default_factory=list)  # Web shell info (path, type, creds)
+    reverse_shells: List[Dict] = field(default_factory=list)  # Reverse shell callbacks
+    cron_jobs: List[Dict] = field(default_factory=list)  # Scheduled tasks deployed
+    startup_persistence: List[Dict] = field(default_factory=list)  # Boot-time persistence
+    
+    # Phase 10 - Lateral Movement & Privilege Escalation (NEW)
+    adjacent_services: List[Dict] = field(default_factory=list)  # Internal services found
+    internal_network_map: List[Dict] = field(default_factory=list)  # Network topology
+    lateral_movement_chains: List[Dict] = field(default_factory=list)  # Inter-service exploitation paths
+    lateral_movement_findings: List[Dict] = field(default_factory=list)  # Lateral movement results
+    privilege_escalation_methods: List[Dict] = field(default_factory=list)  # Privilege escalation vectors
+    kernel_exploits_applicable: List[Dict] = field(default_factory=list)  # Kernel CVEs matching version
+    
+    # Phase 11 - SSL/TLS Attacks (NEW)
+    ssl_findings: List[Dict] = field(default_factory=list)  # SSL/TLS weaknesses (pinning, weak ciphers)
+    ssl_pinning_findings: List[Dict] = field(default_factory=list)  # SSL pinning bypass results
+    pinning_bypass_methods: List[Dict] = field(default_factory=list)  # Ways to bypass cert pinning
+    
+    # Phase 12 - Zero-Day & Fuzzing (NEW)
+    fuzzing_results: List[Dict] = field(default_factory=list)  # Anomalies found via fuzzing
+    zero_day_findings: List[Dict] = field(default_factory=list)  # Zero-day detection results
+    potential_zero_days: List[Dict] = field(default_factory=list)  # Unknown/unpatched vulnerabilities
+    anomaly_detections: List[Dict] = field(default_factory=list)  # Behavioral anomalies
+    
+    # Phase 13 - Container & Cloud Escape (NEW)
+    container_detected: bool = False
+    container_type: str = ""  # docker, kubernetes, lxc, etc.
+    container_escape_vectors: List[Dict] = field(default_factory=list)  # Container escape methods
+    container_findings: List[Dict] = field(default_factory=list)  # Container escape results
+    cloud_metadata_accessible: bool = False  # AWS/GCP metadata server reachable
+    cloud_credentials: List[Dict] = field(default_factory=list)  # Cloud creds found
+    
+    # Phase 14 - Custom Exploit Framework (NEW)
+    custom_exploits: List[Dict] = field(default_factory=list)  # Custom exploit definitions
+    custom_exploit_results: List[Dict] = field(default_factory=list)  # Results from custom exploits
+    custom_exploit_findings: List[Dict] = field(default_factory=list)  # Custom exploit execution results
+    
+    # Phase 15 - Log Evasion & Coverage Tracks (NEW)
+    log_locations: List[Dict] = field(default_factory=list)  # Log file locations found
+    log_evasion_techniques: List[Dict] = field(default_factory=list)  # Methods to evade logs
+    log_evasion_findings: List[Dict] = field(default_factory=list)  # Log evasion execution results
+    logs_cleared: List[Dict] = field(default_factory=list)  # Logs cleared during engagement
+    
+    # API & Vulnerability Management
+    default_creds_findings: List[Dict] = field(default_factory=list)
+    cve_exploit_findings: List[Dict] = field(default_factory=list)
+    api_vuln_findings: List[Dict] = field(default_factory=list)
+    subdomain_takeover_findings: List[Dict] = field(default_factory=list)
+    
+    # Phase 16 - Advanced Post-Exploitation (NEW)
+    living_off_land_techniques: List[Dict] = field(default_factory=list)  # LOLBin techniques used
+    data_exfiltration_methods: List[Dict] = field(default_factory=list)  # Ways to exfil data
+    command_execution_history: List[Dict] = field(default_factory=list)  # Commands executed on target
+    
     # Meta
     current_phase: str = "init"
     errors: List[str] = field(default_factory=list)

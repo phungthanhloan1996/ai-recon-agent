@@ -5,7 +5,12 @@ Fetches URLs from Internet Archive Wayback Machine
 
 import requests
 import logging
+import os
+import sys
 from typing import List, Dict
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import config
 
 logger = logging.getLogger("recon.wayback_runner")
 
@@ -37,7 +42,6 @@ class WaybackRunner:
         urls = set()
         
         try:
-            import config
             # Use configured pagination size (default 5000) instead of hard 2000 limit
             page_size = config.WAYBACK_PAGINATION_SIZE if hasattr(config, 'WAYBACK_PAGINATION_SIZE') else 5000
             pagination_step = config.WAYBACK_PAGINATION_OFFSET if hasattr(config, 'WAYBACK_PAGINATION_OFFSET') else 5000

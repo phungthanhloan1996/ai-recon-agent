@@ -55,6 +55,19 @@ from ai.payload_mutation import PayloadMutator
 from ai.analyzer import AIAnalyzer
 from ai.chain_planner import ChainPlanner, AIPoweredChainPlanner
 
+# ─── NEW: Advanced Post-Exploitation Modules ────────────────────────────────
+from modules.mfa_bypass import MFABypass, TOTPCracker
+from modules.persistence_engine import PersistenceEngine, LateralMovement
+from modules.oauth_saml_exploit import OAuthSAMLExploit, TokenManipulation
+from modules.ssl_pinning_bypass import SSLPinningBypass, CertificateExploitation
+from modules.zero_day_detection import ZeroDayDetection, AnomalyDetector
+from modules.container_escape import ContainerEscapeEngine, LivingOffTheLand
+from modules.custom_exploit_framework import CustomExploitFramework, ExploitLibrary
+from modules.log_evasion import LogEvasion
+
+# ─── Dashboard Components ────────────────────────────────────────────────────
+from reports.dashboard_enhanced import EnhancedDashboard, format_state_for_display
+
 # ─── Constants ──────────────────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GO_BIN = os.path.expanduser("~/go/bin")
@@ -517,6 +530,109 @@ class BatchDisplay:
                             detail_short = phase_detail[:60]
                             print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
                     
+                    # POST-EXPLOITATION PHASES (24-32)
+                    elif phase == 'mfa_bypass':
+                        mfa_findings = data.get('mfa_findings', [])
+                        mfa_count = len(mfa_findings)
+                        if mfa_count > 0:
+                            bypass_count = sum(len(m.get('bypass_techniques', [])) for m in mfa_findings)
+                            print(f"│  │  ├─ 🔐 MFA: {mfa_count:>4} MFA configs | {bypass_count:>2} bypass vectors                                      │")
+                        else:
+                            print(f"│  │  ├─ 🔐 MFA: checking mechanisms...                                                        │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                    
+                    elif phase == 'oauth_saml':
+                        oauth_findings = data.get('oauth_saml_findings', [])
+                        oauth_count = len(oauth_findings)
+                        if oauth_count > 0:
+                            exploitable = sum(len(o.get('exploitable_vulns', [])) for o in oauth_findings)
+                            print(f"│  │  ├─ 🔑 OAuth/SAML: {oauth_count:>3} flows | {exploitable:>3} exploitable                                  │")
+                        else:
+                            print(f"│  │  ├─ 🔑 OAuth/SAML: analyzing flows...                                                      │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                    
+                    elif phase == 'persistence':
+                        persist_findings = data.get('persistence_findings', [])
+                        backdoors = sum(1 for p in persist_findings if p.get('persistent_access'))
+                        if backdoors > 0:
+                            print(f"│  │  ├─ 👻 Persistence: {backdoors:>2} backdoors deployed                                                   │")
+                        else:
+                            print(f"│  │  ├─ 👻 Persistence: analyzing options...                                                    │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                    
+                    elif phase == 'lateral_movement':
+                        lateral_findings = data.get('lateral_movement_findings', [])
+                        pivot_count = sum(len(l.get('lateral_targets', [])) for l in lateral_findings)
+                        if pivot_count > 0:
+                            print(f"│  │  ├─ 🌐 Lateral: {pivot_count:>4} pivot targets discovered                                                 │")
+                        else:
+                            print(f"│  │  ├─ 🌐 Lateral: mapping network...                                                        │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                    
+                    elif phase == 'ssl_pinning':
+                        ssl_findings = data.get('ssl_pinning_findings', [])
+                        ssl_count = len(ssl_findings)
+                        if ssl_count > 0:
+                            bypass_count = sum(len(s.get('bypass_techniques', [])) for s in ssl_findings)
+                            print(f"│  │  ├─ 📌 SSL: {ssl_count:>4} pinning detected | {bypass_count:>2} bypass methods                               │")
+                        else:
+                            print(f"│  │  ├─ 📌 SSL: analyzing pinning...                                                          │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                    
+                    elif phase == 'zero_day':
+                        zday_findings = data.get('zero_day_findings', [])
+                        anomaly_count = sum(len(z.get('anomalies', [])) for z in zday_findings)
+                        if anomaly_count > 0:
+                            print(f"│  │  ├─ 🔥 Zero-Day: {anomaly_count:>3} anomalies detected                                                      │")
+                        else:
+                            print(f"│  │  ├─ 🔥 Zero-Day: fuzzing endpoints...                                                      │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                    
+                    elif phase == 'container_escape':
+                        container_findings = data.get('container_findings', [])
+                        escape_count = sum(len(c.get('escape_vectors', [])) for c in container_findings)
+                        if escape_count > 0:
+                            print(f"│  │  ├─ 📦 Container: {escape_count:>2} escape vectors found                                                   │")
+                        else:
+                            print(f"│  │  ├─ 📦 Container: probing environment...                                                    │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                    
+                    elif phase == 'custom_exploit':
+                        custom_findings = data.get('custom_exploit_findings', [])
+                        success_count = sum(1 for c in custom_findings if c.get('exploit_success'))
+                        if success_count > 0:
+                            print(f"│  │  ├─ 💥 Custom: {success_count:>2} exploits successful                                                      │")
+                        else:
+                            print(f"│  │  ├─ 💥 Custom: executing exploits...                                                       │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                    
+                    elif phase == 'log_evasion':
+                        evasion_findings = data.get('log_evasion_findings', [])
+                        cleaned_count = sum(1 for e in evasion_findings if e.get('logs_erased'))
+                        if cleaned_count > 0:
+                            print(f"│  │  ├─ 🧹 Evasion: logs cleared on {cleaned_count:>2} systems                                                  │")
+                        else:
+                            print(f"│  │  ├─ 🧹 Evasion: removing evidence...                                                       │")
+                        if phase_detail:
+                            detail_short = phase_detail[:60]
+                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                    
                     # Detailed findings section
                     findings = data.get('findings', {})
                     if findings:
@@ -559,6 +675,8 @@ class BatchDisplay:
                         "exploit", "sqli_exploit", "upload_bypass", "reverse_shell", "privesc",
                         "waf_bypass", "boolean_sqli", "xss", "idor",
                         "default_creds", "cve_exploit", "api_vuln", "subdomain_takeover",
+                        "mfa_bypass", "oauth_saml", "persistence", "lateral_movement",
+                        "ssl_pinning", "zero_day", "container_escape", "custom_exploit", "log_evasion",
                         "learn", "report"
                     ]
                     PHASE_LABELS = {
@@ -570,6 +688,8 @@ class BatchDisplay:
                         "exploit": "Exploit", "sqli_exploit": "SQLi", "upload_bypass": "Upload", "reverse_shell": "Shell", "privesc": "PrivESC",
                         "waf_bypass": "WAF", "boolean_sqli": "BSQL", "xss": "XSS", "idor": "IDOR",
                         "default_creds": "Creds", "cve_exploit": "CVEExp", "api_vuln": "API", "subdomain_takeover": "Sub",
+                        "mfa_bypass": "MFA", "oauth_saml": "OAuth", "persistence": "Perst", "lateral_movement": "Lateral",
+                        "ssl_pinning": "SSL", "zero_day": "0Day", "container_escape": "Ctnr", "custom_exploit": "Custom", "log_evasion": "LogEv",
                         "learn": "Learn", "report": "Report"
                     }
                     completed_phases = set(
@@ -1054,6 +1174,17 @@ class ReconAgent:
         self.api_vuln_scanner = APIVulnScanner(output_dir, timeout=30)
         self.subdomain_takeover = SubdomainTakeoverScanner(output_dir, timeout=30)
         
+        # NEW: Initialize post-exploitation modules
+        self.mfa_bypass = MFABypass(self.http_client)
+        self.oauth_saml_exploit = OAuthSAMLExploit()
+        self.persistence_engine = PersistenceEngine()
+        self.lateral_movement = LateralMovement()
+        self.ssl_pinning_bypass = SSLPinningBypass()
+        self.zero_day_detection = ZeroDayDetection(self.http_client)
+        self.container_escape = ContainerEscapeEngine()
+        self.custom_exploit = CustomExploitFramework(exploits_dir=os.path.join(output_dir, "custom_exploits"))
+        self.log_evasion = LogEvasion()
+        
         self.logger = logging.getLogger("recon.agent")
         self.iteration_count = 0
         self.max_iterations = 3
@@ -1476,7 +1607,90 @@ class ReconAgent:
                     self._update_display()
                     self._run_subdomain_takeover_phase()
                 
-                # Phase 24: Learning
+                # ─── POST-EXPLOITATION PHASES (24-32) ────────────────────────────────────
+                
+                # Phase 24: MFA Bypass & Circumvention
+                if not self._should_skip_phase("mfa_bypass"):
+                    self.current_phase = "mfa_bypass"
+                    self.phase_detail = "bypass MFA/2FA mechanisms"
+                    self.phase_tool = "mfa-bypass-engine"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_mfa_bypass_phase()
+                
+                # Phase 25: OAuth/SAML Exploitation
+                if not self._should_skip_phase("oauth_saml"):
+                    self.current_phase = "oauth_saml"
+                    self.phase_detail = "exploit OAuth/SAML flows"
+                    self.phase_tool = "oauth-saml-exploiter"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_oauth_saml_phase()
+                
+                # Phase 26: Persistence & Backdoor Deployment
+                if not self._should_skip_phase("persistence"):
+                    self.current_phase = "persistence"
+                    self.phase_detail = "establish backdoors"
+                    self.phase_tool = "persistence-engine"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_persistence_phase()
+                
+                # Phase 27: Lateral Movement
+                if not self._should_skip_phase("lateral_movement"):
+                    self.current_phase = "lateral_movement"
+                    self.phase_detail = "move across network"
+                    self.phase_tool = "lateral-movement-engine"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_lateral_movement_phase()
+                
+                # Phase 28: SSL/TLS Pinning Bypass
+                if not self._should_skip_phase("ssl_pinning"):
+                    self.current_phase = "ssl_pinning"
+                    self.phase_detail = "bypass certificate pinning"
+                    self.phase_tool = "ssl-bypass-engine"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_ssl_pinning_phase()
+                
+                # Phase 29: Zero-Day Detection
+                if not self._should_skip_phase("zero_day"):
+                    self.current_phase = "zero_day"
+                    self.phase_detail = "detect zero-day vulns"
+                    self.phase_tool = "zero-day-detector"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_zero_day_phase()
+                
+                # Phase 30: Container/Cloud Escape
+                if not self._should_skip_phase("container_escape"):
+                    self.current_phase = "container_escape"
+                    self.phase_detail = "escape container/cloud"
+                    self.phase_tool = "container-escape-engine"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_container_escape_phase()
+                
+                # Phase 31: Custom Exploit Framework
+                if not self._should_skip_phase("custom_exploit"):
+                    self.current_phase = "custom_exploit"
+                    self.phase_detail = "deploy custom exploits"
+                    self.phase_tool = "custom-exploit-framework"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_custom_exploit_phase()
+                
+                # Phase 32: Log Evasion & Covering Tracks
+                if not self._should_skip_phase("log_evasion"):
+                    self.current_phase = "log_evasion"
+                    self.phase_detail = "erase forensic evidence"
+                    self.phase_tool = "log-evasion-engine"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_log_evasion_phase()
+                
+                # Phase 33: Learning
                 if "learn" not in self.completed_phases:
                     self.current_phase = "learn"
                     self.phase_detail = "adapt"
@@ -4156,6 +4370,424 @@ class ReconAgent:
         self.phase_status = "done"
         self._mark_phase_done("subdomain_takeover")
 
+    # ─── POST-EXPLOITATION PHASE HANDLERS (24-32) ────────────────────────────
+    
+    def _run_mfa_bypass_phase(self):
+        """Phase 24: MFA/2FA Bypass & Circumvention"""
+        self.phase_detail = "[MFA] Analyzing MFA/2FA protection mechanisms..."
+        self._update_display()
+        
+        try:
+            live_hosts = self.state.get("live_hosts", [])
+            mfa_results = []
+            
+            for host_info in live_hosts[:5]:
+                url = host_info.get('url')
+                if not url:
+                    continue
+                
+                self.phase_detail = f"[MFA] Scanning {url.split('//')[-1][:30]} for MFA..."
+                self._update_display()
+                
+                result = self.mfa_bypass.analyze_mfa(
+                    url,
+                    progress_cb=self._progress_callback
+                )
+                mfa_results.append(result)
+                
+                if result.get('mfa_detected'):
+                    self.stats['vulns'] += 1
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("🔐", "MFA Detected", url, result.get('mfa_type', 'Unknown'))
+                
+                if result.get('bypass_techniques'):
+                    techniques = result['bypass_techniques']
+                    self.stats['exploited'] += len(techniques)
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("🔓", "MFA Bypass", url, f"{len(techniques)} techniques")
+            
+            self.state.update(mfa_findings=mfa_results)
+            bypass_count = sum(len(r.get('bypass_techniques', [])) for r in mfa_results)
+            self.last_action = f"mfa: detected {len(mfa_results)} MFA configs, {bypass_count} bypasses possible"
+            self.phase_detail = f"[MFA] Complete - {bypass_count} potential bypass vectors identified"
+            
+        except Exception as e:
+            self.logger.error(f"[MFA] Phase failed: {e}")
+            self.last_action = f"mfa error: {str(e)[:50]}"
+            self.phase_detail = f"[MFA] Error - {str(e)[:60]}"
+        
+        self._update_display()
+        self.phase_status = "done"
+        self._mark_phase_done("mfa_bypass")
+    
+    def _run_oauth_saml_phase(self):
+        """Phase 25: OAuth/SAML Exploitation"""
+        self.phase_detail = "[OAUTH] Probing OAuth/SAML authentication flows..."
+        self._update_display()
+        
+        try:
+            live_hosts = self.state.get("live_hosts", [])
+            oauth_results = []
+            
+            for host_info in live_hosts[:5]:
+                url = host_info.get('url')
+                if not url:
+                    continue
+                
+                self.phase_detail = f"[OAUTH] Analyzing {url.split('//')[-1][:30]} auth flows..."
+                self._update_display()
+                
+                result = self.oauth_saml_exploit.exploit_oauth_saml(
+                    url,
+                    progress_cb=self._progress_callback
+                )
+                oauth_results.append(result)
+                
+                if result.get('oauth_found'):
+                    self.stats['vulns'] += 1
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("🔑", "OAuth Found", url, "OAuth flow detected")
+                
+                if result.get('exploitable_vulns'):
+                    vulns = result['exploitable_vulns']
+                    self.stats['exploited'] += len(vulns)
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("⚡", "OAuth Vuln", url, f"{len(vulns)} exploitable flows")
+            
+            self.state.update(oauth_saml_findings=oauth_results)
+            vuln_count = sum(len(r.get('exploitable_vulns', [])) for r in oauth_results)
+            self.last_action = f"oauth: {len(oauth_results)} OAuth flows analyzed, {vuln_count} exploitable"
+            self.phase_detail = f"[OAUTH] Complete - {vuln_count} OAuth/SAML vulnerabilities identified"
+            
+        except Exception as e:
+            self.logger.error(f"[OAUTH] Phase failed: {e}")
+            self.last_action = f"oauth error: {str(e)[:50]}"
+            self.phase_detail = f"[OAUTH] Error - {str(e)[:60]}"
+        
+        self._update_display()
+        self.phase_status = "done"
+        self._mark_phase_done("oauth_saml")
+    
+    def _run_persistence_phase(self):
+        """Phase 26: Persistence & Backdoor Deployment"""
+        self.phase_detail = "[PERSIST] Establishing persistence mechanisms..."
+        self._update_display()
+        
+        try:
+            exploit_results = self.state.get("exploit_results", [])
+            exploited_hosts = [h for h in self.state.get("live_hosts", []) if any(e.get('success') for e in exploit_results)]
+            persistence_results = []
+            
+            for host_info in exploited_hosts[:3]:
+                url = host_info.get('url')
+                if not url:
+                    continue
+                
+                self.phase_detail = f"[PERSIST] Deploying backdoors on {url.split('//')[-1][:30]}..."
+                self._update_display()
+                
+                result = self.persistence_engine.deploy_persistence(
+                    url,
+                    progress_cb=self._progress_callback
+                )
+                persistence_results.append(result)
+                
+                if result.get('persistent_access'):
+                    self.stats['exploited'] += 1
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("👻", "Persistence", url, "Backdoor established")
+                
+                if result.get('recovery_vectors'):
+                    vectors = result['recovery_vectors']
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("🔄", "Recovery", url, f"{len(vectors)} recovery methods")
+            
+            self.state.update(persistence_findings=persistence_results)
+            backdoors = sum(1 for r in persistence_results if r.get('persistent_access'))
+            self.last_action = f"persistence: {backdoors} backdoors deployed"
+            self.phase_detail = f"[PERSIST] Complete - {backdoors} persistent access points established"
+            
+        except Exception as e:
+            self.logger.error(f"[PERSIST] Phase failed: {e}")
+            self.last_action = f"persistence error: {str(e)[:50]}"
+            self.phase_detail = f"[PERSIST] Error - {str(e)[:60]}"
+        
+        self._update_display()
+        self.phase_status = "done"
+        self._mark_phase_done("persistence")
+    
+    def _run_lateral_movement_phase(self):
+        """Phase 27: Lateral Movement & Privilege Escalation"""
+        self.phase_detail = "[LATERAL] Exploring lateral movement opportunities..."
+        self._update_display()
+        
+        try:
+            live_hosts = self.state.get("live_hosts", [])
+            lateral_results = []
+            
+            for host_info in live_hosts[:5]:
+                url = host_info.get('url')
+                if not url:
+                    continue
+                
+                self.phase_detail = f"[LATERAL] Mapping network from {url.split('//')[-1][:30]}..."
+                self._update_display()
+                
+                result = self.lateral_movement.find_lateral_paths(
+                    url,
+                    progress_cb=self._progress_callback
+                )
+                lateral_results.append(result)
+                
+                if result.get('lateral_targets'):
+                    targets = result['lateral_targets']
+                    self.stats['exploited'] += len(targets)
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("🌐", "Lateral", url, f"{len(targets)} pivot targets")
+                
+                if result.get('privilege_escalation'):
+                    self.stats['exploited'] += 1
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("📈", "PrivEsc", url, "Escalation path found")
+            
+            self.state.update(lateral_movement_findings=lateral_results)
+            pivot_count = sum(len(r.get('lateral_targets', [])) for r in lateral_results)
+            self.last_action = f"lateral: {pivot_count} pivot targets identified"
+            self.phase_detail = f"[LATERAL] Complete - {pivot_count} lateral movement paths discovered"
+            
+        except Exception as e:
+            self.logger.error(f"[LATERAL] Phase failed: {e}")
+            self.last_action = f"lateral error: {str(e)[:50]}"
+            self.phase_detail = f"[LATERAL] Error - {str(e)[:60]}"
+        
+        self._update_display()
+        self.phase_status = "done"
+        self._mark_phase_done("lateral_movement")
+    
+    def _run_ssl_pinning_phase(self):
+        """Phase 28: SSL/TLS Certificate Pinning Bypass"""
+        self.phase_detail = "[SSL] Analyzing SSL/TLS pinning mechanisms..."
+        self._update_display()
+        
+        try:
+            live_hosts = self.state.get("live_hosts", [])
+            ssl_results = []
+            
+            for host_info in live_hosts[:5]:
+                url = host_info.get('url')
+                if not url:
+                    continue
+                
+                self.phase_detail = f"[SSL] Checking {url.split('//')[-1][:30]} certificate pinning..."
+                self._update_display()
+                
+                result = self.ssl_pinning_bypass.analyze_pinning(
+                    url,
+                    progress_cb=self._progress_callback
+                )
+                ssl_results.append(result)
+                
+                if result.get('pinning_detected'):
+                    self.stats['vulns'] += 1
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("📌", "Pinning", url, "Certificate pinning detected")
+                
+                if result.get('bypass_techniques'):
+                    techniques = result['bypass_techniques']
+                    self.stats['exploited'] += len(techniques)
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("🔓", "SSL Bypass", url, f"{len(techniques)} techniques")
+            
+            self.state.update(ssl_pinning_findings=ssl_results)
+            bypass_count = sum(len(r.get('bypass_techniques', [])) for r in ssl_results)
+            self.last_action = f"ssl: {bypass_count} pinning bypass vectors found"
+            self.phase_detail = f"[SSL] Complete - {bypass_count} SSL/TLS bypass methods identified"
+            
+        except Exception as e:
+            self.logger.error(f"[SSL] Phase failed: {e}")
+            self.last_action = f"ssl error: {str(e)[:50]}"
+            self.phase_detail = f"[SSL] Error - {str(e)[:60]}"
+        
+        self._update_display()
+        self.phase_status = "done"
+        self._mark_phase_done("ssl_pinning")
+    
+    def _run_zero_day_phase(self):
+        """Phase 29: Zero-Day Vulnerability Detection"""
+        self.phase_detail = "[ZERO] Searching for zero-day vulnerabilities..."
+        self._update_display()
+        
+        try:
+            endpoints = self.state.get("endpoints", [])
+            zero_day_results = []
+            
+            for endpoint in endpoints[:10]:
+                self.phase_detail = f"[ZERO] Fuzzing {endpoint.get('path', '/')[:30]}..."
+                self._update_display()
+                
+                result = self.zero_day_detection.detect_zero_days(
+                    endpoint,
+                    progress_cb=self._progress_callback
+                )
+                zero_day_results.append(result)
+                
+                if result.get('anomalies'):
+                    anomalies = result['anomalies']
+                    self.stats['vulns'] += len(anomalies)
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("🔥", "Anomaly", endpoint.get('path', '/'), f"{len(anomalies)} detected")
+            
+            self.state.update(zero_day_findings=zero_day_results)
+            anomaly_count = sum(len(r.get('anomalies', [])) for r in zero_day_results)
+            self.last_action = f"zero_day: {anomaly_count} potential zero-days detected"
+            self.phase_detail = f"[ZERO] Complete - {anomaly_count} anomalies requiring analysis"
+            
+        except Exception as e:
+            self.logger.error(f"[ZERO] Phase failed: {e}")
+            self.last_action = f"zero_day error: {str(e)[:50]}"
+            self.phase_detail = f"[ZERO] Error - {str(e)[:60]}"
+        
+        self._update_display()
+        self.phase_status = "done"
+        self._mark_phase_done("zero_day")
+    
+    def _run_container_escape_phase(self):
+        """Phase 30: Container/Cloud Environment Escape"""
+        self.phase_detail = "[CONTAINER] Probing for container/cloud escape vectors..."
+        self._update_display()
+        
+        try:
+            exploited_hosts = self.state.get("live_hosts", [])[:3]
+            container_results = []
+            
+            for host_info in exploited_hosts:
+                url = host_info.get('url')
+                if not url:
+                    continue
+                
+                self.phase_detail = f"[CONTAINER] Checking {url.split('//')[-1][:30]} for isolation..."
+                self._update_display()
+                
+                result = self.container_escape.detect_container_env(
+                    url,
+                    progress_cb=self._progress_callback
+                )
+                container_results.append(result)
+                
+                if result.get('is_containerized'):
+                    self.stats['exploited'] += 1
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("📦", "Container", url, result.get('container_type', 'Unknown'))
+                
+                if result.get('escape_vectors'):
+                    vectors = result['escape_vectors']
+                    self.stats['exploited'] += len(vectors)
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("🚀", "Escape", url, f"{len(vectors)} vectors")
+            
+            self.state.update(container_findings=container_results)
+            escape_count = sum(len(r.get('escape_vectors', [])) for r in container_results)
+            self.last_action = f"container: {escape_count} escape vectors identified"
+            self.phase_detail = f"[CONTAINER] Complete - {escape_count} container escape paths found"
+            
+        except Exception as e:
+            self.logger.error(f"[CONTAINER] Phase failed: {e}")
+            self.last_action = f"container error: {str(e)[:50]}"
+            self.phase_detail = f"[CONTAINER] Error - {str(e)[:60]}"
+        
+        self._update_display()
+        self.phase_status = "done"
+        self._mark_phase_done("container_escape")
+    
+    def _run_custom_exploit_phase(self):
+        """Phase 31: Custom Exploit Framework Execution"""
+        self.phase_detail = "[CUSTOM] Loading and executing custom exploits..."
+        self._update_display()
+        
+        try:
+            vulnerabilities = self.state.get("vulnerabilities", [])
+            custom_results = []
+            
+            for vuln in vulnerabilities[:5]:
+                self.phase_detail = f"[CUSTOM] Testing exploit for {vuln.get('type', 'unknown')[:30]}..."
+                self._update_display()
+                
+                result = self.custom_exploit.execute_exploit(
+                    vuln,
+                    progress_cb=self._progress_callback
+                )
+                custom_results.append(result)
+                
+                if result.get('exploit_success'):
+                    self.stats['exploited'] += 1
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("💥", "Custom", vuln.get('type', 'exploit'), "Successful")
+                
+                if result.get('custom_payloads'):
+                    payloads = result['custom_payloads']
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("📦", "Payload", vuln.get('type', 'exploit'), f"{len(payloads)} loaded")
+            
+            self.state.update(custom_exploit_findings=custom_results)
+            success_count = sum(1 for r in custom_results if r.get('exploit_success'))
+            self.last_action = f"custom_exploit: {success_count} custom exploits succeeded"
+            self.phase_detail = f"[CUSTOM] Complete - {success_count} successful custom exploitations"
+            
+        except Exception as e:
+            self.logger.error(f"[CUSTOM] Phase failed: {e}")
+            self.last_action = f"custom error: {str(e)[:50]}"
+            self.phase_detail = f"[CUSTOM] Error - {str(e)[:60]}"
+        
+        self._update_display()
+        self.phase_status = "done"
+        self._mark_phase_done("custom_exploit")
+    
+    def _run_log_evasion_phase(self):
+        """Phase 32: Log Evasion & Forensic Evidence Removal"""
+        self.phase_detail = "[EVASION] Removing forensic evidence and evading detection..."
+        self._update_display()
+        
+        try:
+            exploited_hosts = self.state.get("live_hosts", [])[:3]
+            evasion_results = []
+            
+            for host_info in exploited_hosts:
+                url = host_info.get('url')
+                if not url:
+                    continue
+                
+                self.phase_detail = f"[EVASION] Cleaning logs on {url.split('//')[-1][:30]}..."
+                self._update_display()
+                
+                result = self.log_evasion.erase_evidence(
+                    url,
+                    progress_cb=self._progress_callback
+                )
+                evasion_results.append(result)
+                
+                if result.get('logs_erased'):
+                    self.stats['exploited'] += 1
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("🧹", "Evasion", url, "Logs cleaned")
+                
+                if result.get('detection_evasion'):
+                    if self.batch_display:
+                        self.batch_display._add_to_feed("👻", "Stealth", url, "Detection avoided")
+            
+            self.state.update(log_evasion_findings=evasion_results)
+            cleaned_count = sum(1 for r in evasion_results if r.get('logs_erased'))
+            self.last_action = f"evasion: cleaned logs on {cleaned_count} hosts"
+            self.phase_detail = f"[EVASION] Complete - Forensic evidence removed from {cleaned_count} systems"
+            
+        except Exception as e:
+            self.logger.error(f"[EVASION] Phase failed: {e}")
+            self.last_action = f"evasion error: {str(e)[:50]}"
+            self.phase_detail = f"[EVASION] Error - {str(e)[:60]}"
+        
+        self._update_display()
+        self.phase_status = "done"
+        self._mark_phase_done("log_evasion")
+
     def _run_ddos_phase(self):
 
         exploit_results = self.state.get("exploit_results", [])
@@ -5651,7 +6283,7 @@ def main():
     }
 
     if args.target:
-        target_file = "/tmp/ai_recon_single_target.txt"
+        target_file = os.path.expanduser("~/ai_recon_single_target.txt")
         with open(target_file, "w") as f:
             f.write(args.target.strip() + "\n")
         args.file = target_file
