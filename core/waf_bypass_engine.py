@@ -199,6 +199,32 @@ class WAFBypassEngine:
             # No bypass - return original only
             return [base_payload]
         
+        # ENHANCED: Add URL encoding tricks, UTF-8 bypass
+        if bypass_mode == BypassMode.ENCODE:
+            variants.append(urllib.parse.quote(base_payload, safe=''))  # Full URL encoding
+            variants.append(urllib.parse.quote(urllib.parse.quote(base_payload, safe=''), safe=''))  # Double encoding
+            # UTF-8 bypass for special chars
+            try:
+                utf8_payload = ''.join(f'%{ord(c):02x}' if c not in 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~' else c for c in base_payload)
+                variants.append(utf8_payload)
+            except:
+                pass
+            # Hex encoding
+            hex_payload = ''.join(f'%{ord(c):02X}' for c in base_payload)
+            variants.append(hex_payload)
+            return variants[:count]
+        
+        # ENHANCED: Add case manipulation with spacer tricks
+        if bypass_mode == BypassMode.CASE_MANGLE:
+            # Toggle case
+            variants.append(base_payload.swapcase())
+            # Mixed case
+            mixed = ''.join(c.upper() if i % 2 else c for i, c in enumerate(base_payload))
+            variants.append(mixed)
+            # Add space/tab tricks
+            variants.append(base_payload.replace(' ', '\t'))
+            return variants[:count]
+        
         elif bypass_mode == BypassMode.ENCODE:
             variants.extend([
                 self._url_encode_payload(base_payload),

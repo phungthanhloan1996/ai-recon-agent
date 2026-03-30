@@ -558,16 +558,59 @@ class DiscoveryEngine:
         return endpoint
 
     def deduplicate_endpoints(self, endpoints: List[Dict]) -> List[Dict]:
-        """Remove duplicate endpoints"""
-        seen = set()
+        """Remove duplicate endpoints with intelligent URL normalization.
+        
+        FIX #7: Normalize URLs, strip noise params (fbclid, utm_*, etc.), handle query variations
+        """
+        from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+        
+        seen = {}  # Map normalized URL -> original endpoint
         unique = []
+        noise_params = {'fbclid', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'gclid', 'msclkid'}
 
         for ep in endpoints:
             url = ep.get('url', '')
-            if url and url not in seen:
-                seen.add(url)
-                unique.append(ep)
+            if not url:
+                continue
+            
+            # Normalize URL: parse, filter params, reconstruct
+            try:
+                parsed = urlparse(url)
+                
+                # Filter out noise tracking parameters
+                if parsed.query:
+                    params = parse_qs(parsed.query, keep_blank_values=True)
+                    clean_params = {k: v for k, v in params.items() if k.lower() not in noise_params}
+                    clean_query = urlencode(clean_params, doseq=True) if clean_params else ""
+                else:
+                    clean_query = ""
+                
+                # Reconstruct normalized URL (without fragment)
+                normalized_url = urlunparse((
+                    parsed.scheme,
+                    parsed.netloc.lower(),  # Domain lowercase
+                    parsed.path,
+                    parsed.params,
+                    clean_query,
+                    ""  # Remove fragment
+                ))
+                
+                # Also check if we've seen this without params
+                path_only_key = urlunparse((parsed.scheme, parsed.netloc.lower(), parsed.path, parsed.params, "", ""))
+                
+                # Avoid duplicates by normalized URL
+                if normalized_url not in seen and path_only_key not in seen:
+                    seen[normalized_url] = True
+                    unique.append(ep)
+                    
+            except Exception as e:
+                # Fallback to simple dedup if parsing fails
+                if url not in seen:
+                    seen[url] = True
+                    unique.append(ep)
+                logger.debug(f"[CRAWLER] Failed to normalize {url}: {e}")
 
+        logger.debug(f"[CRAWLER] Deduplicated {len(endpoints)} → {len(unique)} endpoints")
         return unique
 
     def classify_endpoints(self, endpoints: List[Dict]) -> List[Dict]:

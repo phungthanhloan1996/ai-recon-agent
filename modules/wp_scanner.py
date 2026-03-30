@@ -11,6 +11,7 @@ import logging
 import urllib.request
 import urllib.parse
 import urllib.error
+import config
 from urllib.parse import urlparse
 from typing import Dict, List, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -561,7 +562,9 @@ class WordPressScannerEngine:
                 cmd_env = os.environ.copy()
                 cmd_env["WPSCAN_CACHE_DIR"] = self.wpscan_cache_dir
                 
-                ret, out, err = run_command(cmd, timeout=config.WPSCAN_TIMEOUT, env=cmd_env)
+                # Use timeout from config or default to 180 seconds
+                timeout_val = int(os.getenv('WPSCAN_TIMEOUT', 180))
+                ret, out, err = run_command(cmd, timeout=timeout_val, env=cmd_env)
                 
                 # Handle specific exit codes
                 if ret == 5:
@@ -570,7 +573,16 @@ class WordPressScannerEngine:
                     if self.wps_token and attempt == 0:
                         logger.debug("[WP] Retrying WPScan without API token...")
                         self.wps_token = ""
-                        cmd = [c for c in cmd if c != "--api-token" and not (cmd[cmd.index(c)-1:cmd.index(c)+2] if cmd.index(c) > 0 else False)]
+                        cmd = [
+                            "wpscan",
+                            "--url", url,
+                            "--format", "json",
+                            "--cache-dir", self.wpscan_cache_dir,
+                            "--disable-tls-checks",
+                            "-e", "vp,u,m",
+                            "--no-update",
+                            "--stealthy",
+                        ]
                         continue
                     else:
                         logger.debug(f"[WP] WPScan failed with code 5 - skipping (likely API token invalid)")

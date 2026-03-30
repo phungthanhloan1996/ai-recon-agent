@@ -17,13 +17,13 @@ class ScanBudget:
     live_primary_targets: int = 220
     live_secondary_targets: int = 90
     live_ports_secondary: int = 4
-    live_timeout: int = 6
+    live_timeout: int = 20  # HTTP request timeout (increased from 6 to 20)
 
     # Discovery/crawl
     crawl_seed_urls: int = 260
     crawl_browser_urls: int = 40
     crawl_browser_links_per_url: int = 120
-    crawl_timeout: int = 10
+    crawl_timeout: int = 20  # HTTP request timeout for crawling (increased from 10 to 20)
     crawl_workers_http: int = 20
     crawl_workers_browser: int = 4
 
@@ -48,11 +48,11 @@ class ScanBudget:
                 live_primary_targets=350,
                 live_secondary_targets=140,
                 live_ports_secondary=6,
-                live_timeout=7,
+                live_timeout=20,  # HTTP request timeout (increased from 7 to 20)
                 crawl_seed_urls=450,
                 crawl_browser_urls=70,
                 crawl_browser_links_per_url=180,
-                crawl_timeout=12,
+                crawl_timeout=20,  # HTTP request timeout (increased from 12 to 20)
                 crawl_workers_http=30,
                 crawl_workers_browser=6,
                 scan_prioritized_endpoints=220,

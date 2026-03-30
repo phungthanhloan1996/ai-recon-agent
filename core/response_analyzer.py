@@ -77,15 +77,15 @@ class VulnerabilityScorer:
             score += 0.3
             evidence.append("Confirmed by multiple payloads")
         
-        # Apply floor: remove low-confidence findings
-        if score < self.min_viable_score:
+        # Apply floor: remove low-confidence findings (lowered from 0.5 to 0.35 for blind injection)
+        if score < 0.35:
             return {
                 'score': 0.0,
                 'severity': 'DISCARDED',
                 'evidence': evidence,
                 'evidence_count': len(evidence),
                 'validation_status': 'invalid',
-                'reason': 'Score below minimum viable threshold (0.5)'
+                'reason': 'Score below minimum viable threshold (0.35)'
             }
         
         # Normalize to [0.5, 1.0] for viable findings

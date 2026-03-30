@@ -25,54 +25,76 @@ class WaybackRunner:
 
     def fetch_urls(self, domain: str, max_urls: int = 5000) -> List[str]:
         """
-        Fetch URLs from Wayback Machine
+        Fetch URLs from Wayback Machine with pagination support
 
         Args:
             domain: Target domain
-            max_urls: Maximum URLs to fetch
+            max_urls: Maximum URLs to fetch (can exceed 2000 with pagination)
 
         Returns:
             List of discovered URLs
         """
         urls = set()
-
+        
         try:
-            # Wayback CDX API parameters
-            params = {
-                'url': f"*.{domain}/*",  # Include subdomains
-                'output': 'json',
-                'fl': 'original',  # Only return original URLs
-                'collapse': 'urlkey',  # Collapse duplicates
-                'limit': max_urls
-            }
+            import config
+            # Use configured pagination size (default 5000) instead of hard 2000 limit
+            page_size = config.WAYBACK_PAGINATION_SIZE if hasattr(config, 'WAYBACK_PAGINATION_SIZE') else 5000
+            pagination_step = config.WAYBACK_PAGINATION_OFFSET if hasattr(config, 'WAYBACK_PAGINATION_OFFSET') else 5000
+            
+            offset = 0
+            fetched_count = 0
+            
+            while fetched_count < max_urls:
+                logger.info(f"[WAYBACK] Fetching {domain} (offset: {offset}, total: {fetched_count})")
+                
+                # Wayback CDX API parameters with pagination
+                params = {
+                    'url': f"*.{domain}/*",  # Include subdomains
+                    'output': 'json',
+                    'fl': 'original',  # Only return original URLs
+                    'collapse': 'urlkey',  # Collapse duplicates
+                    'limit': min(page_size, max_urls - fetched_count),  # Limit per page
+                    'offset': offset  # Pagination offset
+                }
 
-            logger.info(f"[WAYBACK] Fetching URLs for {domain}")
+                response = self.session.get(self.base_url, params=params, timeout=30)
 
-            response = self.session.get(self.base_url, params=params, timeout=30)
+                if response.status_code == 200:
+                    data = response.json()
+                    page_urls = []
+                    
+                    # Skip header row if present and collect URLs
+                    for row in data[1:] if len(data) > 0 else []:  # Skip first row (headers)
+                        if isinstance(row, list) and len(row) > 0:
+                            url = row[0]
+                            if url.startswith(('http://', 'https://')) and url not in urls:
+                                urls.add(url)
+                                page_urls.append(url)
+                                fetched_count += 1
+                                if fetched_count >= max_urls:
+                                    break
+                    
+                    # If we got fewer URLs than requested, we've hit the end
+                    if len(page_urls) < min(page_size, max_urls - fetched_count + len(page_urls)):
+                        logger.info(f"[WAYBACK] Reached end of results after {fetched_count} URLs")
+                        break
+                    
+                    # Move to next page
+                    offset += pagination_step
+                else:
+                    logger.error(f"[WAYBACK] API error: {response.status_code}")
+                    break
 
-            if response.status_code == 200:
-                data = response.json()
-
-                # Skip header row if present
-                for row in data:
-                    if isinstance(row, list) and len(row) > 0:
-                        url = row[0]
-                        if url.startswith(('http://', 'https://')):
-                            urls.add(url)
-
-                logger.info(f"[WAYBACK] Discovered {len(urls)} URLs from Wayback Machine")
-                return list(urls)
-
-            else:
-                logger.error(f"[WAYBACK] API error: {response.status_code}")
-                return []
+            logger.info(f"[WAYBACK] Discovered {len(urls)} unique URLs from Wayback Machine")
+            return list(urls)
 
         except requests.exceptions.RequestException as e:
             logger.error(f"[WAYBACK] Request error: {e}")
-            return []
+            return list(urls)
         except Exception as e:
             logger.error(f"[WAYBACK] Error: {e}")
-            return []
+            return list(urls)
 
     def fetch_by_year(self, domain: str, year: int) -> List[str]:
         """Fetch URLs from a specific year"""

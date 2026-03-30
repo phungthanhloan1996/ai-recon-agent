@@ -39,7 +39,8 @@ class HTTPClient:
             "fast": self.base_timeout,
             "normal": int(self.base_timeout * 1.5),
             "slow": int(self.base_timeout * 3),
-            "exploit": int(self.base_timeout * 5)
+            "exploit": int(self.base_timeout * 5),
+            "connect": 15  # Connection timeout (was 7, now 15)
         }
         self.max_retries = max_retries
         self.session_manager = session_manager
@@ -207,15 +208,25 @@ class HTTPClient:
             raise
 
     def _record_dead_host_error(self, host: str, hard: bool = False):
+        """Track consecutive failures and blacklist host after threshold.
+        
+        FIX #4: Early host blacklist - blacklist after N consecutive failures (default 8)
+        """
         if not host:
             return
+        
+        # Get configurable threshold (default 8 failures before blacklist)
+        failure_threshold = getattr(config, 'HTTP_CONSECUTIVE_FAILURES_BLACKLIST', 8)
+        
         if hard:
-            self._dead_host_errors[host] = 3
+            self._dead_host_errors[host] = failure_threshold  # Immediately blacklist on DNS/hard failure
         else:
             self._dead_host_errors[host] = self._dead_host_errors.get(host, 0) + 1
-        if self._dead_host_errors[host] >= 3 and host not in self._dead_hosts:
+        
+        # Blacklist if threshold reached
+        if self._dead_host_errors[host] >= failure_threshold and host not in self._dead_hosts:
             self._dead_hosts.add(host)
-            logger.warning(f"[HTTP] Marking {host} as dead after 3 failures")
+            logger.warning(f"[HTTP] Blacklisting host {host} after {self._dead_host_errors[host]} consecutive failures (threshold: {failure_threshold})")
 
     def _clear_dead_host_error(self, host: str):
         if not host:

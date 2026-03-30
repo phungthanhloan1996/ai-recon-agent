@@ -6,7 +6,9 @@ import os
 DEFAULT_TIMEOUT = 180  # Default timeout for lightweight operations
 HEAVY_TOOL_TIMEOUT = 600  # Timeout for heavy tools: Katana, Hakrawler, Nuclei, WPScan
 GROQ_TIMEOUT = 15  # Groq API timeout
-HTTP_TIMEOUT = 10  # HTTP request timeout
+HTTP_TIMEOUT = 30  # HTTP request timeout (increased from 20 to handle slow targets)
+AMASS_TIMEOUT = int(os.getenv('AMASS_TIMEOUT', 120))  # Amass needs longer timeout for passive sources (was 45s)
+CT_API_TIMEOUT = int(os.getenv('CT_API_TIMEOUT', 20))  # Certificate Transparency lookups
 
 # AI Configuration
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
@@ -69,7 +71,10 @@ AI_RESPONSE_SCAN_MIN_CONFIDENCE = float(os.getenv('AI_RESPONSE_SCAN_MIN_CONFIDEN
 HTTP_MIN_DELAY = float(os.getenv('HTTP_MIN_DELAY', '0.75'))
 HTTP_MAX_DELAY = float(os.getenv('HTTP_MAX_DELAY', '5.0'))
 HTTP_BACKOFF_FACTOR = float(os.getenv('HTTP_BACKOFF_FACTOR', '1.0'))
-HTTP_POOL_SIZE = int(os.getenv('HTTP_POOL_SIZE', 20))
+HTTP_POOL_SIZE = int(os.getenv('HTTP_POOL_SIZE', 50))  # Increased from 20 (was causing pool exhaustion)
+HTTP_CONSECUTIVE_FAILURES_BLACKLIST = int(os.getenv('HTTP_CONSECUTIVE_FAILURES_BLACKLIST', 8))  # Blacklist after N consecutive failures
+WPSCAN_RATE_LIMIT_COOLDOWN = int(os.getenv('WPSCAN_RATE_LIMIT_COOLDOWN', 60))  # 429 backoff cooldown in seconds
+WPSCAN_429_MAX_RETRIES = int(os.getenv('WPSCAN_429_MAX_RETRIES', 3))  # Retries for 429 errors
 
 # Tool Execution
 CRAWLER_TOOL_MAX_RETRIES = int(os.getenv('CRAWLER_TOOL_MAX_RETRIES', 1))
@@ -91,6 +96,10 @@ NUCLEI_MAX_RETRIES = int(os.getenv('NUCLEI_MAX_RETRIES', 1))
 MAX_URL_LENGTH = int(os.getenv('MAX_URL_LENGTH', 8192))
 SKIP_MALFORMED_URLS = os.getenv('SKIP_MALFORMED_URLS', 'true').lower() == 'true'
 ARJUN_IGNORE_ERRORS = os.getenv('ARJUN_IGNORE_ERRORS', 'true').lower() == 'true'
+WAYBACK_PAGINATION_SIZE = int(os.getenv('WAYBACK_PAGINATION_SIZE', 5000))  # Pagination limit for Wayback (was hard 2000)
+WAYBACK_PAGINATION_OFFSET = int(os.getenv('WAYBACK_PAGINATION_OFFSET', 5000))  # Amount to step each pagination
+URL_DEDUP_ENABLED = os.getenv('URL_DEDUP_ENABLED', 'true').lower() == 'true'  # Normalize URLs, strip noise params
+WAF_BYPASS_FILTER_NO_PARAMS = os.getenv('WAF_BYPASS_FILTER_NO_PARAMS', 'true').lower() == 'true'  # Skip WAF bypass for URLs without parameters
 
 # Adaptive Timeout
 ADAPTIVE_TIMEOUT_ENABLED = os.getenv('ADAPTIVE_TIMEOUT_ENABLED', 'true').lower() == 'true'
@@ -104,3 +113,8 @@ ERROR_RECOVERY_SKIP_PHASE_AFTER = int(os.getenv('ERROR_RECOVERY_SKIP_PHASE_AFTER
 ENABLE_CRAWLER_FALLBACK = os.getenv('ENABLE_CRAWLER_FALLBACK', 'true').lower() == 'true'
 FALLBACK_TO_ARCHIVED_ON_TIMEOUT = os.getenv('FALLBACK_TO_ARCHIVED_ON_TIMEOUT', 'true').lower() == 'true'
 MIN_LIVE_HOSTS_FOR_FALLBACK = int(os.getenv('MIN_LIVE_HOSTS_FOR_FALLBACK', 3))
+
+# Per-Target Resource Isolation
+MAX_CONCURRENT_TARGETS = int(os.getenv('MAX_CONCURRENT_TARGETS', 2))  # Process 2 targets at a time max
+PER_TARGET_HTTP_POOL_SIZE = int(os.getenv('PER_TARGET_HTTP_POOL_SIZE', 25))  # Pool size per target
+PER_TARGET_CRAWLER_WORKERS = int(os.getenv('PER_TARGET_CRAWLER_WORKERS', 8))  # Workers per target

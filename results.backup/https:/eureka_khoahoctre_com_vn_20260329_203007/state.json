@@ -1,0 +1,90 @@
+{
+  "target": "https://eureka.khoahoctre.com.vn",
+  "scan_id": "eureka_khoahoctre_com_vn_20260329_203007",
+  "start_time": "2026-03-29T20:30:07.544580",
+  "seed_targets": [
+    {
+      "url": "https://eureka.khoahoctre.com.vn",
+      "source": "input_seed",
+      "host": "eureka.khoahoctre.com.vn",
+      "port": 443,
+      "scheme": "https",
+      "priority": 100
+    }
+  ],
+  "discovered_targets": [],
+  "all_scan_targets": [
+    {
+      "url": "https://eureka.khoahoctre.com.vn",
+      "source": "input_seed",
+      "host": "eureka.khoahoctre.com.vn",
+      "port": 443,
+      "scheme": "https",
+      "priority": 100
+    }
+  ],
+  "subdomains": [
+    "eureka.khoahoctre.com.vn",
+    "mail.eureka.khoahoctre.com.vn",
+    "www.eureka.khoahoctre.com.vn"
+  ],
+  "live_hosts": [],
+  "technologies": {},
+  "urls": [],
+  "archived_urls": [],
+  "endpoints": [],
+  "prioritized_endpoints": [],
+  "endpoint_probe_results": [],
+  "tech_stack": [],
+  "vulnerabilities": [],
+  "confirmed_vulnerabilities": [],
+  "scan_responses": [],
+  "scan_metadata": {
+    "budget": {
+      "recon_validate_urls": 220,
+      "recon_gau_timeout": 150,
+      "recon_dns_verify_limit": 1000,
+      "recon_validate_workers": 24,
+      "recon_cache_ttl_hours": 36,
+      "live_primary_targets": 350,
+      "live_secondary_targets": 140,
+      "live_ports_secondary": 6,
+      "live_timeout": 7,
+      "crawl_seed_urls": 450,
+      "crawl_browser_urls": 70,
+      "crawl_browser_links_per_url": 180,
+      "crawl_timeout": 12,
+      "crawl_workers_http": 30,
+      "crawl_workers_browser": 6,
+      "scan_prioritized_endpoints": 220,
+      "toolkit_hosts": 14,
+      "toolkit_parallel_tools": 5
+    },
+    "aggressive": true
+  },
+  "security_findings": [],
+  "rce_chain_possibilities": [],
+  "wordpress_detected": false,
+  "wp_sites": [],
+  "wp_plugins": [],
+  "wp_themes": [],
+  "wp_users": [],
+  "wp_vulns": [],
+  "wp_vulnerabilities": [],
+  "wp_core": {},
+  "core_vulnerabilities": [],
+  "wp_conditioned_findings": [],
+  "wp_version": "unknown",
+  "wp_scan_confidence": 0.0,
+  "wp_pattern_matches": {},
+  "exploit_chains": [],
+  "exploit_results": [],
+  "external_findings": [],
+  "mutated_payloads": [],
+  "authenticated_sessions": [],
+  "manual_validation_required": [],
+  "manual_validation_completed": [],
+  "manual_attack_playbook": [],
+  "current_phase": "init",
+  "errors": []
+}

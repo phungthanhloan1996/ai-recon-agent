@@ -111,40 +111,59 @@ class CVELookup:
         return cves
 
     def _fetch_from_wpscan(self, endpoint: str, name: str, version: str) -> List[Dict]:
-        """Fetch từ WPScan API."""
+        """Fetch từ WPScan API với exponential backoff cho 429 rate limit errors."""
+        import time
         try:
             url = f"https://wpscan.com/api/v3/{endpoint}/{name}"
             headers = {"Authorization": f"Token token={self.api_token}"}
-            response = requests.get(url, headers=headers, timeout=10)
+            
+            # Retry logic cho 429 errors
+            max_retries = config.WPSCAN_429_MAX_RETRIES if hasattr(config, 'WPSCAN_429_MAX_RETRIES') else 3
+            for attempt in range(max_retries + 1):
+                response = requests.get(url, headers=headers, timeout=10)
 
-            if response.status_code != 200:
-                if response.status_code != 404:
-                    logger.warning(f"[CVE] WPScan returned {response.status_code} for {name}")
-                return []
+                # Handle 429 (Too Many Requests) - rate limited
+                if response.status_code == 429:
+                    if attempt < max_retries:
+                        cooldown = config.WPSCAN_RATE_LIMIT_COOLDOWN if hasattr(config, 'WPSCAN_RATE_LIMIT_COOLDOWN') else 60
+                        backoff_delay = cooldown * (2 ** attempt)  # Exponential backoff: 60s, 120s, 240s, ...
+                        logger.warning(f"[CVE] WPScan rate limited (429) for {name}. Backing off {backoff_delay}s (attempt {attempt + 1}/{max_retries + 1})")
+                        time.sleep(backoff_delay)
+                        continue
+                    else:
+                        logger.error(f"[CVE] WPScan rate limit exceeded after {max_retries} retries for {name}")
+                        return []
+                
+                # Handle other non-200 statuses
+                if response.status_code != 200:
+                    if response.status_code != 404:
+                        logger.warning(f"[CVE] WPScan returned {response.status_code} for {name}")
+                    return []
 
-            data = response.json()
-            vulnerabilities = []
-            for vuln in data.get("vulnerabilities", []):
-                affected_versions = vuln.get("affected_versions", "")
-                if self._version_affected(version, affected_versions):
-                    vulnerabilities.append(
-                        {
-                            "cve": self._extract_cve_id(vuln),
-                            "title": vuln.get("title", ""),
-                            "description": vuln.get("description", ""),
-                            "severity": (vuln.get("severity") or "MEDIUM").upper(),
-                            "cvss_score": self._extract_wpscan_cvss(vuln),
-                            "fixed_in": vuln.get("fixed_in", ""),
-                            "references": self._normalize_references(vuln.get("references", {})),
-                            "component": name,
-                            "affected_versions": affected_versions,
-                            "source": "wpscan",
-                        }
-                    )
-            return vulnerabilities
+                # Success - parse vulnerabilities
+                data = response.json()
+                vulnerabilities = []
+                for vuln in data.get("vulnerabilities", []):
+                    affected_versions = vuln.get("affected_versions", "")
+                    if self._version_affected(version, affected_versions):
+                        vulnerabilities.append(
+                            {
+                                "cve": self._extract_cve_id(vuln),
+                                "title": vuln.get("title", ""),
+                                "description": vuln.get("description", ""),
+                                "severity": (vuln.get("severity") or "MEDIUM").upper(),
+                                "cvss_score": self._extract_wpscan_cvss(vuln),
+                                "fixed_in": vuln.get("fixed_in", ""),
+                                "references": self._normalize_references(vuln.get("references", {})),
+                                "component": name,
+                                "affected_versions": affected_versions,
+                                "source": "wpscan",
+                            }
+                        )
+                return vulnerabilities
         except Exception as e:
             logger.error(f"[CVE] WPScan fetch failed for {name}: {e}")
-            return []
+        return []
 
     def _fetch_from_nvd(self, keyword: str, version: str) -> List[Dict]:
         """Fetch từ NVD API."""

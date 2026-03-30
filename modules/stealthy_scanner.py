@@ -265,8 +265,31 @@ class StealthyScanner:
         """
         Test a payload with automatic WAF bypass escalation.
         
+        FIX #8: Skip WAF bypass for URLs without parameters (noise filtering)
+        
         Returns: Vulnerability dict if found, None otherwise
         """
+        # FIX #8: Filter URLs with no injection parameters - they don't need WAF bypass
+        from urllib.parse import urlparse
+        parsed = urlparse(endpoint_url)
+        
+        if config.WAF_BYPASS_FILTER_NO_PARAMS and not parsed.query:
+            # URL has no parameters - skip WAF bypass logic, just do normal test
+            logger.debug(f"[SCANNER] Skipping WAF bypass for parameter-less URL: {endpoint_url}")
+            response = self._execute_test(
+                endpoint_url,
+                parameter,
+                payload,
+                target=target
+            )
+            if response and not self.waf_bypass_engine.detect_waf_blocking(
+                response.get('status_code', 0),
+                response.get('headers', {}),
+                response.get('body', '')
+            )[0]:
+                return self._analyze_response(response, vuln_type, endpoint_url, parameter, payload)
+            return None
+        
         current_bypass_mode = BypassMode.NONE
         
         for attempt in range(max_bypass_attempts):

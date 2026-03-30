@@ -10,6 +10,7 @@ import ssl
 import socket
 import time
 import posixpath
+import ipaddress
 from urllib.parse import urlparse
 from urllib.parse import urljoin, quote
 import urllib.request
@@ -50,8 +51,11 @@ class ReconEngine:
         if not self.target:
             raise ValueError("Target domain not found in state")
 
-        # Remove protocol if present
-        self.target = self.target.replace("https://", "").replace("http://", "").strip()
+        parsed_target = urlparse(self.target if "://" in self.target else f"https://{self.target}")
+        self.target_host = parsed_target.hostname or self.target.replace("https://", "").replace("http://", "").strip()
+        self.target_port = parsed_target.port
+        self.target = self.target_host
+        self.is_public_hostname = self._is_public_hostname(self.target_host)
 
         # Initialize integrations
         self.subfinder = SubfinderRunner(output_dir)
@@ -215,6 +219,10 @@ class ReconEngine:
         """Discover subdomains using passive techniques"""
         logger.info("[RECON] Discovering subdomains")
 
+        if not self.is_public_hostname:
+            logger.info(f"[RECON] Skipping passive subdomain enumeration for local/non-public target: {self.target_host}")
+            return []
+
         subdomains: Set[str] = set()
         source_map: Dict[str, Set[str]] = {}
 
@@ -237,9 +245,9 @@ class ReconEngine:
                 for sub in assetfinder_subs:
                     source_map.setdefault(sub, set()).add("assetfinder")
 
-        # Amass passive
+        # Amass passive - uses configurable timeout (default 120s, was 45s)
         if tool_available("amass"):
-            amass_timeout = int(os.environ.get("AMASS_TIMEOUT", "45"))
+            amass_timeout = config.AMASS_TIMEOUT
             rc, stdout, _ = run_command(
                 ["amass", "enum", "-passive", "-norecursive", "-noalts", "-d", self.target, "-silent"],
                 timeout=amass_timeout,
@@ -254,7 +262,7 @@ class ReconEngine:
                 for sub in amass_subs:
                     source_map.setdefault(sub, set()).add("amass")
             elif rc == -2:
-                logger.warning(f"[RECON] Amass timed out after {amass_timeout}s; continuing with other sources")
+                logger.warning(f"[RECON] Amass timed out after {amass_timeout}s; continuing with other sources (increase AMASS_TIMEOUT env if needed)")
 
         # CRT.sh (small passive boost)
         crt_subs = set(self.fallback_cert_transparency())
@@ -286,6 +294,10 @@ class ReconEngine:
     def discover_archived_urls(self) -> List[str]:
         """Discover URLs from archive sources"""
         logger.info("[RECON] Discovering archived URLs")
+
+        if not self.is_public_hostname:
+            logger.info(f"[RECON] Skipping archive lookups for local/non-public target: {self.target_host}")
+            return []
 
         urls = set()
 
@@ -450,37 +462,98 @@ class ReconEngine:
         return list(normalized)
 
     def fallback_cert_transparency(self) -> List[str]:
-        """Fetch subdomains from crt.sh Certificate Transparency logs"""
-        logger.info(f"[RECON] Querying Certificate Transparency logs for {self.target}")
+        """Fetch subdomains from crt.sh Certificate Transparency logs with improved error handling.
         
-        # THÊM RETRY LOGIC
+        FIX #6: Handle empty/invalid CT responses better
+        """
+        logger.info(f"[RECON] Querying Certificate Transparency logs for {self.target}")
+
+        if not self.is_public_hostname:
+            logger.info(f"[RECON] Skipping CT lookup for local/non-public target: {self.target_host}")
+            return []
+        
+        ct_timeout = config.CT_API_TIMEOUT if hasattr(config, 'CT_API_TIMEOUT') else 20
+        
+        # Retry with XML/JSON fallback
         for attempt in range(2):
             try:
                 query = f"%25.{self.target}"
                 url = f"https://crt.sh/?q={quote(query)}&output=json"
-                with urllib.request.urlopen(url, timeout=10) as resp:
-                    raw = resp.read().decode('utf-8', errors='replace').strip()
-                    if not raw.startswith("["):
-                        raise ValueError(f"Unexpected CT response prefix: {raw[:80]}")
-                    data = json.loads(raw)
                 
+                with urllib.request.urlopen(url, timeout=ct_timeout) as resp:
+                    raw = resp.read().decode('utf-8', errors='replace').strip()
+                    
+                    # FIX #6: Better handling of empty and invalid responses
+                    if not raw or raw == "null" or raw == "" or raw == "[]":
+                        logger.debug(f"[RECON] CT returned empty response")
+                        return []
+                    
+                    if not raw.startswith("["):
+                        logger.debug(f"[RECON] CT response not JSON array: {raw[:80]}")
+                        # Try to fallback to XML
+                        if attempt == 0:
+                            try:
+                                url_xml = f"https://crt.sh/?q={quote(query)}&output=xml"
+                                with urllib.request.urlopen(url_xml, timeout=ct_timeout) as resp_xml:
+                                    xml_data = resp_xml.read().decode('utf-8', errors='replace')
+                                    # Just log and skip XML parsing for now
+                                    logger.debug(f"[RECON] CT XML response available but skipping")
+                            except Exception as xml_e:
+                                logger.debug(f"[RECON] CT XML fallback failed: {xml_e}")
+                        time.sleep(1)
+                        continue
+                    
+                    try:
+                        data = json.loads(raw)
+                    except json.JSONDecodeError as je:
+                        logger.debug(f"[RECON] CT JSON parse failed: {je}")
+                        if attempt == 0:
+                            time.sleep(1)
+                            continue
+                        return []
+                
+                # Extract subdomains
                 subdomains = set()
-                for entry in data[:50]:  # Limit to first 50
-                    if 'name_value' in entry:
+                for entry in data[:100]:  # Increased limit from 50 to 100
+                    if isinstance(entry, dict) and 'name_value' in entry:
                         subs = str(entry['name_value']).strip().split('\n')
                         for sub in subs:
-                            if self.target in sub:
-                                subdomains.add(sub.lower())
+                            sub = sub.lower().strip()
+                            if sub and self.target in sub:
+                                subdomains.add(sub)
                 
                 logger.info(f"[RECON] Found {len(subdomains)} CT subdomains")
                 return list(subdomains)
-            except Exception as e:
+                
+            except socket.timeout as e:
+                logger.warning(f"[RECON] CT lookup timeout after {ct_timeout}s (attempt {attempt + 1}/2): {e}")
                 if attempt == 0:
                     time.sleep(2)
                     continue
-                logger.warning(f"[RECON] CT lookup failed after retry: {e}")
+                return []
+            except Exception as e:
+                logger.warning(f"[RECON] CT lookup failed (attempt {attempt + 1}/2): {e}")
+                if attempt == 0:
+                    time.sleep(2)
+                    continue
                 return []
         return []
+
+    def _is_public_hostname(self, host: str) -> bool:
+        host = (host or "").strip().lower()
+        if not host:
+            return False
+        if host in {"localhost", "localhost.localdomain"}:
+            return False
+        try:
+            ip = ipaddress.ip_address(host)
+            return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast)
+        except ValueError:
+            pass
+        if "." not in host:
+            return False
+        local_suffixes = (".local", ".localhost", ".internal", ".lan", ".home", ".test", ".example", ".invalid")
+        return not host.endswith(local_suffixes)
 
     def _filter_useful_urls(self, urls) -> List[str]:
         filtered: List[str] = []

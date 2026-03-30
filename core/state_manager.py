@@ -134,6 +134,40 @@ class StateManager:
         if endpoint.get("path") not in paths:
             self.state.endpoints.append(endpoint)
 
+    def update_technologies(self, host: str, tech_data: Dict[str, Any]):
+        technologies = self.state.technologies or {}
+        current = technologies.get(host, {})
+        if not isinstance(current, dict):
+            current = {"value": current}
+        current.update(tech_data)
+        technologies[host] = current
+        self.state.technologies = technologies
+        self._dirty = True
+        self.save(force=False)
+
+    def upsert_endpoint(self, endpoint: Dict[str, Any]):
+        if not isinstance(endpoint, dict):
+            return
+        url = endpoint.get("url")
+        if not url:
+            return
+        for existing in self.state.endpoints:
+            if isinstance(existing, dict) and existing.get("url") == url:
+                existing.update(endpoint)
+                self._dirty = True
+                self.save(force=False)
+                return
+        self.state.endpoints.append(endpoint)
+        self._dirty = True
+        self.save(force=False)
+
+    def update_scan_metadata(self, **kwargs):
+        metadata = self.state.scan_metadata or {}
+        metadata.update(kwargs)
+        self.state.scan_metadata = metadata
+        self._dirty = True
+        self.save(force=False)
+
     def add_vulnerability(self, vuln: Dict):
         self.state.vulnerabilities.append(vuln)
 
@@ -294,5 +328,4 @@ class StateManager:
             "wordpress": s.wordpress_detected,
             "wp_plugins": len(s.wp_plugins),
         }
-
 

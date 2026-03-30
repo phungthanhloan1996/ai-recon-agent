@@ -6,8 +6,11 @@ Runs high-value scanners on selected live hosts.
 import json
 import logging
 import os
+import re
+import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Any, Callable, Optional
+from urllib.parse import urlparse
 
 from core.executor import run_command, tool_available
 from core.state_manager import StateManager
@@ -34,6 +37,7 @@ class ToolkitScanner:
         self.dirbusting_runner = DirBustingRunner(output_dir)
         self.wappalyzer_runner = WappalyzerRunner(output_dir)
         self.api_scanner = APIScannerRunner(output_dir)
+        self.toolkit_metrics = {"tech": 0, "ports": 0, "dirs": 0, "api": 0, "vulns": 0}
 
     def run(
         self,
@@ -53,8 +57,97 @@ class ToolkitScanner:
         with open(self.results_file, "w") as f:
             json.dump(findings, f, indent=2)
         self.state.update(external_findings=findings)
+        self.state.update_scan_metadata(toolkit_metrics=self.toolkit_metrics.copy())
         logger.info(f"[TOOLKIT] Recorded {len(findings)} findings")
         return findings
+
+    def _notify_progress(
+        self,
+        progress_cb: Optional[Callable[[str, str, str], None]],
+        tool: str,
+        status: str,
+        detail: str = ""
+    ):
+        if progress_cb:
+            try:
+                progress_cb("toolkit", tool, status, detail)
+            except TypeError:
+                progress_cb("toolkit", tool, status)
+
+    def _merge_toolkit_data_into_state(self, finding: Dict[str, Any]):
+        tool = finding.get("tool", "")
+        data = finding.get("data", {}) or {}
+        persisted = (self.state.get("scan_metadata", {}) or {}).get("toolkit_metrics", {}) or {}
+        metrics = {
+            "tech": max(int(self.toolkit_metrics.get("tech", 0)), int(persisted.get("tech", 0) or 0)),
+            "ports": max(int(self.toolkit_metrics.get("ports", 0)), int(persisted.get("ports", 0) or 0)),
+            "dirs": max(int(self.toolkit_metrics.get("dirs", 0)), int(persisted.get("dirs", 0) or 0)),
+            "api": max(int(self.toolkit_metrics.get("api", 0)), int(persisted.get("api", 0) or 0)),
+            "vulns": max(int(self.toolkit_metrics.get("vulns", 0)), int(persisted.get("vulns", 0) or 0)),
+        }
+
+        if tool == "whatweb":
+            for tech in data.get("technologies", []):
+                tech_name = tech.get("name")
+                if not tech_name:
+                    continue
+                self.state.update_technologies(tech_name, tech)
+            metrics["tech"] = len(self.state.get("technologies", {}) or {})
+            metrics["vulns"] += len(data.get("vulnerabilities", []) or [])
+
+        elif tool == "wappalyzer":
+            version_info = data.get("version_info", {}) or {}
+            for tech_name in data.get("technologies", []):
+                if not tech_name:
+                    continue
+                payload = {"name": tech_name}
+                if tech_name in version_info:
+                    payload["version"] = version_info[tech_name]
+                self.state.update_technologies(tech_name, payload)
+            metrics["tech"] = len(self.state.get("technologies", {}) or {})
+
+        elif tool in {"nmap", "naabu"}:
+            ports = data.get("ports", []) or []
+            if ports:
+                host = finding.get("host", "")
+                self.state.update_technologies(host, {"open_ports": ports})
+                metrics["ports"] = max(metrics["ports"], len(ports))
+
+        elif tool == "api_scanner":
+            api_endpoints = []
+            for endpoint in data.get("rest_endpoints", []) or []:
+                api_endpoints.append(endpoint)
+            for endpoint in data.get("graphql_endpoints", []) or []:
+                api_endpoints.append(endpoint)
+            for doc in data.get("api_docs", []) or []:
+                if isinstance(doc, dict):
+                    api_endpoints.append(doc.get("url") or doc.get("endpoint"))
+            base_url = finding.get("url", "").rstrip("/")
+            normalized = []
+            for endpoint in api_endpoints:
+                if not endpoint:
+                    continue
+                if endpoint.startswith(("http://", "https://")):
+                    normalized.append(endpoint)
+                elif endpoint.startswith("/") and base_url:
+                    normalized.append(f"{base_url}{endpoint}")
+            for endpoint_url in dict.fromkeys(normalized):
+                self.state.upsert_endpoint({
+                    "url": endpoint_url,
+                    "source": "api_scanner",
+                    "categories": ["api"],
+                    "method": "GET",
+                })
+            metrics["api"] = max(metrics["api"], len(dict.fromkeys(normalized)))
+            metrics["vulns"] += len(data.get("vulnerabilities", []) or [])
+
+        elif tool == "dirbusting":
+            dirs = data.get("directories", []) or []
+            files = data.get("files", []) or []
+            metrics["dirs"] = max(metrics["dirs"], len(dirs) + len(files))
+
+        self.toolkit_metrics = metrics
+        self.state.update_scan_metadata(toolkit_metrics=self.toolkit_metrics.copy())
 
     def _select_high_value_hosts(self, live_hosts: List[Dict[str, Any]]) -> List[str]:
         scored: List[tuple[int, str]] = []
@@ -95,12 +188,12 @@ class ToolkitScanner:
     ) -> List[Dict[str, Any]]:
         """Run comprehensive toolkit scans on URL"""
         out: List[Dict[str, Any]] = []
-        host = url.split("://", 1)[-1].split("/", 1)[0]
+        host, explicit_port = self._extract_host_and_port(url)
         
         # Tier 1: High-priority scanners (parallel)
         logger.info(f"[TOOLKIT] Starting comprehensive scan on {url}")
         
-        tier1_results = self._run_tier1_scanners(url, host, progress_cb)
+        tier1_results = self._run_tier1_scanners(url, host, explicit_port, progress_cb)
         out.extend(tier1_results)
         
         # Tier 2: Advanced scanners (only on aggressive mode)
@@ -118,6 +211,7 @@ class ToolkitScanner:
         self,
         url: str,
         host: str,
+        explicit_port: Optional[int],
         progress_cb: Optional[Callable[[str, str, str], None]] = None
     ) -> List[Dict[str, Any]]:
         """Priority 1: Technology detection and vulnerability scanning"""
@@ -139,11 +233,13 @@ class ToolkitScanner:
             jobs.append(("nikto", lambda: self._scan_nikto(url, progress_cb, timeout=180)))
         
         # Naabu - fast port scanning (if naabu is available)
-        if tool_available("naabu"):
+        if explicit_port is not None and tool_available("nmap"):
+            jobs.append(("nmap", lambda: self._scan_nmap(host, explicit_port, progress_cb, timeout=180)))
+        elif tool_available("naabu"):
             jobs.append(("naabu", lambda: self._scan_naabu(host, progress_cb, timeout=180)))
         elif tool_available("nmap"):
             # Fallback to nmap with increased timeout
-            jobs.append(("nmap", lambda: self._scan_nmap(host, progress_cb, timeout=180)))
+            jobs.append(("nmap", lambda: self._scan_nmap(host, None, progress_cb, timeout=180)))
         
         workers = int(self.budget.get("toolkit_parallel_tools", 4))
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -158,6 +254,15 @@ class ToolkitScanner:
                     logger.error(f"Error in tier1 scanner: {e}")
         
         return out
+
+    def _extract_host_and_port(self, url: str) -> tuple[str, Optional[int]]:
+        parsed = urlparse(url)
+        host = parsed.hostname or parsed.netloc or url
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        return host, port
 
     def _run_tier2_scanners(
         self,
@@ -204,13 +309,18 @@ class ToolkitScanner:
         timeout: int = 60
     ) -> Optional[Dict[str, Any]]:
         """Run whatweb scanner"""
-        if progress_cb:
-            progress_cb("toolkit", "whatweb", "running")
+        self._notify_progress(progress_cb, "whatweb", "running", "whatweb: detecting technologies...")
         
         try:
             result = self.whatweb_runner.run(url, timeout=timeout)
-            if progress_cb:
-                progress_cb("toolkit", "whatweb", "done" if result.get("success") else "failed")
+            self._notify_progress(
+                progress_cb,
+                "whatweb",
+                "done" if result.get("success") else "failed",
+                f"whatweb: detected {len(result.get('technologies', []))} technologies"
+                if result.get("success")
+                else "whatweb: no data"
+            )
             
             if result.get("success"):
                 # Log detected technologies
@@ -221,6 +331,11 @@ class ToolkitScanner:
                 for vuln in result.get("vulnerabilities", []):
                     logger.warning(f"[WHATWEB-CVE] {vuln.get('cve')} in {vuln.get('technology')} {vuln.get('version')}")
                 
+                self._merge_toolkit_data_into_state({
+                    "tool": "whatweb",
+                    "data": result,
+                    "url": url,
+                })
                 return {
                     "tool": "whatweb",
                     "url": url,
@@ -256,19 +371,22 @@ class ToolkitScanner:
         progress_cb: Optional[Callable[[str, str, str], None]] = None
     ) -> Optional[Dict[str, Any]]:
         """Run wappalyzer scanner"""
-        if progress_cb:
-            progress_cb("toolkit", "wappalyzer", "running")
+        self._notify_progress(progress_cb, "wappalyzer", "running", "wappalyzer: fingerprinting stack...")
         
         try:
             result = self.wappalyzer_runner.run(url, timeout=60)
-            if progress_cb:
-                progress_cb("toolkit", "wappalyzer", "done")
+            self._notify_progress(progress_cb, "wappalyzer", "done", f"wappalyzer: found {len(result.get('technologies', []))} technologies")
             
             if result.get("technologies"):
                 # Log detected technologies
                 for tech in result.get("technologies", []):
                     logger.info(f"[WAPPALYZER] {tech}")
                 
+                self._merge_toolkit_data_into_state({
+                    "tool": "wappalyzer",
+                    "data": result,
+                    "url": url,
+                })
                 return {
                     "tool": "wappalyzer",
                     "url": url,
@@ -287,13 +405,11 @@ class ToolkitScanner:
         timeout: int = 90
     ) -> Optional[Dict[str, Any]]:
         """Run WAF detection"""
-        if progress_cb:
-            progress_cb("toolkit", "wafw00f", "running")
+        self._notify_progress(progress_cb, "wafw00f", "running", "wafw00f: detecting web application firewall...")
         
         try:
             ret, stdout, _ = run_command(["wafw00f", "-a", url], timeout=timeout)
-            if progress_cb:
-                progress_cb("toolkit", "wafw00f", "done" if ret == 0 else "failed")
+            self._notify_progress(progress_cb, "wafw00f", "done" if ret == 0 else "failed", "wafw00f: detection complete")
             
             if ret == 0 and stdout:
                 severity = "LOW" if "No WAF detected" in stdout else "INFO"
@@ -333,8 +449,7 @@ class ToolkitScanner:
         timeout: int = 180
     ) -> Optional[Dict[str, Any]]:
         """Run nikto vulnerability scanner"""
-        if progress_cb:
-            progress_cb("toolkit", "nikto", "running")
+        self._notify_progress(progress_cb, "nikto", "running", "nikto: probing web server misconfigurations...")
         
         try:
             # Prepare output file path
@@ -344,8 +459,7 @@ class ToolkitScanner:
                 ["nikto", "-host", url, "-maxtime", "2m", "-Format", "json", "-o", output_file],
                 timeout=180
             )
-            if progress_cb:
-                progress_cb("toolkit", "nikto", "done" if ret == 0 else "failed")
+            self._notify_progress(progress_cb, "nikto", "done" if ret == 0 else "failed", "nikto: scan finished")
             
             if ret == 0 and os.path.exists(output_file):
                 logger.info(f"[NIKTO] Scan completed on {url}, saved to {output_file}")
@@ -367,13 +481,11 @@ class ToolkitScanner:
         timeout: int = 120
     ) -> Optional[Dict[str, Any]]:
         """Run naabu for fast port scanning"""
-        if progress_cb:
-            progress_cb("toolkit", "naabu", "running")
+        self._notify_progress(progress_cb, "naabu", "running", f"naabu: scanning common ports on {host}...")
         
         try:
             result = self.naabu_runner.run(host, timeout=timeout)
-            if progress_cb:
-                progress_cb("toolkit", "naabu", "done" if result.get("success") else "failed")
+            self._notify_progress(progress_cb, "naabu", "done" if result.get("success") else "failed", f"naabu: found {len(result.get('ports', []))} open ports")
             
             if result.get("success") and result.get("ports"):
                 logger.info(f"[NAABU] Found {len(result.get('ports', []))} open ports on {host}")
@@ -381,6 +493,11 @@ class ToolkitScanner:
                     service = service_info.get("service", "Unknown")
                     logger.debug(f"[NAABU] Port {port}: {service}")
                 
+                self._merge_toolkit_data_into_state({
+                    "tool": "naabu",
+                    "data": result,
+                    "host": host,
+                })
                 return {
                     "tool": "naabu",
                     "host": host,
@@ -412,16 +529,21 @@ class ToolkitScanner:
     def _scan_nmap(
         self,
         host: str,
+        explicit_port: Optional[int] = None,
         progress_cb: Optional[Callable[[str, str, str], None]] = None,
         timeout: int = 120
     ) -> Optional[Dict[str, Any]]:
         """Run nmap for port scanning (fallback) - optimized"""
-        if progress_cb:
-            progress_cb("toolkit", "nmap", "running")
+        port_hint = str(explicit_port) if explicit_port is not None else "top-50"
+        self._notify_progress(progress_cb, "nmap", "running", f"nmap: scanning ports {port_hint} on {host}...")
         
         try:
             # Optimized: fewer ports, faster timing
-            cmd = ["nmap", "-Pn", "--top-ports", "50", "--open", host]
+            cmd = ["nmap", "-Pn", "--open"]
+            if explicit_port is not None:
+                cmd.extend(["-p", str(explicit_port), host])
+            else:
+                cmd.extend(["--top-ports", "50", host])
             
             # Add timing - local hosts get faster settings
             if host in ["localhost", "127.0.0.1", "::1"]:
@@ -430,31 +552,58 @@ class ToolkitScanner:
                 cmd.append("-T4")
             
             ret, stdout, stderr = run_command(cmd, timeout=timeout)
-            if progress_cb:
-                progress_cb("toolkit", "nmap", "done" if ret == 0 else "failed")
-            
+            parsed_ports = self._parse_nmap_ports(stdout or "")
+            self._notify_progress(progress_cb, "nmap", "done" if ret == 0 else "failed", f"nmap: found {len(parsed_ports)} open ports")
             if ret == 0 and stdout:
-                open_ports = stdout.count("/tcp open") if stdout else 0
+                open_ports = len(parsed_ports)
                 logger.info(f"[NMAP] Port scan completed on {host}: {open_ports} ports open")
+                if parsed_ports:
+                    self.state.update_technologies(host, {"open_ports": [p["port"] for p in parsed_ports]})
+                self._merge_toolkit_data_into_state({
+                    "tool": "nmap",
+                    "data": {
+                        "ports": [p["port"] for p in parsed_ports],
+                        "services": {p["port"]: {"service": p["service"], "state": p["state"]} for p in parsed_ports},
+                    },
+                    "host": host,
+                })
                 return {
                     "tool": "nmap",
                     "host": host,
                     "severity": "INFO",
                     "output": stdout[:2000],
                     "success": True,
-                    "ports_found": open_ports
+                    "ports_found": open_ports,
+                    "data": {
+                        "ports": [p["port"] for p in parsed_ports],
+                        "services": {p["port"]: {"service": p["service"], "state": p["state"]} for p in parsed_ports}
+                    }
                 }
             elif stdout:
                 # Partial results
-                open_ports = stdout.count("/tcp open") if stdout else 0
+                open_ports = len(parsed_ports)
                 logger.warning(f"[NMAP] Partial {host}: {open_ports} ports")
+                if parsed_ports:
+                    self.state.update_technologies(host, {"open_ports": [p["port"] for p in parsed_ports]})
+                self._merge_toolkit_data_into_state({
+                    "tool": "nmap",
+                    "data": {
+                        "ports": [p["port"] for p in parsed_ports],
+                        "services": {p["port"]: {"service": p["service"], "state": p["state"]} for p in parsed_ports},
+                    },
+                    "host": host,
+                })
                 return {
                     "tool": "nmap",
                     "host": host,
                     "severity": "INFO",
                     "output": stdout[:1000],
                     "success": True if open_ports > 0 else False,
-                    "ports_found": open_ports
+                    "ports_found": open_ports,
+                    "data": {
+                        "ports": [p["port"] for p in parsed_ports],
+                        "services": {p["port"]: {"service": p["service"], "state": p["state"]} for p in parsed_ports}
+                    }
                 }
             else:
                 logger.warning(f"[NMAP] Failed for {host}")
@@ -486,19 +635,36 @@ class ToolkitScanner:
         
         return None
 
+    def _parse_nmap_ports(self, output: str) -> List[Dict[str, Any]]:
+        ports: List[Dict[str, Any]] = []
+        for line in output.splitlines():
+            match = re.match(r"^\s*(\d+)/(tcp|udp)\s+(\S+)\s+(.+?)\s*$", line)
+            if not match:
+                continue
+            state = match.group(3).strip().lower()
+            if state != "open":
+                continue
+            service = match.group(4).strip().split()[0]
+            ports.append({
+                "port": int(match.group(1)),
+                "protocol": match.group(2),
+                "state": state,
+                "service": service,
+            })
+        return ports
+
     def _scan_dirbusting(
         self,
         url: str,
         progress_cb: Optional[Callable[[str, str, str], None]] = None
     ) -> Optional[Dict[str, Any]]:
         """Run directory brute-forcing"""
-        if progress_cb:
-            progress_cb("toolkit", "dirbusting", "running")
+        self._notify_progress(progress_cb, "dirbusting", "running", "dirbusting: testing common paths...")
         
         try:
             result = self.dirbusting_runner.run(url, timeout=180)
-            if progress_cb:
-                progress_cb("toolkit", "dirbusting", "done" if result.get("success") else "failed")
+            tested_paths = len(result.get("directories", []) or []) + len(result.get("files", []) or [])
+            self._notify_progress(progress_cb, "dirbusting", "done" if result.get("success") else "failed", f"dirbusting: tested {tested_paths} discovered paths")
             
             if result.get("success"):
                 found_count = len(result.get("directories", [])) + len(result.get("files", []))
@@ -509,6 +675,11 @@ class ToolkitScanner:
                     for path in result.get("suspicious", []):
                         logger.warning(f"[DIRBUSTING-SUSPICIOUS] {path}")
                     
+                    self._merge_toolkit_data_into_state({
+                        "tool": "dirbusting",
+                        "data": result,
+                        "url": url,
+                    })
                     return {
                         "tool": "dirbusting",
                         "url": url,
@@ -526,8 +697,7 @@ class ToolkitScanner:
         progress_cb: Optional[Callable[[str, str, str], None]] = None
     ) -> Optional[Dict[str, Any]]:
         """Run ffuf web fuzzer"""
-        if progress_cb:
-            progress_cb("toolkit", "ffuf", "running")
+        self._notify_progress(progress_cb, "ffuf", "running", "ffuf: fuzzing content paths...")
         
         try:
             wordlist = "/usr/share/seclists/Discovery/Web-Content/common.txt"
@@ -547,8 +717,7 @@ class ToolkitScanner:
                 ],
                 timeout=180
             )
-            if progress_cb:
-                progress_cb("toolkit", "ffuf", "done" if ret == 0 else "failed")
+            self._notify_progress(progress_cb, "ffuf", "done" if ret == 0 else "failed", "ffuf: fuzzing finished")
             
             if ret == 0:
                 logger.info(f"[FFUF] Web fuzzing completed on {url}")
@@ -569,14 +738,19 @@ class ToolkitScanner:
         progress_cb: Optional[Callable[[str, str, str], None]] = None
     ) -> Optional[Dict[str, Any]]:
         """Run API scanner"""
-        if progress_cb:
-            progress_cb("toolkit", "api_scanner", "running")
+        self._notify_progress(progress_cb, "api_scanner", "running", "api_scanner: discovering REST/GraphQL/docs...")
         
         try:
             result = self.api_scanner.scan(url)
-            if progress_cb:
-                progress_cb("toolkit", "api_scanner", "done")
-            
+            apis_found = (
+                list(result.get("rest_endpoints", []))
+                + list(result.get("graphql_endpoints", []))
+                + [doc.get("url") or doc.get("endpoint") for doc in result.get("api_docs", []) if isinstance(doc, dict)]
+            )
+            apis_found = [api for api in apis_found if api]
+            result["apis_found"] = list(dict.fromkeys(apis_found))
+            self._notify_progress(progress_cb, "api_scanner", "done", f"api_scanner: found {len(result['apis_found'])} API endpoints")
+
             if result.get("apis_found"):
                 logger.info(f"[API] Found {len(result.get('apis_found', []))} API endpoints")
                 
@@ -584,6 +758,11 @@ class ToolkitScanner:
                 for vuln in result.get("vulnerabilities", []):
                     logger.warning(f"[API-VULN] {vuln.get('type')} ({vuln.get('severity')})")
                 
+                self._merge_toolkit_data_into_state({
+                    "tool": "api_scanner",
+                    "data": result,
+                    "url": url,
+                })
                 return {
                     "tool": "api_scanner",
                     "url": url,
@@ -594,4 +773,3 @@ class ToolkitScanner:
             logger.error(f"API scanner error: {e}")
         
         return None
-
