@@ -1,6 +1,7 @@
 # AI Decision Modules
 
 - ./ai/chain_planner.py
+- ./ai/payload_optimizer.py
 - ./ai/groq_client.py
 - ./ai/payload_gen.py
 - ./ai/__init__.py

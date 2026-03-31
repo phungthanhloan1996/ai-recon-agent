@@ -24,11 +24,17 @@ import threading
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Any
 import config
-# ─── Suppress DEBUG logs from libraries ────────────────────────────────────
-logging.getLogger("urllib3").setLevel(logging.WARNING)
-logging.getLogger("urllib3.connectionpool").setLevel(logging.WARNING)
-logging.getLogger("requests").setLevel(logging.WARNING)
-logging.getLogger("chardet").setLevel(logging.WARNING)
+# ─── Suppress ALL logs from libraries (connection errors, timeouts, etc.) ────
+logging.getLogger("urllib3").setLevel(logging.CRITICAL)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.CRITICAL)
+logging.getLogger("requests").setLevel(logging.CRITICAL)
+logging.getLogger("chardet").setLevel(logging.CRITICAL)
+logging.getLogger("httpx").setLevel(logging.CRITICAL)
+logging.getLogger("httpcore").setLevel(logging.CRITICAL)
+logging.getLogger("urllib").setLevel(logging.CRITICAL)
+logging.getLogger("urllib3.connectionpool").propagate = False
+logging.getLogger("requests").propagate = False
+logging.getLogger("urllib3").propagate = False
 
 # ─── Core Components ─────────────────────────────────────────────────────────
 from core.state_manager import StateManager
@@ -110,6 +116,13 @@ from reports.report_generator import ReportGenerator
 
 # ─── Modules ─────────────────────────────────────────────────────────────────
 from modules.recon import ReconEngine
+
+# ─── NEW: Enhanced Analysis & Validation Modules ─────────────────────────────
+from modules.service_fingerprinter import ServiceFingerprinter
+from modules.exploit_verifier import ExploitVerifier
+from modules.false_positive_filter import FalsePositiveFilter
+from ai.payload_optimizer import PayloadOptimizer
+from core.chain_validator import ChainValidator
 from modules.crawler import DiscoveryEngine
 from modules.scanner import ScanningEngine
 from modules.exploiter import ExploitTestEngine
@@ -163,12 +176,111 @@ def check_api_keys() -> dict:
     }
 
 
+# ─── ANSI COLOR CODES ───────────────────────────────────────────────────────
+class Colors:
+    """Modern color scheme for terminal output"""
+    # Basic colors
+    RESET = '\033[0m'
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    ITALIC = '\033[3m'
+    UNDERLINE = '\033[4m'
+    
+    # Foreground colors
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+    
+    # Bright colors
+    BRIGHT_RED = '\033[91m'
+    BRIGHT_GREEN = '\033[92m'
+    BRIGHT_YELLOW = '\033[93m'
+    BRIGHT_BLUE = '\033[94m'
+    BRIGHT_MAGENTA = '\033[95m'
+    BRIGHT_CYAN = '\033[96m'
+    BRIGHT_WHITE = '\033[97m'
+    
+    # Background colors
+    BG_BLUE = '\033[44m'
+    BG_GREEN = '\033[42m'
+    BG_RED = '\033[41m'
+    BG_YELLOW = '\033[43m'
+    BG_DIM = '\033[100m'
+    
+    @staticmethod
+    def rgb(r, g, b):
+        """Return ANSI 24-bit RGB color code"""
+        return f'\033[38;2;{r};{g};{b}m'
+    
+    @staticmethod
+    def bg_rgb(r, g, b):
+        """Return ANSI 24-bit RGB background color code"""
+        return f'\033[48;2;{r};{g};{b}m'
+    
+    @staticmethod
+    def gradient(colors, text):
+        """Apply gradient effect to text"""
+        if not colors:
+            return text
+        step = len(text) / len(colors)
+        result = []
+        for i, char in enumerate(text):
+            color_idx = min(int(i / step), len(colors) - 1)
+            result.append(f"{colors[color_idx]}{char}")
+        result.append(Colors.RESET)
+        return ''.join(result)
+
+
+# ─── MODERN THEME ───────────────────────────────────────────────────────────
+class Theme:
+    """Modern color theme for the dashboard"""
+    # Primary gradient (cyan to blue to purple)
+    PRIMARY = [
+        Colors.rgb(0, 255, 255),    # Cyan
+        Colors.rgb(0, 200, 255),    # Light blue
+        Colors.rgb(100, 100, 255),  # Blue
+        Colors.rgb(180, 0, 255),    # Purple
+    ]
+    
+    # Success gradient (green to teal)
+    SUCCESS = [Colors.rgb(0, 255, 136), Colors.rgb(0, 200, 200)]
+    
+    # Warning gradient (yellow to orange)
+    WARNING = [Colors.rgb(255, 255, 0), Colors.rgb(255, 150, 0)]
+    
+    # Danger gradient (orange to red)
+    DANGER = [Colors.rgb(255, 100, 0), Colors.rgb(255, 0, 80)]
+    
+    # UI elements
+    BORDER = Colors.rgb(60, 60, 80)
+    HEADER_BG = Colors.rgb(20, 20, 40)
+    SECTION_BG = Colors.rgb(15, 15, 30)
+    TEXT_PRIMARY = Colors.rgb(200, 200, 220)
+    TEXT_SECONDARY = Colors.rgb(120, 120, 150)
+    TEXT_DIM = Colors.rgb(80, 80, 100)
+    
+    # Status colors
+    RUNNING = Colors.rgb(0, 200, 255)
+    COMPLETED = Colors.rgb(0, 255, 136)
+    FAILED = Colors.rgb(255, 80, 80)
+    WAITING = Colors.rgb(255, 200, 0)
+
+
 # ─── BATCH DISPLAY SYSTEM ───────────────────────────────────────────────────
 class BatchDisplay:
     """
-    Hiển thị real-time cho continuous batch mode
-    Đơn giản, chỉ hiển thị đúng những gì đang chạy
+    Modern real-time display for continuous batch mode
+    Features: gradient colors, smooth progress bars, clean layout
     """
+    # Terminal width for consistent formatting
+    TERM_WIDTH = 100
+    CONTENT_WIDTH = 96  # TERM_WIDTH - 4 for borders
+    
     def __init__(self, api_status: Optional[dict] = None, max_workers: int = 5, targets_file: str = "targets.txt"):
         self.api_status = api_status or {}
         self.domains = {}  # domain -> scan data
@@ -203,7 +315,22 @@ class BatchDisplay:
         self.render_thread.start()
         self.spinner_index = 0
         self.spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+        self.spinner_frames_alt = ['▹▹▹▹▹', '▸▹▹▹▹', '▹▸▹▹▹', '▹▹▸▹▹', '▹▹▹▸▹', '▹▹▹▹▸']
         self.ddos_attacker = None
+        
+        # Phase tracking for display
+        self.ALL_PHASES = [
+            'recon', 'live', 'wp', 'toolkit', 'crawl', 'wp_detect_state',
+            'js_hunter', 'param_mine', 'auth', 'classify', 'rank', 'scan',
+            'analyze', 'cve_analysis', 'pivot', 'graph', 'chain', 'select',
+            'exploit', 'sqli_exploit', 'upload_bypass', 'reverse_shell',
+            'privesc', 'waf_bypass', 'boolean_sqli', 'xss', 'idor',
+            'default_creds', 'cve_exploit', 'api_vuln', 'subdomain_takeover',
+            'mfa_bypass', 'oauth_saml', 'persistence', 'lateral_movement',
+            'ssl_pinning', 'zero_day', 'container_escape', 'custom_exploit',
+            'log_evasion', 'learn', 'ddos', 'report'
+        ]
+        self.PHASE_ORDER = {phase: idx for idx, phase in enumerate(self.ALL_PHASES)}
     def stop(self):
         self.running = False
     
@@ -285,10 +412,24 @@ class BatchDisplay:
     def _get_progress_bar(self, current: int, total: int, width: int = 10) -> str:
         """Create a visual progress bar"""
         if total == 0:
-            return "░" * width
+            # Show animated spinner when no data yet
+            frame = self.spinner_frames[self.spinner_index % len(self.spinner_frames)]
+            return f"{frame}{'░' * (width - 1)}"
         filled = int(width * current / total)
         bar = "█" * filled + "░" * (width - filled)
         return bar
+
+    def _get_waiting_spinner(self) -> str:
+        """Get animated waiting spinner for 'no data yet' states"""
+        frame = self.spinner_frames[self.spinner_index % len(self.spinner_frames)]
+        return frame
+
+    def _get_phase_progress(self, current_phase: str) -> str:
+        """Tính toán số thứ tự phase hiện tại / tổng số phase"""
+        if current_phase not in self.PHASE_ORDER:
+            return f"0/{len(self.ALL_PHASES)}"
+        current_idx = self.PHASE_ORDER[current_phase]
+        return f"{current_idx + 1}/{len(self.ALL_PHASES)}"
 
     def _get_progress_text(self, data: dict) -> str:
         """Tạo progress text dựa trên phase"""
@@ -359,9 +500,13 @@ class BatchDisplay:
             time.sleep(0.1)
     
     def _render(self):
-        """Vẽ giao diện dashboard modern"""
+        """Vẽ giao diện dashboard modern với màu sắc và progress bar đẹp"""
         with self.lock:
             sys.stdout.write('\033[H\033[J')  # Clear screen
+            
+            C = Colors
+            T = Theme
+            W = self.CONTENT_WIDTH  # 96 chars for content
             
             # Header
             elapsed = int(time.time() - self.start_time)
@@ -376,557 +521,556 @@ class BatchDisplay:
             
             # Calculate throughput metrics
             throughput = completed_count / (elapsed + 1) * 60 if elapsed > 0 else 0
-            completion_rate = int((completed_count / self.total_domains * 100)) if self.total_domains > 0 else 0
             
-            # Giảm chiều dài header
-            print("┌────────────────────────────────────────────────────────────────────────────────────────────────┐")
-            print(f"│ ⚡ AI RECON AGENT [BATCH]  uptime: {hours:02d}:{minutes:02d}:{seconds:02d}")
-            print(f"│ 📊 Speed: {throughput:.1f}/min | Active: {active_count}/{self.max_workers} | Queue: {queue_count} | Done: {completed_count}/{self.total_domains} | Failed: {failed_count}      │")
-            print(f"│ 📈 Total Findings: {self.total_vulns} vulns | {self.total_endpoints} endpoints | {self.total_exploited} exploited | {self.total_live} hosts | {self.total_wordpress} WP     │")
+            # ═══════════════════════════════════════════════════════════════════
+            # HEADER - Main title
+            # ═══════════════════════════════════════════════════════════════════
+            header_title = f"{C.BRIGHT_CYAN}⚡ AI RECON AGENT [BATCH MODE] ⚡{C.RESET}"
+            time_str = f"{C.CYAN}Uptime: {hours:02d}:{minutes:02d}:{seconds:02d}{C.RESET}"
             
-            print("├────────────────────────────────────────────────────────────────────────────────────────────────┤")
+            print(f"{T.BORDER}╔{'═' * (W + 2)}╗{C.RESET}")
+            print(f"{T.BORDER}║{C.RESET}  {header_title}{' ' * max(0, W - 40)}{time_str}  {T.BORDER}║{C.RESET}")
             
-            # Active targets - compact
-            print(f"│ ▶️  ACTIVE ({active_count}/{self.max_workers}):                                                          │")
-            if active_count > 0:
-                for idx, (domain, data) in enumerate(list(self.domains.items())[:self.max_workers], 1):
-                    phase = data.get('phase', 'init')
-                    iter_info = f"{data.get('iter', 1)}/{data.get('max_iter', 5)}"
-                    
-                    phase_icon = {
-                        'recon': '🔍', 'live': '🌐', 'wp': '🎯', 'crawl': '📁',
-                        'auth': '🔐', 'toolkit': '🛠️', 'classify': '🤖', 'rank': '📊',
-                        'scan': '⚡', 'analyze': '🔬', 'graph': '🕸️', 'chain': '🔗',
-                        'exploit': '💥', 'learn': '🧠', 'init': '⚙️', 'report': '📋'
-                    }.get(phase, '⚙️')
-                    
-                    progress = self._get_progress_text(data)
-                    domain_display = domain[:25] if len(domain) <= 25 else domain[:22] + "..."
-                    
-                    elapsed_domain = int(time.time() - data.get('start_time', time.time()))
-                    elapsed_str = f"{elapsed_domain // 60}m" if elapsed_domain >= 60 else f"{elapsed_domain}s"
-                    
-                    print(f"│  #{idx} {domain_display:<25} [{phase_icon}] {iter_info:<6} | {progress:<25} | ⏱{elapsed_str:>5}s │")
-            else:
-                print("│  (no active targets)                                                                       │")
+            # ═══════════════════════════════════════════════════════════════════
+            # STATISTICS SECTION
+            # ═══════════════════════════════════════════════════════════════════
+            print(f"{T.BORDER}╠{'═' * (W + 2)}╣{C.RESET}")
+            print(f"{T.BORDER}║{C.RESET}  {C.BOLD}📊 STATISTICS{C.RESET}{' ' * max(0, W - 16)}{T.BORDER}║{C.RESET}")
+            print(f"{T.BORDER}║{C.RESET}  ┌{'─' * (W - 4)}┐  {T.BORDER}║{C.RESET}")
             
-            # Waiting queue - compact
+            # Stats line
+            speed_color = C.GREEN if throughput > 2 else C.YELLOW if throughput > 0 else T.TEXT_DIM
+            stats_line = (
+                f"  │  {speed_color}⚡ {throughput:.1f}/min{C.RESET}    "
+                f"{C.BRIGHT_CYAN}▶ {active_count}/{self.max_workers}{C.RESET}      "
+                f"{C.BRIGHT_YELLOW}⏳ {queue_count}{C.RESET}      "
+                f"{C.BRIGHT_GREEN}✅ {completed_count}/{self.total_domains}{C.RESET}      "
+                f"{C.BRIGHT_RED}❌ {failed_count}{' ' * 5}│  "
+                f"{T.BORDER}║{C.RESET}"
+            )
+            print(stats_line)
+            
+            # Findings line
+            findings_line = (
+                f"  │  {C.BRIGHT_RED}🔴 {self.total_vulns} vulns{C.RESET}    "
+                f"{C.BRIGHT_BLUE}📁 {self.total_endpoints} eps{C.RESET}    "
+                f"{C.BRIGHT_MAGENTA}💥 {self.total_exploited} exploited{C.RESET}    "
+                f"{C.BRIGHT_GREEN}🌐 {self.total_live} live{C.RESET}    "
+                f"{C.BRIGHT_YELLOW}🎯 {self.total_wordpress} WordPress{' ' * max(0, W - 62)}│  "
+                f"{T.BORDER}║{C.RESET}"
+            )
+            print(findings_line)
+            print(f"{T.BORDER}║{C.RESET}  └{'─' * (W - 4)}┘  {T.BORDER}║{C.RESET}")
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # ACTIVE TARGETS SECTION
+            # ═══════════════════════════════════════════════════════════════════
+            print(f"{T.BORDER}║{C.RESET}  {' ' * (W + 2)}{T.BORDER}║{C.RESET}")
+            print(f"{T.BORDER}║{C.RESET}  ╔{'═' * (W - 4)}╗  {T.BORDER}║{C.RESET}")
+            print(f"{T.BORDER}║{C.RESET}  ║  {C.BOLD}▶ ACTIVE TARGETS ({active_count}/{self.max_workers}){C.RESET}{' ' * max(0, W - 30)}║  {T.BORDER}║{C.RESET}")
+            print(f"{T.BORDER}║{C.RESET}  ╠{'─' * (W - 4)}╣  {T.BORDER}║{C.RESET}")
+            
+            phase_icons = {
+                'recon': '🔍', 'live': '🌐', 'wp': '🎯', 'crawl': '📄',
+                'auth': '🔐', 'toolkit': '🔧', 'classify': '🏷️', 'rank': '📊',
+                'scan': '⚡', 'analyze': '🧪', 'graph': '🕸️', 'chain': '🔗',
+                'exploit': '💣', 'learn': '📚', 'init': '⚙️', 'report': '📋',
+                'select': '🎯', 'pivot': '🔄', 'hunt': '🔎', 'mine': '⛏️',
+                'cve_analysis': '📖', 'mfa_bypass': '🔓', 'oauth_saml': '🔑',
+                'persistence': '👻', 'lateral_movement': '↔️', 'ssl_pinning': '🔒',
+                'zero_day': '🌟', 'container_escape': '📦', 'custom_exploit': '🛠️',
+                'log_evasion': '🧹', 'sqli_exploit': '💧', 'upload_bypass': '📤',
+                'reverse_shell': '🐚', 'privesc': '⬆️', 'waf_bypass': '🛡️',
+                'boolean_sqli': '🔍', 'xss': '✨', 'idor': '🔑', 'default_creds': '🔐',
+                'cve_exploit': '🎯', 'api_vuln': '🔌', 'subdomain_takeover': '🏴',
+                'service_fp': '🔍', 'verify_vulns': '✅', 'fp_filter': '🎯',
+                'chain_validate': '🔗', 'ddos': '💣'
+            }
+            
+            for idx, (domain, data) in enumerate(list(self.domains.items())[:self.max_workers], 1):
+                phase = data.get('phase', 'init')
+                icon = phase_icons.get(phase, '⚙️')
+                
+                # Progress info
+                progress_info = self._get_progress_text(data)
+                
+                # Domain (max 28 chars)
+                dname = domain[:28] if len(domain) <= 28 else domain[:25] + "..."
+                
+                # Iteration
+                it = data.get('iter', 1)
+                max_it = data.get('max_iter', 5)
+                
+                # Elapsed time
+                el = int(time.time() - data.get('start_time', time.time()))
+                etime = f"{el // 60}m" if el >= 60 else f"{el}s"
+                
+                target_line = (
+                    f"  ║  {C.BOLD}#{idx}{C.RESET} {icon} {dname:<28}  "
+                    f"{C.YELLOW}I:{it}/{max_it}{C.RESET}   "
+                    f"{progress_info}{' ' * max(0, W - 60 - len(progress_info))}  "
+                    f"{C.DIM}⏱{etime}{C.RESET}                         ║  "
+                    f"{T.BORDER}║{C.RESET}"
+                )
+                print(target_line)
+            
+            if active_count == 0:
+                print(f"{T.BORDER}║{C.RESET}  ║  {T.TEXT_DIM}(no active targets){C.RESET}{' ' * max(0, W - 28)}║  {T.BORDER}║{C.RESET}")
+            
+            print(f"{T.BORDER}║{C.RESET}  ╚{'═' * (W - 4)}╝  {T.BORDER}║{C.RESET}")
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # QUEUE SECTION
+            # ═══════════════════════════════════════════════════════════════════
             if queue_count > 0:
-                print(f"│ ⏳ WAITING ({queue_count}):                                                                    │")
-                for domain, added_time in list(self.queue)[:2]:
-                    wait_time = int((time.time() - added_time.timestamp()) / 60)
-                    domain_display = domain[:20] if len(domain) <= 20 else domain[:17] + "..."
-                    print(f"│  • {domain_display:<20} ({wait_time}m ago)                                     │")
-                if queue_count > 2:
-                    print(f"│  • ... and {queue_count - 2} more                                                        │")
+                print(f"{T.BORDER}║{C.RESET}  {' ' * (W + 2)}{T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ╔{'═' * (W - 4)}╗  {T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ║  {C.BOLD}⏳ QUEUE ({queue_count}){C.RESET}{' ' * max(0, W - 16)}║  {T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ╠{'─' * (W - 4)}╣  {T.BORDER}║{C.RESET}")
+                
+                for domain, added_time in list(self.queue)[:3]:
+                    wt = int((time.time() - added_time.timestamp()) / 60)
+                    dn = domain[:30] if len(domain) <= 30 else domain[:27] + "..."
+                    queue_line = f"  ║    • {T.TEXT_SECONDARY}{dn}{C.RESET}{' ' * max(0, W - 38 - len(dn))}║  {T.BORDER}║{C.RESET}"
+                    print(queue_line)
+                
+                if queue_count > 3:
+                    print(f"  ║    {T.TEXT_DIM}... and {queue_count - 3} more{' ' * max(0, W - 30)}║  {T.BORDER}║{C.RESET}")
+                
+                print(f"{T.BORDER}║{C.RESET}  ╚{'═' * (W - 4)}╝  {T.BORDER}║{C.RESET}")
             
-            # Completed - show with stats
+            # ═══════════════════════════════════════════════════════════════════
+            # COMPLETED SECTION
+            # ═══════════════════════════════════════════════════════════════════
             if completed_count > 0:
-                print(f"│ ✅ DONE ({completed_count}/{self.total_domains}): [", end="")
-                for i, (d, v, e, c, tc, ts) in enumerate(list(self.completed)[:4]):
-                    if i > 0:
-                        print(", ", end="")
-                    print(f"{d[:12]}({v}v)", end="")
-                print("]" + " " * (48 - 4 * 20) + "│")
+                print(f"{T.BORDER}║{C.RESET}  {' ' * (W + 2)}{T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ╔{'═' * (W - 4)}╗  {T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ║  {C.BOLD}✅ RECENTLY COMPLETED ({min(completed_count, 10)}){C.RESET}{' ' * max(0, W - 30)}║  {T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ╠{'─' * (W - 4)}╣  {T.BORDER}║{C.RESET}")
+                
+                for d, v, e, c, tc, ts in list(self.completed)[:3]:
+                    vc = C.BRIGHT_RED if v > 0 else T.TEXT_DIM
+                    dn = d[:22] if len(d) <= 22 else d[:19] + "..."
+                    chain_info = f", {c} chains" if c > 0 else ""
+                    comp_line = (
+                        f"  ║    • {T.TEXT_SECONDARY}{dn}{C.RESET}  "
+                        f"{vc}[{'█' * min(10, v)}{'░' * max(0, 10 - v)}] {v} vulns{C.RESET}, "
+                        f"{e} exploited{chain_info}{' ' * max(0, W - 55)}║  "
+                        f"{T.BORDER}║{C.RESET}"
+                    )
+                    print(comp_line)
+                
+                if completed_count > 3:
+                    print(f"  ║    {T.TEXT_DIM}... and {completed_count - 3} more completed{' ' * max(0, W - 35)}║  {T.BORDER}║{C.RESET}")
+                
+                print(f"{T.BORDER}║{C.RESET}  ╚{'═' * (W - 4)}╝  {T.BORDER}║{C.RESET}")
             
-            # Failed - show with reasons
+            # ═══════════════════════════════════════════════════════════════════
+            # FAILED SECTION
+            # ═══════════════════════════════════════════════════════════════════
             if failed_count > 0:
-                print(f"│ ❌ FAILED ({failed_count}): [", end="")
-                for i, (d, reason, ts) in enumerate(list(self.failed)[:3]):
-                    if i > 0:
-                        print(", ", end="")
-                    reason_short = reason[:10] if reason else "?"
-                    print(f"{d[:12]}({reason_short})", end="")
-                print("]" + " " * (45 - 3 * 22) + "│")
+                print(f"{T.BORDER}║{C.RESET}  {' ' * (W + 2)}{T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ╔{'═' * (W - 4)}╗  {T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ║  {C.BOLD}❌ FAILED ({failed_count}){C.RESET}{' ' * max(0, W - 18)}║  {T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ╠{'─' * (W - 4)}╣  {T.BORDER}║{C.RESET}")
+                
+                for d, reason, ts in list(self.failed)[:2]:
+                    dn = d[:22] if len(d) <= 22 else d[:19] + "..."
+                    rs = reason[:30] if reason else "?"
+                    fail_line = f"  ║    • {T.TEXT_SECONDARY}{dn}{C.RESET}  {T.FAILED}{rs}{C.RESET}{' ' * max(0, W - 45 - len(rs))}║  {T.BORDER}║{C.RESET}"
+                    print(fail_line)
+                
+                print(f"{T.BORDER}║{C.RESET}  ╚{'═' * (W - 4)}╝  {T.BORDER}║{C.RESET}")
             
-            print("├────────────────────────────────────────────────────────────────────────────────────────────────┤")
-            
-            # Details section - hiển thị ngắn gọn cho 2 domain active
+            # ═══════════════════════════════════════════════════════════════════
+            # DETAILED STATUS SECTION
+            # ═══════════════════════════════════════════════════════════════════
             if active_count > 0:
-                print("│")
-                print("│ ─ DETAILS ────────────────────────────────────────────────────────────────────────────────────────────────")
+                print(f"{T.BORDER}║{C.RESET}  {' ' * (W + 2)}{T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ┌{C.BOLD}─ DETAILED STATUS ─{C.RESET}{'─' * max(0, W - 22)}┐  {T.BORDER}║{C.RESET}")
                 
-                for domain, data in list(self.domains.items())[:2]:
-                    stats = data.get('stats', {})
+                for domain, data in list(self.domains.items())[:self.max_workers]:
+                    dn = domain[:40] if len(domain) <= 40 else domain[:37] + "..."
                     phase = data.get('phase', 'init')
-                    phase_detail = data.get('phase_detail', '')
-                    
-                    print(f"│ {domain}:")
-                    
-                    if phase == 'recon':
-                        subs = stats.get('subs', 0)
-                        live = stats.get('live', 0)
-                        total = stats.get('total_hosts', 0)
-                        bar = self._get_progress_bar(live, total, 8) if total > 0 else "-------"
-                        live_pct = int(live * 100 / total) if total > 0 else 0
-                        print(f"│   📋 Recon: {subs:>5} subs | {live_pct:3d}% [{bar}] {live:>4}/{total:<4} live")
-                    elif phase == 'live':
-                        live = stats.get('live', 0)
-                        total = stats.get('total_hosts', 0)
-                        live_pct = int(live * 100 / total) if total > 0 else 0
-                        bar = self._get_progress_bar(live, total, 8) if total > 0 else "-------"
-                        print(f"│   🌐 Live: {live_pct:3d}% [{bar}] {live:>4}/{total:<4} hosts responding")
-                    elif phase == 'crawl':
-                        eps = stats.get('eps', 0)
-                        print(f"│   📁 Crawl: {eps:>5} endpoints discovered | Active tools")
-                    elif phase == 'toolkit':
-                        toolkit_m = data.get('toolkit_metrics', {})
-                        t, p, d, a = toolkit_m.get('tech', 0), toolkit_m.get('ports', 0), toolkit_m.get('dirs', 0), toolkit_m.get('api', 0)
-                        print(f"│   🛠️  Tools: 📱Tech={t:>3} 🔓Ports={p:>3} 📂Dirs={d:>3} 🌐API={a:>3}")
-                    elif phase == 'scan':
-                        vulns = stats.get('vulns', 0)
-                        eps = stats.get('eps', 0)
-                        tested = stats.get('payloads_tested', 0)
-                        total_p = stats.get('total_payloads', 0)
-                        scan_pct = int(tested * 100 / total_p) if total_p > 0 else 0
-                        print(f"│   ⚡ Scan: {vulns:>3} 🔴vulns found | {eps:>5} endpoints | Payloads: {scan_pct:3d}%")
-                    elif phase == 'exploit':
-                        exploited = stats.get('exploited', 0)
-                        chains = data.get('chains', [])
-                        chains_count = len(chains)
-                        exploit_pct = int(exploited * 100 / chains_count) if chains_count > 0 else 0
-                        print(f"│   💥 Exploit: {exploit_pct:3d}% [{self._get_progress_bar(exploited, chains_count, 8)}] {exploited:>2}/{chains_count:<2} chains")
-                    else:
-                        print(f"│   ⚙️  {phase}: {phase_detail or 'processing...'}")
-                
-                print("├────────────────────────────────────────────────────────────────────────────────────────────────┤")
-                
-                for idx, (domain, data) in enumerate(list(self.domains.items())[:self.max_workers], 1):
-                    stats = data.get('stats', {})
-                    chains = data.get('chains', [])
-                    scan_meta = data.get('scan_metadata', {}) or {}
-                    toolkit_m = data.get('toolkit_metrics', {}) or scan_meta.get('toolkit_metrics', {}) or {}
-                    phase = data.get('phase', 'init')
-                    phase_detail = data.get('phase_detail', '')
+                    stats_data = data.get('stats', {})
+                    toolkit_m = data.get('toolkit_metrics', {}) or {}
                     phase_tool = data.get('phase_tool', '')
-                    iter_info = f"{data.get('iter', 1)}/{data.get('max_iter', 5)}"
+                    phase_detail = data.get('phase_detail', '')
+                    findings = data.get('findings', {})
+                    chains = data.get('chains', [])
+                    vuln_types = data.get('vuln_types', {})
                     
-                    print(f"│  │                                                                                                                                     │")
-                    print(f"│  │  {domain}:                                                                                                                  │")
+                    # Domain header
+                    print(f"{T.BORDER}║{C.RESET}  │  {C.BOLD}{C.CYAN}{dn}{C.RESET}{' ' * max(0, W - len(dn) - 4)}│  {T.BORDER}║{C.RESET}")
                     
-                    # Phase-specific stats
+                    # Phase, Status, Iteration
+                    status = data.get('phase_status', 'running')
+                    it = data.get('iter', 1)
+                    max_it = data.get('max_iter', 5)
+                    phase_progress = self._get_phase_progress(phase)
+                    info_line = (
+                        f"  │  {T.RUNNING}├─ Phase:{C.RESET} {C.YELLOW}{phase:<12}{C.RESET}  "
+                        f"{T.RUNNING}Status:{C.RESET} {status:<12}  "
+                        f"{T.RUNNING}Iteration:{C.RESET} {it}/{max_it}  "
+                        f"{T.RUNNING}Progress:{C.RESET} {C.CYAN}{phase_progress}{C.RESET}{' ' * max(0, W - 80)}│  "
+                        f"{T.BORDER}║{C.RESET}"
+                    )
+                    print(info_line)
+                    
+                    # Phase-specific details
                     if phase in ['recon', 'init']:
-                        subs = stats.get('subs', 0)
-                        live = stats.get('live', 0)
-                        print(f"│  │  ├─ 📋 Recon: {subs:>4} subdomains | {live:>4} live hosts                                          │")
+                        subs = stats_data.get('subs', 0)
+                        live = stats_data.get('live', 0)
+                        total = stats_data.get('total_hosts', 0)
+                        if total > 0:
+                            pct = int(live * 100 / total)
+                            bar = self._get_progress_bar(live, total, 10)
+                            print(f"  │  │  {C.BRIGHT_CYAN}├─ 🔍 Subdomains:{C.RESET} {subs} found | {pct}% [{bar}] {live}/{total} live{' ' * max(0, W - 60)}│  {T.BORDER}║{C.RESET}")
+                        else:
+                            print(f"  │  │  {C.BRIGHT_CYAN}├─ 🔍 Subdomains:{C.RESET} {subs} found{' ' * max(0, W - 35)}│  {T.BORDER}║{C.RESET}")
                         
-                        # Show which tools running
-                        if phase_tool:
-                            tools = phase_tool.split('+')[:3]
-                            tools_str = " → ".join([t.strip()[:15] for t in tools])
-                            print(f"│  │  ├─   • {tools_str:<55}         │")
-                        
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                        # Active tools
+                        tool_detail = phase_detail[:60] if phase_detail else "enumerating..."
+                        print(f"  │  │  {C.BRIGHT_CYAN}├─ 🔧 Active tools:{C.RESET} {tool_detail}{' ' * max(0, W - 50 - len(tool_detail))}│  {T.BORDER}║{C.RESET}")
                     
                     elif phase == 'live':
-                        live = stats.get('live', 0)
-                        print(f"│  │  ├─ 🌐 Live Hosts: {live:>4}                                                                │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                        live = stats_data.get('live', 0)
+                        total = stats_data.get('total_hosts', 0)
+                        if total > 0:
+                            pct = int(live * 100 / total)
+                            bar = self._get_progress_bar(live, total, 10)
+                            print(f"  │  │  {C.BRIGHT_GREEN}├─ 🌐 Live Hosts:{C.RESET} {pct}% [{bar}] {live}/{total}{' ' * max(0, W - 50)}│  {T.BORDER}║{C.RESET}")
+                        else:
+                            print(f"  │  │  {C.BRIGHT_GREEN}├─ 🌐 Live Hosts:{C.RESET} {live} detected{' ' * max(0, W - 35)}│  {T.BORDER}║{C.RESET}")
                     
-                    elif phase in ['crawl', 'discovery']:
-                        eps = stats.get('eps', 0)
-                        print(f"│  │  ├─ 📁 Endpoints: {eps:>5} discovered                                                          │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                    elif phase == 'crawl':
+                        eps = stats_data.get('eps', 0)
+                        print(f"  │  │  {C.BRIGHT_BLUE}├─ 📄 Endpoints:{C.RESET} {eps} discovered{' ' * max(0, W - 35)}│  {T.BORDER}║{C.RESET}")
                     
                     elif phase == 'toolkit':
-                        # Always show toolkit metrics
-                        toolkit_str = f"Tech:{toolkit_m.get('tech', 0)} | Ports:{toolkit_m.get('ports', 0)} | Dirs:{toolkit_m.get('dirs', 0)} | API:{toolkit_m.get('api', 0)}"
-                        print(f"│  │  ├─ 🛠️  {toolkit_str:<50}    │")
-                        
-                        # Show current tool
-                        if phase_tool:
-                            print(f"│  │  ├─   • Running: {phase_tool[:50]:<50} │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                        t = toolkit_m.get('tech', 0)
+                        p = toolkit_m.get('ports', 0)
+                        d = toolkit_m.get('dirs', 0)
+                        a = toolkit_m.get('api', 0)
+                        print(f"  │  │  {C.BRIGHT_MAGENTA}├─ 🔧 Tech:{C.RESET} {t}  {C.BRIGHT_MAGENTA}Ports:{C.RESET} {p}  {C.BRIGHT_MAGENTA}Dirs:{C.RESET} {d}  {C.BRIGHT_MAGENTA}API:{C.RESET} {a}{' ' * max(0, W - 45)}│  {T.BORDER}║{C.RESET}")
+                        # Show active tools
+                        tool_detail = phase_detail[:55] if phase_detail else ""
+                        if tool_detail:
+                            print(f"  │  │  {C.BRIGHT_MAGENTA}├─ Tools:{C.RESET} {tool_detail}{' ' * max(0, W - 45 - len(tool_detail))}│  {T.BORDER}║{C.RESET}")
                     
                     elif phase in ['scan', 'classify', 'rank']:
-                        vulns = stats.get('vulns', 0)
-                        eps = stats.get('eps', 0)
-                        print(f"│  │  ├─ ⚡ Scan: {eps:>5} endpoints | {vulns:>3} vulns found                                           │")
+                        vulns = stats_data.get('vulns', 0)
+                        eps = stats_data.get('eps', 0)
+                        tested = stats_data.get('payloads_tested', 0)
+                        total_p = stats_data.get('total_payloads', 100)
+                        pct = int(tested * 100 / total_p) if total_p > 0 else 0
+                        bar = self._get_progress_bar(tested, total_p, 10) if total_p > 0 else ""
+                        print(f"  │  │  {C.BRIGHT_CYAN}├─ ⚡ Payload testing:{C.RESET} {pct}% [{bar}] {tested}/{total_p}{' ' * max(0, W - 55)}│  {T.BORDER}║{C.RESET}")
                         
-                        # Payload testing info
-                        payloads_tested = stats.get('payloads_tested', 0)
-                        total_payloads = stats.get('total_payloads', 100)
-                        if total_payloads > 0:
-                            pct = int(payloads_tested * 100 / total_payloads)
-                            print(f"│  │  ├─   • Payloads: {payloads_tested:>3}/{total_payloads} ({pct:>2}%)                                              │")
-                        
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                        # Show vulnerability breakdown if any
+                        if vulns > 0:
+                            vuln_str = f"{C.BRIGHT_RED}├─ 🔴 Vulnerabilities:{C.RESET} {vulns} found"
+                            print(f"  │  │  {vuln_str}{' ' * max(0, W - 40)}│  {T.BORDER}║{C.RESET}")
                     
-                    elif phase in ['chain', 'graph']:
-                        if chains:
-                            exploited = sum(1 for c in chains if c.get('exploited'))
-                            print(f"│  │  ├─ 🔗 Chains: {len(chains):>3} total | {exploited:>2} exploited                                          │")
-                        else:
-                            print(f"│  │  ├─ 🔗 Chains: analyzing...                                                                │")
-                        
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                    elif phase in ['chain', 'graph', 'select']:
+                        chains_count = len(chains)
+                        exploited = sum(1 for c in chains if c.get('exploited', False))
+                        pct = int(exploited * 100 / chains_count) if chains_count > 0 else 0
+                        bar = self._get_progress_bar(exploited, chains_count, 10) if chains_count > 0 else ""
+                        print(f"  │  │  {C.BRIGHT_MAGENTA}├─ 🔗 Chains:{C.RESET} {chains_count} total | {exploited} exploited | {pct}% [{bar}]{' ' * max(0, W - 55)}│  {T.BORDER}║{C.RESET}")
                     
                     elif phase == 'exploit':
-                        exploited = stats.get('exploited', 0)
-                        chains = data.get('chains', [])
-                        if chains:
-                            total_chains = len(chains)
-                            print(f"│  │  ├─ 💥 Exploit: {exploited:>2} exploited | {total_chains:>3} chains tested                                  │")
-                        else:
-                            print(f"│  │  ├─ 💥 Exploit: {exploited:>2} exploited                                                    │")
+                        exploited = stats_data.get('exploited', 0)
+                        chains_count = len(chains)
+                        pct = int(exploited * 100 / chains_count) if chains_count > 0 else 0
+                        bar = self._get_progress_bar(exploited, chains_count, 10) if chains_count > 0 else ""
+                        print(f"  │  │  {C.BRIGHT_RED}├─ 💣 Exploited:{C.RESET} {exploited}/{chains_count} ({pct}%) [{bar}]{' ' * max(0, W - 50)}│  {T.BORDER}║{C.RESET}")
                         
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
+                        # Show AI decision if available
+                        ai_decision = data.get('ai_decision', '')
+                        if ai_decision:
+                            print(f"  │  │  {C.BRIGHT_MAGENTA}├─ 🧠 AI Decision:{C.RESET} {ai_decision[:55]}{' ' * max(0, W - 55 - len(ai_decision))}│  {T.BORDER}║{C.RESET}")
                     
-                    # POST-EXPLOITATION PHASES (24-32)
-                    elif phase == 'mfa_bypass':
-                        mfa_findings = data.get('mfa_findings', [])
-                        mfa_count = len(mfa_findings)
-                        if mfa_count > 0:
-                            bypass_count = sum(len(m.get('bypass_techniques', [])) for m in mfa_findings)
-                            print(f"│  │  ├─ 🔐 MFA: {mfa_count:>4} MFA configs | {bypass_count:>2} bypass vectors                                      │")
-                        else:
-                            print(f"│  │  ├─ 🔐 MFA: checking mechanisms...                                                        │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
-                    
-                    elif phase == 'oauth_saml':
-                        oauth_findings = data.get('oauth_saml_findings', [])
-                        oauth_count = len(oauth_findings)
-                        if oauth_count > 0:
-                            exploitable = sum(len(o.get('exploitable_vulns', [])) for o in oauth_findings)
-                            print(f"│  │  ├─ 🔑 OAuth/SAML: {oauth_count:>3} flows | {exploitable:>3} exploitable                                  │")
-                        else:
-                            print(f"│  │  ├─ 🔑 OAuth/SAML: analyzing flows...                                                      │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
-                    
-                    elif phase == 'persistence':
-                        persist_findings = data.get('persistence_findings', [])
-                        backdoors = sum(1 for p in persist_findings if p.get('persistent_access'))
-                        if backdoors > 0:
-                            print(f"│  │  ├─ 👻 Persistence: {backdoors:>2} backdoors deployed                                                   │")
-                        else:
-                            print(f"│  │  ├─ 👻 Persistence: analyzing options...                                                    │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
-                    
-                    elif phase == 'lateral_movement':
-                        lateral_findings = data.get('lateral_movement_findings', [])
-                        pivot_count = sum(len(l.get('lateral_targets', [])) for l in lateral_findings)
-                        if pivot_count > 0:
-                            print(f"│  │  ├─ 🌐 Lateral: {pivot_count:>4} pivot targets discovered                                                 │")
-                        else:
-                            print(f"│  │  ├─ 🌐 Lateral: mapping network...                                                        │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
-                    
-                    elif phase == 'ssl_pinning':
-                        ssl_findings = data.get('ssl_pinning_findings', [])
-                        ssl_count = len(ssl_findings)
-                        if ssl_count > 0:
-                            bypass_count = sum(len(s.get('bypass_techniques', [])) for s in ssl_findings)
-                            print(f"│  │  ├─ 📌 SSL: {ssl_count:>4} pinning detected | {bypass_count:>2} bypass methods                               │")
-                        else:
-                            print(f"│  │  ├─ 📌 SSL: analyzing pinning...                                                          │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
-                    
-                    elif phase == 'zero_day':
-                        zday_findings = data.get('zero_day_findings', [])
-                        anomaly_count = sum(len(z.get('anomalies', [])) for z in zday_findings)
-                        if anomaly_count > 0:
-                            print(f"│  │  ├─ 🔥 Zero-Day: {anomaly_count:>3} anomalies detected                                                      │")
-                        else:
-                            print(f"│  │  ├─ 🔥 Zero-Day: fuzzing endpoints...                                                      │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
-                    
-                    elif phase == 'container_escape':
-                        container_findings = data.get('container_findings', [])
-                        escape_count = sum(len(c.get('escape_vectors', [])) for c in container_findings)
-                        if escape_count > 0:
-                            print(f"│  │  ├─ 📦 Container: {escape_count:>2} escape vectors found                                                   │")
-                        else:
-                            print(f"│  │  ├─ 📦 Container: probing environment...                                                    │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
-                    
-                    elif phase == 'custom_exploit':
-                        custom_findings = data.get('custom_exploit_findings', [])
-                        success_count = sum(1 for c in custom_findings if c.get('exploit_success'))
-                        if success_count > 0:
-                            print(f"│  │  ├─ 💥 Custom: {success_count:>2} exploits successful                                                      │")
-                        else:
-                            print(f"│  │  ├─ 💥 Custom: executing exploits...                                                       │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
-                    
-                    elif phase == 'log_evasion':
-                        evasion_findings = data.get('log_evasion_findings', [])
-                        cleaned_count = sum(1 for e in evasion_findings if e.get('logs_erased'))
-                        if cleaned_count > 0:
-                            print(f"│  │  ├─ 🧹 Evasion: logs cleared on {cleaned_count:>2} systems                                                  │")
-                        else:
-                            print(f"│  │  ├─ 🧹 Evasion: removing evidence...                                                       │")
-                        if phase_detail:
-                            detail_short = phase_detail[:60]
-                            print(f"│  │  ├─   ℹ️  {detail_short:<59}│")
-                    
-                    # Detailed findings section
-                    findings = data.get('findings', {})
-                    if findings:
-                        findings_count = 0
-                        if findings.get('plugins'):
-                            plugin_list = findings['plugins'][:3]
-                            plugins_str = ", ".join([f"{p['name']}:{p['version']}" for p in plugin_list[:2]])
-                            print(f"│  │  ├─ 🔌 Plugins: {plugins_str:<50}│")
-                            findings_count += 1
-                        
-                        if findings.get('themes'):
-                            theme_list = findings['themes'][:2]
-                            themes_str = ", ".join([f"{t['name']}:{t['version']}" for t in theme_list[:1]])
-                            print(f"│  │  ├─ 🎨 Theme: {themes_str:<55}     │")
-                            findings_count += 1
-                        
+                    # WordPress findings
+                    if findings and phase in ['wp', 'crawl', 'scan']:
                         if findings.get('cms_version'):
-                            print(f"│  │  ├─ 📦 CMS: {findings.get('cms_version', 'N/A'):<60}  │")
-                            findings_count += 1
-                        
-                        if findings.get('php_version'):
-                            print(f"│  │  ├─ 🐘 PHP: {findings.get('php_version', 'N/A'):<60}  │")
-                            findings_count += 1
-                        
-                        if findings.get('waf'):
-                            print(f"│  │  ├─ 🛡️  WAF: {findings.get('waf', 'N/A'):<60}  │")
-                            findings_count += 1
-                        
-                        if findings.get('users'):
-                            users_str = ", ".join(findings.get('users', [])[:2])
-                            print(f"│  │  ├─ 👤 Users: {users_str:<58}   │")
-                            findings_count += 1
+                            print(f"  │  │  {C.BRIGHT_YELLOW}├─ 🎯 WordPress:{C.RESET} {findings['cms_version'][:50]}{' ' * max(0, W - 50)}│  {T.BORDER}║{C.RESET}")
+                        if findings.get('plugins'):
+                            plugins = [p.get('name', '')[:15] for p in findings['plugins'][:3]]
+                            if plugins:
+                                print(f"  │  │  {C.BRIGHT_YELLOW}├─ Plugins:{C.RESET} {', '.join(plugins)}{' ' * max(0, W - 45)}│  {T.BORDER}║{C.RESET}")
                     
-                    # ── Phase Progress Bar ──────────────────────────────────
-                    PHASE_ORDER = [
-                        "recon", "live_hosts", "wordpress", "toolkit",
-                        "discovery", "auth", "classify", "rank",
-                        "scan", "analyze", "cve_analysis",
-                        "priv_pivot", "graph", "chain", "exploit_select",
-                        "exploit", "sqli_exploit", "upload_bypass", "reverse_shell", "privesc",
-                        "waf_bypass", "boolean_sqli", "xss", "idor",
-                        "default_creds", "cve_exploit", "api_vuln", "subdomain_takeover",
-                        "mfa_bypass", "oauth_saml", "persistence", "lateral_movement",
-                        "ssl_pinning", "zero_day", "container_escape", "custom_exploit", "log_evasion",
-                        "learn", "report"
-                    ]
-                    PHASE_LABELS = {
-                        "recon": "Recon", "live_hosts": "Live", "wordpress": "WP",
-                        "toolkit": "Toolkit", "discovery": "Crawl", "auth": "Auth",
-                        "classify": "Classify", "rank": "Rank", "scan": "Scan",
-                        "analyze": "Analyze", "cve_analysis": "CVE",
-                        "priv_pivot": "Pivot", "graph": "Graph", "chain": "Chain", "exploit_select": "Select",
-                        "exploit": "Exploit", "sqli_exploit": "SQLi", "upload_bypass": "Upload", "reverse_shell": "Shell", "privesc": "PrivESC",
-                        "waf_bypass": "WAF", "boolean_sqli": "BSQL", "xss": "XSS", "idor": "IDOR",
-                        "default_creds": "Creds", "cve_exploit": "CVEExp", "api_vuln": "API", "subdomain_takeover": "Sub",
-                        "mfa_bypass": "MFA", "oauth_saml": "OAuth", "persistence": "Perst", "lateral_movement": "Lateral",
-                        "ssl_pinning": "SSL", "zero_day": "0Day", "container_escape": "Ctnr", "custom_exploit": "Custom", "log_evasion": "LogEv",
-                        "learn": "Learn", "report": "Report"
-                    }
-                    completed_phases = set(
-                        (data.get('stats') or {}).get('completed_phases', [])
-                        or []
-                    )
-                    # Fallback: dùng phase hiện tại để ước tính completed
-                    current_p = phase
-                    if current_p in PHASE_ORDER:
-                        current_idx = PHASE_ORDER.index(current_p)
-                        # Các phase trước current_phase coi như done
-                        for p in PHASE_ORDER[:current_idx]:
-                            completed_phases.add(p)
-
-                    done_count = sum(1 for p in PHASE_ORDER if p in completed_phases)
-                    total_phases = len(PHASE_ORDER)
-                    phase_pct = int(done_count * 100 / total_phases)
-
-                    # Build visual bar: ✓ done, ▶ running, ░ todo
-                    bar_parts = []
-                    for p in PHASE_ORDER:
-                        lbl = PHASE_LABELS[p][:3]
-                        if p in completed_phases:
-                            bar_parts.append(f"✓{lbl}")
-                        elif p == current_p:
-                            bar_parts.append(f"▶{lbl}")
-                        else:
-                            bar_parts.append(f"░{lbl}")
-
-                    # Phase bar — 1 dòng đầy chiều ngang
-                    bar_str = " ".join(bar_parts)
-                    print(f"│  │  ├─ 📈 {phase_pct:>3}% [{done_count}/{total_phases}] {bar_str:<80}│")
-
-                    # Phase & Tool info
-                    phase_status = data.get('phase_status', 'idle')
-                    status_icon = '▶️' if phase_status == 'running' else '⏸️' if phase_status == 'paused' else '✓' if phase_status == 'done' else '⚙️'
-                    print(f"│  │  ├─ {status_icon} Phase: {phase:<10} | Status: {phase_status:<15}        │")
-                    
+                    # Last action
                     last_action = data.get('last_action', '')
-                    if last_action and last_action != 'starting...':
-                        last_action = last_action[:60]
-                        print(f"│  │  └─ ⏱️  {last_action:<66}│")
+                    if last_action:
+                        print(f"  │  │  {C.DIM}└─ ⏱️ {last_action[:60]}{' ' * max(0, W - 45 - len(last_action))}│  {T.BORDER}║{C.RESET}")
+                    
+                    # Separator between domains
+                    if len(self.domains) > 1:
+                        print(f"  │  │{'─' * (W - 8)}│  {T.BORDER}║{C.RESET}")
                 
-                print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘")
+                print(f"{T.BORDER}║{C.RESET}  └{'─' * (W - 4)}┘  {T.BORDER}║{C.RESET}")
             
-            # Current Activity section - show what each tool is doing
-            if active_count > 0:
-                print("│                                                                                                                                                              │")
-                print("│  ┌─ CURRENT ACTIVITY ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐")
+            # ═══════════════════════════════════════════════════════════════════
+            # LIVE EVENTS SECTION
+            # ═══════════════════════════════════════════════════════════════════
+            if self.live_feed:
+                print(f"{T.BORDER}║{C.RESET}  {' ' * (W + 2)}{T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  {C.BOLD}🔔 LIVE EVENTS{C.RESET} (last {min(len(self.live_feed), 12)}){' ' * max(0, W - 30)}{T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ┌{'─' * (W - 4)}┐  {T.BORDER}║{C.RESET}")
                 
-                for idx, (domain, data) in enumerate(list(self.domains.items())[:self.max_workers], 1):
+                event_icons = {
+                    'Subdomain': '➕', 'Live': '🌐', 'WordPress': '🎯',
+                    'Users': '👤', 'Endpoint': '📁', 'Toolkit': '🔧',
+                    'Completed': '✅', 'Failed': '❌', 'SQLi Found': '💧',
+                    'Chains': '🔗', 'Exploited': '💥', 'CVE Found': '📖',
+                    'WAF Detected': '🛡️', 'AI Decision': '🧠',
+                }
+                
+                for ts, icon, event, domain, detail in list(self.live_feed)[:8]:
+                    ei = event_icons.get(event, icon)
+                    dn = domain[:12] if len(domain) <= 12 else domain[:9] + ".."
+                    dt = detail[:45] if len(detail) > 45 else detail
+                    event_line = (
+                        f"  │  {C.DIM}{ts}{C.RESET} {ei} {event:<14} {C.CYAN}{dn}{C.RESET}  {dt}{' ' * max(0, W - 55 - len(dt))}│  "
+                        f"{T.BORDER}║{C.RESET}"
+                    )
+                    print(event_line)
+                
+                print(f"{T.BORDER}║{C.RESET}  └{'─' * (W - 4)}┘  {T.BORDER}║{C.RESET}")
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # AI DECISION FEED SECTION
+            # ═══════════════════════════════════════════════════════════════════
+            if self.ai_feed:
+                print(f"{T.BORDER}║{C.RESET}  {' ' * (W + 2)}{T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  {C.BOLD}🧠 AI DECISION FEED{C.RESET} (last {min(len(self.ai_feed), 6)}){' ' * max(0, W - 35)}{T.BORDER}║{C.RESET}")
+                print(f"{T.BORDER}║{C.RESET}  ┌{'─' * (W - 4)}┐  {T.BORDER}║{C.RESET}")
+                
+                for ts, event, domain, detail in list(self.ai_feed)[:4]:
+                    dn = domain[:12] if len(domain) <= 12 else domain[:9] + ".."
+                    dt = detail[:50] if len(detail) > 50 else detail
+                    ai_line = (
+                        f"  │  {C.DIM}{ts}{C.RESET}  {C.BRIGHT_MAGENTA}{event:<20}{C.RESET} {C.CYAN}{dn}{C.RESET}  {dt}{' ' * max(0, W - 55 - len(dt))}│  "
+                        f"{T.BORDER}║{C.RESET}"
+                    )
+                    print(ai_line)
+                
+                print(f"{T.BORDER}║{C.RESET}  └{'─' * (W - 4)}┘  {T.BORDER}║{C.RESET}")
+            
+            # Footer
+            print(f"{T.BORDER}╚{'═' * (W + 2)}╝{C.RESET}")
+            
+            sys.stdout.flush()
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # ACTIVE TARGETS
+            # ═══════════════════════════════════════════════════════════════════
+            print(f"{T.BORDER}║{C.RESET}  {T.RUNNING}▶ ACTIVE ({active_count}/{self.max_workers}){C.RESET}{' ' * max(0, W - 22)}{T.BORDER}║{C.RESET}")
+            
+            phase_icons = {
+                'recon': '🔍', 'live': '🌐', 'wp': '🎯', 'crawl': '📄',
+                'auth': '🔐', 'toolkit': '🔧', 'classify': '🏷️', 'rank': '📊',
+                'scan': '⚡', 'analyze': '🧪', 'graph': '🕸️', 'chain': '🔗',
+                'exploit': '💣', 'learn': '📚', 'init': '⚙️', 'report': '📋',
+                'select': '🎯', 'pivot': '🔄', 'hunt': '🔎', 'mine': '⛏️',
+                'cve_analysis': '📖', 'mfa_bypass': '🔓', 'oauth_saml': '🔑',
+                'persistence': '👻', 'lateral_movement': '↔️', 'ssl_pinning': '🔒',
+                'zero_day': '🌟', 'container_escape': '📦', 'custom_exploit': '🛠️',
+                'log_evasion': '🧹', 'sqli_exploit': '💧', 'upload_bypass': '📤',
+                'reverse_shell': '🐚', 'privesc': '⬆️', 'waf_bypass': '🛡️',
+                'boolean_sqli': '🔍', 'xss': '✨', 'idor': '🔑', 'default_creds': '🔐',
+                'cve_exploit': '🎯', 'api_vuln': '🔌', 'subdomain_takeover': '🏴',
+                'service_fp': '🔍', 'verify_vulns': '✅', 'fp_filter': '🎯',
+                'chain_validate': '🔗', 'ddos': '💣'
+            }
+            
+            for idx, (domain, data) in enumerate(list(self.domains.items())[:self.max_workers], 1):
+                phase = data.get('phase', 'init')
+                icon = phase_icons.get(phase, '⚙️')
+                stats_data = data.get('stats', {})
+                
+                # Progress info
+                progress_info = self._get_progress_text(data)
+                
+                # Domain (max 28 chars)
+                dname = domain[:28] if len(domain) <= 28 else domain[:25] + "..."
+                
+                # Iteration
+                it = data.get('iter', 1)
+                max_it = data.get('max_iter', 5)
+                
+                # Elapsed time
+                el = int(time.time() - data.get('start_time', time.time()))
+                etime = f"{el // 60}m" if el >= 60 else f"{el}s"
+                
+                line = f"  {C.BOLD}#{idx}{C.RESET} {icon} {dname:<28}  I:{it}/{max_it}  {progress_info}  ⏱{etime}"
+                pad = max(0, W - len(line) + 4)
+                print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
+            
+            if active_count == 0:
+                print(f"{T.BORDER}║{C.RESET}  {T.TEXT_DIM}  (no active targets){C.RESET}{' ' * max(0, W - 22)}{T.BORDER}║{C.RESET}")
+            
+            # Queue
+            if queue_count > 0:
+                print(f"{T.BORDER}║{C.RESET}  {T.WAITING}⏳ QUEUE ({queue_count}){C.RESET}{' ' * max(0, W - 15)}{T.BORDER}║{C.RESET}")
+                for domain, added_time in list(self.queue)[:2]:
+                    wt = int((time.time() - added_time.timestamp()) / 60)
+                    dn = domain[:30] if len(domain) <= 30 else domain[:27] + "..."
+                    line = f"    • {T.TEXT_SECONDARY}{dn}{C.RESET}  ({wt}m)"
+                    pad = max(0, W - len(line) + 4)
+                    print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
+            
+            # Completed
+            if completed_count > 0:
+                print(f"{T.BORDER}║{C.RESET}  {T.COMPLETED}✅ DONE ({completed_count}){C.RESET}{' ' * max(0, W - 13)}{T.BORDER}║{C.RESET}")
+                for d, v, e, c, tc, ts in list(self.completed)[:2]:
+                    vc = T.DANGER if v > 0 else T.TEXT_DIM
+                    dn = d[:24] if len(d) <= 24 else d[:21] + "..."
+                    line = f"    • {T.TEXT_SECONDARY}{dn}{C.RESET}  {vc}{v} vulns{C.RESET}"
+                    pad = max(0, W - len(line) + 4)
+                    print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
+            
+            # Failed
+            if failed_count > 0:
+                print(f"{T.BORDER}║{C.RESET}  {T.FAILED}❌ FAILED ({failed_count}){C.RESET}{' ' * max(0, W - 16)}{T.BORDER}║{C.RESET}")
+                for d, reason, ts in list(self.failed)[:1]:
+                    dn = d[:24] if len(d) <= 24 else d[:21] + "..."
+                    rs = reason[:20] if reason else "?"
+                    line = f"    • {T.TEXT_SECONDARY}{dn}{C.RESET}  {T.FAILED}{rs}{C.RESET}"
+                    pad = max(0, W - len(line) + 4)
+                    print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
+            
+            print(f"{T.BORDER}╟{'─' * (W + 2)}╢{C.RESET}")
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # DETAILED STATUS PER DOMAIN
+            # ═══════════════════════════════════════════════════════════════════
+            if active_count > 0:
+                for domain, data in list(self.domains.items())[:self.max_workers]:
+                    dn = domain[:40] if len(domain) <= 40 else domain[:37] + "..."
+                    phase = data.get('phase', 'init')
+                    stats_data = data.get('stats', {})
+                    toolkit_m = data.get('toolkit_metrics', {}) or {}
                     phase_tool = data.get('phase_tool', '')
                     phase_detail = data.get('phase_detail', '')
-                    stats = data.get('stats', {})
-                    scan_meta = data.get('scan_metadata', {}) or {}
-                    toolkit_m = data.get('toolkit_metrics', {}) or scan_meta.get('toolkit_metrics', {}) or {}
-                    phase = data.get('phase', 'init')
+                    findings = data.get('findings', {})
+                    chains = data.get('chains', [])
                     
-                    print(f"│  │                                                                                                  │")
-                    print(f"│  │  {domain}:                                                                                             │")
+                    # Header for this domain
+                    print(f"{T.BORDER}║{C.RESET}  {C.BOLD}{C.CYAN}{dn}{C.RESET}{' ' * max(0, W - len(dn) - 2)}{T.BORDER}║{C.RESET}")
                     
-                    # Parse phase_detail for tool info
-                    def extract_tool_activity(detail_str, tool_name):
-                        """Extract activity info for specific tool from phase_detail"""
-                        tool_lower = tool_name.lower()
-                        
-                        # Check if tool is mentioned in detail
-                        if '[' in detail_str and ']' in detail_str:
-                            parts = detail_str.split('[')
-                            for part in parts[1:]:
-                                tool_tag = part.split(']')[0].upper()
-                                if tool_lower in tool_tag.lower():
-                                    activity = part.split(']')[1].strip() if ']' in part else ""
-                                    return ('▶️', activity[:50] if activity else f"Processing...")
-                        
-                        if detail_str and tool_lower in detail_str.lower():
-                            return ('▶️', detail_str[:50])
-                        return ('⏳', None)
+                    # Phase & Tool info
+                    tool_str = phase_tool[:30] if phase_tool else "idle"
+                    detail_str = phase_detail[:50] if phase_detail else "processing..."
+                    print(f"{T.BORDER}║{C.RESET}  {T.RUNNING}Phase:{C.RESET} {C.YELLOW}{phase:<12}{C.RESET}  {T.RUNNING}Tool:{C.RESET} {tool_str:<30}  {T.TEXT_DIM}{detail_str[:35]}{C.RESET}{' ' * max(0, W - 55 - len(detail_str))}{T.BORDER}║{C.RESET}")
                     
-                    # Show tools with phase-specific parsing
-                    if phase_tool:
-                        tools = [t.strip() for t in phase_tool.split('+')]
-                        for tool_name in tools[:5]:
-                            tool_short = tool_name[:18]
-                            
-                            # Try to extract activity from phase_detail
-                            icon, activity = extract_tool_activity(phase_detail or '', tool_name)
-                            
-                            if activity:
-                                msg = f"{tool_short:<18} {activity}"
-                            else:
-                                # Fallback to counter-based display
-                                icon = '⏳' if 'running' in str(data.get('phase_status', '')).lower() else '✓'
-                                
-                                if phase == 'recon' or phase == 'init':
-                                    if 'subfinder' in tool_short.lower() or 'assetfinder' in tool_short.lower() or 'amass' in tool_short.lower():
-                                        msg = f"{tool_short:<18} {stats.get('subs', 0):>4} subdomains"
-                                    elif 'gau' in tool_short.lower() or 'wayback' in tool_short.lower():
-                                        msg = f"{tool_short:<18} {stats.get('eps', 0):>4} URLs"
-                                    else:
-                                        msg = f"{tool_short:<18} processing..."
-                                
-                                elif phase == 'live':
-                                    if 'httpx' in tool_short.lower() or 'naabu' in tool_short.lower():
-                                        msg = f"{tool_short:<18} {stats.get('live', 0):>4} hosts"
-                                    else:
-                                        msg = f"{tool_short:<18} processing..."
-                                
-                                elif phase in ['crawl', 'discovery']:
-                                    if 'crawler' in tool_short.lower() or 'ffuf' in tool_short.lower():
-                                        msg = f"{tool_short:<18} {stats.get('eps', 0):>4} endpoints"
-                                    else:
-                                        msg = f"{tool_short:<18} processing..."
-                                
-                                elif phase in ['scan', 'classify', 'rank']:
-                                    if 'nuclei' in tool_short.lower() or 'nikto' in tool_short.lower():
-                                        msg = f"{tool_short:<18} {stats.get('vulns', 0):>4} vulns"
-                                    else:
-                                        msg = f"{tool_short:<18} processing..."
-
-                                elif phase == 'toolkit':
-                                    if 'whatweb' in tool_short.lower() or 'wappalyzer' in tool_short.lower():
-                                        msg = f"{tool_short:<18} tech={toolkit_m.get('tech', 0):>3}"
-                                    elif 'nmap' in tool_short.lower() or 'naabu' in tool_short.lower():
-                                        msg = f"{tool_short:<18} ports={toolkit_m.get('ports', 0):>3}"
-                                    elif 'api' in tool_short.lower():
-                                        msg = f"{tool_short:<18} api={toolkit_m.get('api', 0):>3}"
-                                    elif 'dir' in tool_short.lower() or 'ffuf' in tool_short.lower():
-                                        msg = f"{tool_short:<18} dirs={toolkit_m.get('dirs', 0):>3}"
-                                    else:
-                                        msg = f"{tool_short:<18} processing..."
-                                
-                                elif phase in ['chain', 'graph']:
-                                    chains_count = len(data.get('chains', []))
-                                    msg = f"{tool_short:<18} {chains_count:>4} chains"
-                                
-                                elif phase == 'exploit':
-                                    exploited = stats.get('exploited', 0)
-                                    msg = f"{tool_short:<18} {exploited:>4} exploited"
-                                
-                                else:
-                                    msg = f"{tool_short:<18} processing..."
-                            
-                            print(f"│  │  {icon} {msg:<52}              │")
+                    # Phase-specific details
+                    if phase in ['recon', 'init']:
+                        subs = stats_data.get('subs', 0)
+                        live = stats_data.get('live', 0)
+                        total = stats_data.get('total_hosts', 0)
+                        if total > 0:
+                            pct = int(live * 100 / total)
+                            bar = self._get_progress_bar(live, total, 10)
+                            print(f"{T.BORDER}║{C.RESET}  🔍 Subdomains: {subs:>5} | Live: {pct:>3}% [{bar}] {live:>4}/{total:<4}{' ' * max(0, W - 55)}{T.BORDER}║{C.RESET}")
+                        else:
+                            print(f"{T.BORDER}║{C.RESET}  🔍 Subdomains: {subs:>5} | Live: {live:>4}{' ' * max(0, W - 35)}{T.BORDER}║{C.RESET}")
                     
-                    # Show real-time detail at bottom
-                    if phase_detail and len(phase_detail) > 0:
-                        detail_short = phase_detail[:62]
-                        print(f"│  │  └─ ℹ️  {detail_short:<60}│")
-                
-                print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘")
+                    elif phase == 'live':
+                        live = stats_data.get('live', 0)
+                        total = stats_data.get('total_hosts', 0)
+                        if total > 0:
+                            pct = int(live * 100 / total)
+                            bar = self._get_progress_bar(live, total, 10)
+                            print(f"{T.BORDER}║{C.RESET}  🌐 Live Hosts: {pct:>3}% [{bar}] {live:>4}/{total:<4}{' ' * max(0, W - 50)}{T.BORDER}║{C.RESET}")
+                        else:
+                            print(f"{T.BORDER}║{C.RESET}  🌐 Live Hosts: {live:>4}{' ' * max(0, W - 25)}{T.BORDER}║{C.RESET}")
+                    
+                    elif phase == 'crawl':
+                        eps = stats_data.get('eps', 0)
+                        print(f"{T.BORDER}║{C.RESET}  📄 Endpoints: {eps:>5}{' ' * max(0, W - 22)}{T.BORDER}║{C.RESET}")
+                    
+                    elif phase == 'toolkit':
+                        t = toolkit_m.get('tech', 0)
+                        p = toolkit_m.get('ports', 0)
+                        d = toolkit_m.get('dirs', 0)
+                        a = toolkit_m.get('api', 0)
+                        total_findings = t + p + d + a
+                        print(f"{T.BORDER}║{C.RESET}  🔧 Tech:{t:>3} Ports:{p:>3} Dirs:{d:>3} API:{a:>3} | Total:{total_findings:>4}{' ' * max(0, W - 55)}{T.BORDER}║{C.RESET}")
+                    
+                    elif phase in ['scan', 'classify', 'rank']:
+                        vulns = stats_data.get('vulns', 0)
+                        eps = stats_data.get('eps', 0)
+                        tested = stats_data.get('payloads_tested', 0)
+                        total_p = stats_data.get('total_payloads', 100)
+                        pct = int(tested * 100 / total_p) if total_p > 0 else 0
+                        bar = self._get_progress_bar(tested, total_p, 10) if total_p > 0 else ""
+                        print(f"{T.BORDER}║{C.RESET}  ⚡ Eps:{eps:>4} Vulns:{vulns:>3} | Payloads: {pct:>3}% [{bar}]{' ' * max(0, W - 55)}{T.BORDER}║{C.RESET}")
+                    
+                    elif phase in ['chain', 'graph', 'select']:
+                        chains_count = len(chains)
+                        exploited = sum(1 for c in chains if c.get('exploited', False))
+                        print(f"{T.BORDER}║{C.RESET}  🔗 Chains: {chains_count:>3} total | {exploited:>2} exploited{' ' * max(0, W - 40)}{T.BORDER}║{C.RESET}")
+                    
+                    elif phase == 'exploit':
+                        exploited = stats_data.get('exploited', 0)
+                        chains_count = len(chains)
+                        pct = int(exploited * 100 / chains_count) if chains_count > 0 else 0
+                        bar = self._get_progress_bar(exploited, chains_count, 10) if chains_count > 0 else ""
+                        print(f"{T.BORDER}║{C.RESET}  💣 Exploited: {exploited:>2}/{chains_count} ({pct:>3}%) [{bar}]{' ' * max(0, W - 50)}{T.BORDER}║{C.RESET}")
+                    
+                    # Findings (WordPress data)
+                    if findings:
+                        findings_parts = []
+                        if findings.get('plugins'):
+                            plugins = findings['plugins'][:3]
+                            p_names = [p.get('name', '')[:15] for p in plugins]
+                            findings_parts.append(f"Plugins: {', '.join(p_names)}")
+                        if findings.get('cms_version'):
+                            findings_parts.append(f"CMS: {findings['cms_version'][:20]}")
+                        if findings.get('users'):
+                            users = findings['users'][:3]
+                            findings_parts.append(f"Users: {', '.join(users)}")
+                        if findings_parts:
+                            fstr = "  ".join(findings_parts[:2])
+                            print(f"{T.BORDER}║{C.RESET}  {T.WARNING}📋 {fstr}{' ' * max(0, W - len(fstr) - 4)}{T.BORDER}║{C.RESET}")
+                    
+                    # Separator between domains
+                    if len(self.domains) > 1:
+                        print(f"{T.BORDER}║{C.RESET}  {T.TEXT_DIM}{'─' * (W)}{C.RESET}{' ' * max(0, W - W)}{T.BORDER}║{C.RESET}")
             
-            # Live feed - enhanced with event categorization
+            print(f"{T.BORDER}╟{'─' * (W + 2)}╢{C.RESET}")
+            
+            # ═══════════════════════════════════════════════════════════════════
+            # LIVE EVENTS
+            # ═══════════════════════════════════════════════════════════════════
             if self.live_feed:
-                print("│ ─ 🔔 LIVE EVENTS ─────────────────────────────────────────────────────────────────────────────────────────────────────")
-                for idx, (timestamp, icon, event, domain, detail) in enumerate(list(self.live_feed)[:5]):
-                    if idx >= 5:
-                        break
-                    domain_short = domain[:13] if len(domain) <= 13 else domain[:10] + ".."
-                    detail_short = detail[:38] if len(detail) > 38 else detail
-                    
-                    # Color-code based on event type
-                    event_display = {
-                        'Subdomain': '➕ Subdomain',
-                        'Live': '🌐 Live',
-                        'WordPress': '🎯 WordPress',
-                        'Users': '👤 Users',
-                        'Endpoint': '📁 Endpoint',
-                        'Toolkit': '🛠️  Toolkit',
-                        'Completed': '✅ Done',
-                        'Failed': '❌ Failed',
-                        'SQLi Found': '💧 SQLi',
-                        'Chains': '🔗 Chain',
-                        'Exploited': '💥 Pwned',
-                    }.get(event, f"{icon} {event}")
-                    
-                    print(f"│ {timestamp} {event_display:<18} | {domain_short:<13} | {detail_short:<38} │")
-                if len(self.live_feed) > 5:
-                    print(f"│ ... and {len(self.live_feed) - 5} more events" + " " * 67 + "│")
+                print(f"{T.BORDER}║{C.RESET}  {T.WARNING}🔔 EVENTS{C.RESET}{' ' * max(0, W - 10)}{T.BORDER}║{C.RESET}")
+                
+                for ts, icon, event, domain, detail in list(self.live_feed)[:4]:
+                    dn = domain[:14] if len(domain) <= 14 else domain[:11] + ".."
+                    dt = detail[:45] if len(detail) > 45 else detail
+                    line = f"  {C.DIM}{ts}{C.RESET} {icon} {event:<14} {C.CYAN}{dn}{C.RESET}  {dt}"
+                    pad = max(0, W - len(line) + 4)
+                    print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
+                
+                print(f"{T.BORDER}╟{'─' * (W + 2)}╢{C.RESET}")
             
-            print("└────────────────────────────────────────────────────────────────────────────────────────────────┘")
+            # ═══════════════════════════════════════════════════════════════════
+            # AI DECISION FEED
+            # ═══════════════════════════════════════════════════════════════════
+            if self.ai_feed:
+                print(f"{T.BORDER}║{C.RESET}  {T.RUNNING}🧠 AI DECISIONS{C.RESET}{' ' * max(0, W - 16)}{T.BORDER}║{C.RESET}")
+                for ts, event, domain, detail in list(self.ai_feed)[:2]:
+                    dn = domain[:14] if len(domain) <= 14 else domain[:11] + ".."
+                    dt = detail[:50] if len(detail) > 50 else detail
+                    line = f"  {C.DIM}{ts}{C.RESET}  {event:<18} {C.CYAN}{dn}{C.RESET}  {dt}"
+                    pad = max(0, W - len(line) + 4)
+                    print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
+            
+            # Footer
+            print(f"{T.BORDER}╚{'═' * (W + 2)}╝{C.RESET}")
             
             sys.stdout.flush()
 
@@ -1348,6 +1492,13 @@ class ReconAgent:
         self.misconfig_findings = []
         self.command_injection_findings = []
         
+        # ─── NEW: Enhanced Analysis & Validation Modules ─────────────────────
+        self.service_fingerprinter = ServiceFingerprinter(self.state, self.output_dir)
+        self.exploit_verifier = ExploitVerifier(self.state, self.output_dir)
+        self.false_positive_filter = FalsePositiveFilter(self.state, self.output_dir)
+        self.payload_optimizer = PayloadOptimizer(self.state, self.output_dir)
+        self.chain_validator = ChainValidator(self.state, self.output_dir)
+        
         if self.resumed_from_state:
             previous_phase = self.state.get("current_phase", "unknown")
             self.last_action = f"resumed from state ({previous_phase})"
@@ -1419,6 +1570,21 @@ class ReconAgent:
         # Update phase_tool to show current tool
         if tool:
             self.phase_tool = tool
+        
+        # REAL-TIME METRICS UPDATE: Extract toolkit_metrics from state during toolkit phase
+        # This allows metrics to update as each tool completes, not just at the end
+        if phase == "toolkit" and status == "done":
+            scan_meta = self.state.get("scan_metadata", {}) or {}
+            state_metrics = scan_meta.get("toolkit_metrics", {}) or {}
+            if state_metrics:
+                # Update toolkit_metrics with latest values from state
+                self.toolkit_metrics = {
+                    'tech': state_metrics.get('tech', self.toolkit_metrics.get('tech', 0)),
+                    'ports': state_metrics.get('ports', self.toolkit_metrics.get('ports', 0)),
+                    'dirs': state_metrics.get('dirs', self.toolkit_metrics.get('dirs', 0)),
+                    'api': state_metrics.get('api', self.toolkit_metrics.get('api', 0)),
+                    'vulns': state_metrics.get('vulns', self.toolkit_metrics.get('vulns', 0)),
+                }
         
         self._set_activity(tool=tool, status=status)
         # Update display in real-time to show progress
@@ -4984,6 +5150,251 @@ class ReconAgent:
         self.phase_status = "done"
         self._mark_phase_done("log_evasion")
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # ENHANCED ANALYSIS & VALIDATION PHASES (33-36)
+    # These phases provide deeper vulnerability analysis and chain validation
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _run_service_fingerprint_phase(self):
+        """Phase 33: Service Fingerprinting - Deep analysis of discovered services"""
+        if self._should_abort_low_signal():
+            self._mark_phase_done("service_fp")
+            return
+        
+        self.phase_detail = "[SERVICE_FP] Performing deep service fingerprinting..."
+        self._update_display()
+        
+        try:
+            live_hosts = self.state.get("live_hosts", [])
+            if not live_hosts:
+                self.phase_detail = "[SERVICE_FP] No live hosts for fingerprinting"
+                self._update_display()
+                self._mark_phase_done("service_fp")
+                return
+            
+            # Get live URLs for fingerprinting
+            hosts_to_fp = []
+            for host in live_hosts[:20]:  # Limit to 20 for performance
+                url = host.get('url', '')
+                if url:
+                    hosts_to_fp.append({'url': url})
+            
+            if not hosts_to_fp:
+                self.phase_detail = "[SERVICE_FP] No URLs available for fingerprinting"
+                self._update_display()
+                self._mark_phase_done("service_fp")
+                return
+            
+            self.logger.info(f"[SERVICE_FP] Fingerprinting {len(hosts_to_fp)} hosts")
+            
+            # Run service fingerprinting
+            results = self.service_fingerprinter.fingerprint_all(
+                hosts_to_fp,
+                progress_cb=self._progress_callback
+            )
+            
+            # Update stats
+            tech_count = len(results.get('technologies', {}))
+            if tech_count > 0:
+                self.stats['vulns'] += tech_count  # Count technologies as findings
+                self.last_action = f"service_fp: identified {tech_count} technologies"
+                self.phase_detail = f"[SERVICE_FP] Complete - {tech_count} technologies fingerprinted"
+                
+                if self.batch_display:
+                    tech_names = list(results.get('technologies', {}).keys())[:5]
+                    self.batch_display._add_to_feed("🔍", "Service FP", self.target, f"{tech_count} techs: {', '.join(tech_names)}")
+            else:
+                self.last_action = "service_fp: no technologies identified"
+                self.phase_detail = "[SERVICE_FP] Complete - No technologies identified"
+            
+            self._update_display()
+            
+        except Exception as e:
+            self.logger.error(f"[SERVICE_FP] Phase failed: {e}")
+            self.last_action = f"service_fp error: {str(e)[:50]}"
+            self.phase_detail = f"[SERVICE_FP] Error - {str(e)[:60]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("service_fp")
+
+    def _run_verify_vulns_phase(self):
+        """Phase 34: Vulnerability Verification - Confirm detected vulnerabilities"""
+        if self._should_abort_low_signal():
+            self._mark_phase_done("verify_vulns")
+            return
+        
+        self.phase_detail = "[VERIFY] Verifying detected vulnerabilities..."
+        self._update_display()
+        
+        try:
+            vulnerabilities = self.state.get("vulnerabilities", [])
+            if not vulnerabilities:
+                self.phase_detail = "[VERIFY] No vulnerabilities to verify"
+                self._update_display()
+                self._mark_phase_done("verify_vulns")
+                return
+            
+            self.logger.info(f"[VERIFY] Verifying {len(vulnerabilities)} vulnerabilities")
+            
+            # Run verification
+            results = self.exploit_verifier.verify_vulnerabilities(
+                vulnerabilities,
+                progress_cb=self._progress_callback
+            )
+            
+            # Update stats
+            verified_count = results.get('summary', {}).get('verified', 0)
+            rejected_count = results.get('summary', {}).get('rejected', 0)
+            
+            if verified_count > 0:
+                self.stats['vulns'] += verified_count
+                self.last_action = f"verify: {verified_count} confirmed, {rejected_count} rejected"
+                self.phase_detail = f"[VERIFY] Complete - {verified_count} verified, {rejected_count} rejected"
+                
+                if self.batch_display:
+                    self.batch_display._add_to_feed("✅", "Verified", self.target, f"{verified_count} vulns confirmed")
+            else:
+                self.last_action = f"verify: {rejected_count} rejected, none confirmed"
+                self.phase_detail = f"[VERIFY] Complete - {rejected_count} rejected, none confirmed"
+            
+            self._update_display()
+            
+        except Exception as e:
+            self.logger.error(f"[VERIFY] Phase failed: {e}")
+            self.last_action = f"verify error: {str(e)[:50]}"
+            self.phase_detail = f"[VERIFY] Error - {str(e)[:60]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("verify_vulns")
+
+    def _run_fp_filter_phase(self):
+        """Phase 35: False Positive Filtering - Remove false positives from results"""
+        if self._should_abort_low_signal():
+            self._mark_phase_done("fp_filter")
+            return
+        
+        self.phase_detail = "[FP_FILTER] Filtering false positives..."
+        self._update_display()
+        
+        try:
+            vulnerabilities = self.state.get("vulnerabilities", [])
+            if not vulnerabilities:
+                self.phase_detail = "[FP_FILTER] No vulnerabilities to filter"
+                self._update_display()
+                self._mark_phase_done("fp_filter")
+                return
+            
+            self.logger.info(f"[FP_FILTER] Filtering {len(vulnerabilities)} vulnerabilities")
+            
+            # Run false positive filtering
+            results = self.false_positive_filter.filter_vulnerabilities(
+                vulnerabilities,
+                progress_cb=self._progress_callback
+            )
+            
+            # Update stats
+            confirmed_count = results.get('summary', {}).get('confirmed', 0)
+            removed_count = results.get('summary', {}).get('removed', 0)
+            fp_rate = results.get('summary', {}).get('fp_rate', 0)
+            
+            if removed_count > 0:
+                self.last_action = f"fp_filter: {confirmed_count} confirmed, {removed_count} removed (FP rate: {fp_rate:.0%})"
+                self.phase_detail = f"[FP_FILTER] Complete - {confirmed_count} confirmed, {removed_count} removed"
+                
+                if self.batch_display:
+                    self.batch_display._add_to_feed("🎯", "FP Filter", self.target, f"Removed {removed_count} false positives")
+            else:
+                self.last_action = f"fp_filter: {confirmed_count} confirmed, none removed"
+                self.phase_detail = f"[FP_FILTER] Complete - {confirmed_count} confirmed"
+            
+            self._update_display()
+            
+        except Exception as e:
+            self.logger.error(f"[FP_FILTER] Phase failed: {e}")
+            self.last_action = f"fp_filter error: {str(e)[:50]}"
+            self.phase_detail = f"[FP_FILTER] Error - {str(e)[:60]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("fp_filter")
+
+    def _run_chain_validate_phase(self):
+        """Phase 36: Chain Validation - Validate attack chains before execution"""
+        if self._should_abort_low_signal():
+            self._mark_phase_done("chain_validate")
+            return
+        
+        self.phase_detail = "[CHAIN_VAL] Validating attack chains..."
+        self._update_display()
+        
+        try:
+            chains = self.state.get("exploit_chains", [])
+            if not chains:
+                self.phase_detail = "[CHAIN_VAL] No chains to validate"
+                self._update_display()
+                self._mark_phase_done("chain_validate")
+                return
+            
+            # Build context for validation
+            context = {
+                "technologies": self.state.get("technologies", {}),
+                "vulnerabilities": self.state.get("vulnerabilities", []),
+                "capabilities": ["http_client", "sqli_tool", "browser"],
+                "tools": {
+                    "http_client": True,
+                    "sqlmap": True,
+                    "browser": True,
+                },
+                "login_endpoints": [],
+                "upload_endpoints": [],
+                "api_endpoints": [],
+            }
+            
+            self.logger.info(f"[CHAIN_VAL] Validating {len(chains)} chains")
+            
+            # Run chain validation
+            results = self.chain_validator.validate_chains(chains, context)
+            
+            # Update stats
+            valid_count = sum(1 for r in results if r.is_valid)
+            can_execute_count = sum(1 for r in results if r.can_execute)
+            avg_confidence = sum(r.confidence for r in results) / len(results) if results else 0
+            
+            if valid_count > 0:
+                self.last_action = f"chain_val: {valid_count} valid, {can_execute_count} executable (conf: {avg_confidence:.0%})"
+                self.phase_detail = f"[CHAIN_VAL] Complete - {valid_count} valid, {can_execute_count} executable"
+                
+                if self.batch_display:
+                    self.batch_display._add_to_feed("🔗", "Chain Val", self.target, f"{valid_count} valid chains")
+            else:
+                self.last_action = f"chain_val: 0 valid, {can_execute_count} executable"
+                self.phase_detail = f"[CHAIN_VAL] Complete - 0 valid, {can_execute_count} executable"
+            
+            # Store validation results in state
+            self.state.update(chain_validation_results=[
+                {
+                    "chain_id": r.chain_id,
+                    "status": r.status.value,
+                    "confidence": r.confidence,
+                    "estimated_success_rate": r.estimated_success_rate,
+                    "issues": r.issues,
+                }
+                for r in results
+            ])
+            
+            self._update_display()
+            
+        except Exception as e:
+            self.logger.error(f"[CHAIN_VAL] Phase failed: {e}")
+            self.last_action = f"chain_val error: {str(e)[:50]}"
+            self.phase_detail = f"[CHAIN_VAL] Error - {str(e)[:60]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("chain_validate")
+
     def _run_ddos_phase(self):
 
         exploit_results = self.state.get("exploit_results", [])
@@ -6097,7 +6508,7 @@ Exploitability estimation:
         self._print_modern_summary()
 
     def _print_modern_summary(self):
-        """Print modern structured terminal display showing all phases and findings"""
+        """Print modern structured terminal display with colors and gradients"""
         summary = self.state.summary()
         vulns = self.state.get("confirmed_vulnerabilities", []) or []
         findings = self.state.get("security_findings", []) or []
@@ -6110,7 +6521,6 @@ Exploitability estimation:
         # Get PHP version from findings or detect from state
         php_version = self.findings.get('php_version', '')
         if not php_version:
-            # Try to get from technologies
             for tech_name, tech_data in technologies.items():
                 if 'php' in tech_name.lower():
                     if isinstance(tech_data, dict):
@@ -6126,16 +6536,20 @@ Exploitability estimation:
             vuln_types[vtype] = vuln_types.get(vtype, 0) + 1
         
         successful_exploits = [e for e in exploit_results if e.get('success')]
+        C = Colors
+        T = Theme
         
-        # ─── HEADER ───────────────────────────────────────────────────────────
+        # ─── HEADER WITH GRADIENT ─────────────────────────────────────────────
         print()
-        print("═" * 64)
-        print("  ⚡ AI RECON AGENT — FINAL REPORT")
-        print("═" * 64)
-        print(f"  Target:     {self.target}")
-        print(f"  Iteration:  {self.iteration_count}/{self.max_iterations}")
-        print(f"  Duration:   {int(time.time() - self.scan_start_time)}s")
-        print("═" * 64)
+        border = f"{T.BORDER}╔{'═' * 62}╗{C.RESET}"
+        header = f"{T.BORDER}║{C.RESET}  {C.gradient(T.PRIMARY, '⚡ AI RECON AGENT — FINAL REPORT ⚡')}{C.RESET}  {T.BORDER}║{C.RESET}"
+        
+        print(border)
+        print(header)
+        print(f"{T.BORDER}║{C.RESET}  {C.BOLD}Target:{C.RESET} {C.CYAN}{self.target:<54}{C.RESET} {T.BORDER}║{C.RESET}")
+        print(f"{T.BORDER}║{C.RESET}  {C.BOLD}Iteration:{C.RESET} {C.YELLOW}{self.iteration_count}/{self.max_iterations:<51}{C.RESET} {T.BORDER}║{C.RESET}")
+        print(f"{T.BORDER}║{C.RESET}  {C.BOLD}Duration:{C.RESET} {C.GREEN}{int(time.time() - self.scan_start_time)}s{' ' * 55}{C.RESET} {T.BORDER}║{C.RESET}")
+        print(border)
         print()
         
         # ─── [RECON] ──────────────────────────────────────────────────────────

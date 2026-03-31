@@ -130,7 +130,7 @@ class HTTPClient:
         except (ConnectionError, RequestsConnectionError) as e:
             if self._is_name_resolution_error(e):
                 self._record_dead_host_error(host, hard=True)
-                logger.error(f"GET request failed for {url}: {e}")
+                logger.debug(f"[HTTP] Connection failed for {url}: {e}")
                 raise
             # Cache connection refused errors
             if 'Connection refused' in str(e):
@@ -140,34 +140,34 @@ class HTTPClient:
             # FALLBACK HTTPS -> HTTP for SSL errors
             if 'SSL' in str(e) and url.startswith('https://'):
                 http_url = url.replace('https://', 'http://', 1)
-                logger.warning(f"[HTTP] SSL failed, retrying with HTTP: {http_url}")
+                logger.debug(f"[HTTP] SSL failed, retrying with HTTP: {http_url}")
                 try:
                     response = self.session.get(http_url, **kwargs)
                     self._update_session(response)
                     return response
                 except Exception as e2:
-                    logger.error(f"GET request failed for {http_url}: {e2}")
+                    logger.debug(f"[HTTP] Connection failed for {http_url}: {e2}")
                     raise e2
             
-            logger.error(f"GET request failed for {url}: {e}")
+            logger.debug(f"[HTTP] Connection failed for {url}: {e}")
             raise
         except (ReadTimeout, ConnectTimeout) as e:
-            logger.error(f"GET request timed out for {url}: {e}")
+            logger.debug(f"[HTTP] Request timed out for {url}: {e}")
             raise
         except HeaderParsingError as e:
-            logger.warning(f"Failed to parse headers (url={url}): {e}")
+            logger.debug(f"[HTTP] Failed to parse headers (url={url}): {e}")
             try:
                 response = self.session.get(url, **kwargs)
                 self._clear_dead_host_error(host)
                 self._update_session(response)
                 return response
             except Exception as e2:
-                logger.error(f"GET request failed for {url}: {e2}")
+                logger.debug(f"[HTTP] Request failed for {url}: {e2}")
                 raise e2
         except Exception as e:
             if self._is_name_resolution_error(e):
                 self._record_dead_host_error(host, hard=True)
-            logger.error(f"GET request failed for {url}: {e}")
+            logger.debug(f"[HTTP] Request failed for {url}: {e}")
             raise
 
     def post(self, url: str, data=None, json=None, **kwargs) -> requests.Response:
@@ -199,12 +199,12 @@ class HTTPClient:
             self._update_session(response)
             return response
         except (ReadTimeout, ConnectTimeout) as e:
-            logger.error(f"POST request timed out for {url}: {e}")
+            logger.debug(f"[HTTP] POST request timed out for {url}: {e}")
             raise
         except Exception as e:
             if self._is_name_resolution_error(e):
                 self._record_dead_host_error(host, hard=True)
-            logger.error(f"POST request failed for {url}: {e}")
+            logger.debug(f"[HTTP] POST request failed for {url}: {e}")
             raise
 
     def _record_dead_host_error(self, host: str, hard: bool = False):
