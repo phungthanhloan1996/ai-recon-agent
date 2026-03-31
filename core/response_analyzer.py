@@ -5,9 +5,107 @@ Phân tích response để xác định exploit success
 
 import re
 import logging
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
+
+from modules.crypto_scanner import CryptographicScanner
 
 logger = logging.getLogger("recon.response_analyzer")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# PHP VERSION DETECTION
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Regex patterns for PHP version detection
+PHP_VERSION_PATTERNS = [
+    # X-Powered-By header: PHP/7.4.33, PHP/8.1, PHP/7.4
+    re.compile(r"PHP/?([0-9]+\.[0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
+    # PHP Version in body: "PHP Version 7.4.33", "PHP/7.4.33"
+    re.compile(r"PHP\s*[Vv]ersion\s*([0-9]+\.[0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
+    # Server header: PHP/7.4.33
+    re.compile(r"Server:\s*PHP/?([0-9]+\.[0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
+    # phpinfo() output patterns
+    re.compile(r'<td\s+class="e"\s*>PHP\s+Version\s*</td>\s*<td\s+class="v"\s*>([0-9]+\.[0-9]+(?:\.[0-9]+)?)', re.IGNORECASE),
+    # expose_php = on header format
+    re.compile(r"X-Powered-By:\s*PHP/?([0-9]+\.[0-9]+(?:\.[0-9]+)?)", re.IGNORECASE),
+]
+
+# Patterns that indicate PHP but without version
+PHP_PRESENCE_PATTERNS = [
+    re.compile(r"PHP/?([0-9]+)", re.IGNORECASE),
+    re.compile(r'<\?php', re.IGNORECASE),
+    re.compile(r'PHP\/([0-9])', re.IGNORECASE),
+]
+
+
+def detect_php_version(headers: Optional[Dict[str, str]] = None, body: str = "") -> Optional[str]:
+    """
+    Detect PHP version from HTTP response headers and body.
+    
+    Args:
+        headers: Response headers as dict (case-insensitive keys)
+        body: Response body as string
+        
+    Returns:
+        PHP version string (e.g., "7.4.33", "8.1") or None if not detected
+    """
+    # Check headers first (most reliable)
+    if headers:
+        for header_name, header_value in headers.items():
+            header_lower = header_name.lower()
+            # Check X-Powered-By header
+            if header_lower in ("x-powered-by", "x-poweredby", "x_powered_by"):
+                for pattern in PHP_VERSION_PATTERNS:
+                    match = pattern.search(header_value)
+                    if match:
+                        version = match.group(1)
+                        logger.info(f"[PHP] Detected PHP version {version} from {header_name} header")
+                        return version
+            
+            # Check Server header
+            if header_lower in ("server", "x-server"):
+                for pattern in PHP_VERSION_PATTERNS:
+                    match = pattern.search(header_value)
+                    if match:
+                        version = match.group(1)
+                        logger.info(f"[PHP] Detected PHP version {version} from {header_name} header")
+                        return version
+    
+    # Check body content
+    if body:
+        for pattern in PHP_VERSION_PATTERNS:
+            match = pattern.search(body)
+            if match:
+                version = match.group(1)
+                logger.info(f"[PHP] Detected PHP version {version} from response body")
+                return version
+    
+    return None
+
+
+def detect_php_presence(headers: Optional[Dict[str, str]] = None, body: str = "") -> bool:
+    """
+    Check if PHP is present (even without version info).
+    
+    Args:
+        headers: Response headers as dict
+        body: Response body as string
+        
+    Returns:
+        True if PHP is detected, False otherwise
+    """
+    if headers:
+        for header_name, header_value in headers.items():
+            if header_name.lower() in ("x-powered-by", "server"):
+                if re.search(r"php", header_value, re.IGNORECASE):
+                    return True
+    
+    if body:
+        for pattern in PHP_PRESENCE_PATTERNS:
+            if pattern.search(body):
+                return True
+    
+    return False
 
 
 class VulnerabilityScorer:
@@ -318,9 +416,11 @@ HTTP_STATUS_RISK = {
 
 
 class ResponseAnalyzer:
-    def __init__(self):
+    def __init__(self, output_dir: str = None):
         self.findings = []
         self.scorer = VulnerabilityScorer()
+        self.crypto_scanner = CryptographicScanner(output_dir=output_dir)
+        self.crypto_findings = []
 
     def analyze(
         self,
@@ -434,4 +534,87 @@ class ResponseAnalyzer:
         for finding in self.findings:
             sev = finding.get("severity", "INFO")
             summary[sev] = summary.get(sev, 0) + 1
+        # Include crypto findings in summary
+        for finding in self.crypto_findings:
+            sev = finding.get("severity", "INFO")
+            summary[sev] = summary.get(sev, 0) + 1
         return summary
+
+    def _check_crypto_failures(self, response) -> List[Dict[str, Any]]:
+        """
+        Check for cryptographic failures in response (OWASP A04:2021).
+        
+        Args:
+            response: HTTP response object with text, headers attributes
+            
+        Returns:
+            List of cryptographic security findings
+        """
+        findings = []
+        
+        try:
+            response_text = ""
+            headers = {}
+            
+            # Extract response data
+            if hasattr(response, 'text'):
+                response_text = response.text
+            elif hasattr(response, 'content'):
+                response_text = response.content.decode('utf-8', errors='ignore')
+            
+            if hasattr(response, 'headers'):
+                headers = dict(response.headers) if response.headers else {}
+            
+            # Check for sensitive data exposure
+            if response_text:
+                sensitive_findings = self.crypto_scanner.check_sensitive_data(response_text)
+                findings.extend(sensitive_findings)
+            
+            # Check for HSTS header
+            if headers:
+                hsts_findings = self.crypto_scanner.check_hsts(headers)
+                findings.extend(hsts_findings)
+            
+            # Store findings
+            self.crypto_findings.extend(findings)
+            
+            if findings:
+                logger.warning(f"[RESPONSE_ANALYZER] Found {len(findings)} cryptographic security issues")
+                
+        except Exception as e:
+            logger.debug(f"[RESPONSE_ANALYZER] Crypto check failed: {e}")
+        
+        return findings
+
+    def check_response_crypto(self, response, url: str = "") -> List[Dict[str, Any]]:
+        """
+        Public method to check cryptographic issues in a response.
+        
+        Args:
+            response: HTTP response object
+            url: Optional URL for context
+            
+        Returns:
+            List of cryptographic findings
+        """
+        return self._check_crypto_failures(response)
+
+    def get_crypto_findings(self) -> List[Dict[str, Any]]:
+        """Get all cryptographic security findings"""
+        return self.crypto_findings
+
+    def save_crypto_findings(self, filepath: str = None):
+        """Save crypto findings to file"""
+        if not self.crypto_findings:
+            return
+        
+        if not filepath:
+            filepath = os.path.join(self.crypto_scanner.output_dir or ".", "crypto_findings.json")
+        
+        try:
+            import json
+            with open(filepath, 'w') as f:
+                json.dump(self.crypto_findings, f, indent=2, default=str)
+            logger.info(f"[RESPONSE_ANALYZER] Crypto findings saved to {filepath}")
+        except Exception as e:
+            logger.error(f"[RESPONSE_ANALYZER] Failed to save crypto findings: {e}")

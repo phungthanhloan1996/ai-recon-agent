@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from core.executor import run_command, tool_available
 from core.state_manager import StateManager
+from core.http_engine import HTTPClient
 from integrations.whatweb_runner import WhatwebRunner
 from integrations.naabu_runner import NaabuRunner
 from integrations.dirbusting_runner import DirBustingRunner
@@ -37,6 +38,7 @@ class ToolkitScanner:
         self.dirbusting_runner = DirBustingRunner(output_dir)
         self.wappalyzer_runner = WappalyzerRunner(output_dir)
         self.api_scanner = APIScannerRunner(output_dir)
+        self.http_client = HTTPClient()
         self.toolkit_metrics = {"tech": 0, "ports": 0, "dirs": 0, "api": 0, "vulns": 0}
 
     def run(
@@ -773,3 +775,113 @@ class ToolkitScanner:
             logger.error(f"API scanner error: {e}")
         
         return None
+
+    def _check_security_headers(self, response) -> List[Dict[str, Any]]:
+        """Check for missing security headers (OWASP A02:2021)."""
+        findings = []
+        required_headers = {
+            "X-Frame-Options": {"severity": "MEDIUM", "title": "Missing X-Frame-Options Header", "description": "Prevents clickjacking attacks.", "recommendation": "Set X-Frame-Options to DENY or SAMEORIGIN"},
+            "X-XSS-Protection": {"severity": "LOW", "title": "Missing X-XSS-Protection Header", "description": "Enables XSS filtering in browsers.", "recommendation": "Set X-XSS-Protection to '1; mode=block'"},
+            "X-Content-Type-Options": {"severity": "MEDIUM", "title": "Missing X-Content-Type-Options Header", "description": "Prevents MIME-type sniffing.", "recommendation": "Set X-Content-Type-Options to 'nosniff'"},
+            "Strict-Transport-Security": {"severity": "HIGH", "title": "Missing HSTS Header", "description": "Forces browsers to use HTTPS.", "recommendation": "Set with max-age of at least 31536000"},
+            "Content-Security-Policy": {"severity": "MEDIUM", "title": "Missing CSP Header", "description": "Prevents XSS and data injection attacks.", "recommendation": "Implement appropriate CSP"},
+            "Referrer-Policy": {"severity": "LOW", "title": "Missing Referrer-Policy Header", "description": "Controls referrer information.", "recommendation": "Set to 'strict-origin-when-cross-origin'"},
+            "Permissions-Policy": {"severity": "LOW", "title": "Missing Permissions-Policy Header", "description": "Controls browser features.", "recommendation": "Restrict unnecessary browser features"},
+        }
+        if not hasattr(response, 'headers') or not response.headers:
+            return findings
+        headers_lower = {k.lower(): v for k, v in response.headers.items()}
+        for header_name, info in required_headers.items():
+            if header_name.lower() not in headers_lower:
+                findings.append({"type": "missing_security_header", "severity": info["severity"], "title": info["title"], "description": info["description"], "recommendation": info["recommendation"], "missing_header": header_name})
+        return findings
+
+    def _check_debug_mode(self, response) -> List[Dict[str, Any]]:
+        """Check for debug mode exposure (OWASP A02:2021)."""
+        findings = []
+        if not hasattr(response, 'text') and not hasattr(response, 'content'):
+            return findings
+        response_text = getattr(response, 'text', '') or getattr(response, 'content', b'').decode('utf-8', errors='ignore')
+        if not response_text:
+            return findings
+        debug_patterns = [
+            (r'(?i)traceback \(most recent call last\)', "Python traceback exposed"),
+            (r'(?i)stack trace', "Stack trace exposed"),
+            (r'(?i)debug\s*=\s*(true|yes|1|on)', "Debug mode enabled"),
+            (r'(?i)laravel_debug\s*=\s*(true|yes|1)', "Laravel debug mode enabled"),
+            (r'(?i)APP_DEBUG\s*=\s*(true|yes|1)', "Laravel APP_DEBUG enabled"),
+            (r'(?i)Compilation debug="true"', "ASP.NET compilation debug enabled"),
+            (r'(?i)in .+\.php on line \d+', "PHP error with line number"),
+            (r'(?i)Warning\s*:', "PHP warning exposed"),
+            (r'(?i)Fatal error\s*:', "PHP fatal error exposed"),
+            (r'(?i)Undefined variable\s*:', "PHP undefined variable exposed"),
+            (r'(?i)sql query\s*:', "SQL query exposed"),
+        ]
+        for pattern, description in debug_patterns:
+            if re.search(pattern, response_text):
+                severity = "HIGH" if any(kw in description.lower() for kw in ["debug", "traceback", "stack trace", "sql"]) else "MEDIUM"
+                findings.append({"type": "debug_mode_exposed", "severity": severity, "title": "Debug Information Exposed", "description": description, "recommendation": "Disable debug mode in production."})
+                break
+        return findings
+
+    def _check_directory_listing(self, url: str) -> List[Dict[str, Any]]:
+        """Check for directory listing (OWASP A02:2021)."""
+        findings = []
+        paths = ["/", "/images/", "/assets/", "/uploads/", "/files/", "/backup/"]
+        patterns = [r'Index of /', r'\[DIR\]', r'<title>Index of', r'Parent Directory']
+        for path in paths:
+            try:
+                test_url = url.rstrip('/') + path
+                response = self.http_client.get(test_url, timeout=10)
+                if response.status_code == 200:
+                    text = getattr(response, 'text', '')
+                    for p in patterns:
+                        if re.search(p, text, re.IGNORECASE):
+                            findings.append({"type": "directory_listing", "severity": "MEDIUM", "url": test_url, "title": "Directory Listing Enabled", "description": f"Directory listing at {test_url}", "recommendation": "Disable directory listing in web server config"})
+                            break
+            except Exception:
+                continue
+        return findings
+
+    def _check_exposed_files(self, base_url: str) -> List[Dict[str, Any]]:
+        """Check for exposed sensitive files (OWASP A02:2021)."""
+        findings = []
+        exposed = {
+            "/.git/HEAD": {"severity": "HIGH", "title": "Git Repository Exposed", "description": ".git directory accessible.", "check": r'ref:'},
+            "/.env": {"severity": "CRITICAL", "title": "Environment File Exposed", "description": ".env file accessible with potential secrets.", "check": r'(?:DB_|APP_|API_|SECRET_)'},
+            "/phpinfo.php": {"severity": "MEDIUM", "title": "PHP Info Exposed", "description": "phpinfo() page accessible.", "check": r'PHP Version|phpinfo'},
+            "/swagger.json": {"severity": "LOW", "title": "Swagger Docs Exposed", "description": "API documentation publicly accessible.", "check": r'swagger|openapi'},
+            "/actuator/info": {"severity": "MEDIUM", "title": "Spring Boot Actuator Exposed", "description": "Actuator info endpoint accessible.", "check": None},
+            "/.htaccess": {"severity": "MEDIUM", "title": ".htaccess Exposed", "description": "Server configuration exposed.", "check": r'RewriteRule|Redirect'},
+            "/robots.txt": {"severity": "INFO", "title": "Robots.txt Found", "description": "May reveal hidden paths.", "check": r'Disallow|Allow'},
+            "/wp-config.php": {"severity": "CRITICAL", "title": "WordPress Config Exposed", "description": "Database credentials may be exposed.", "check": r'DB_NAME|DB_USER'},
+        }
+        for path, info in exposed.items():
+            try:
+                test_url = base_url.rstrip('/') + path
+                response = self.http_client.get(test_url, timeout=10)
+                if response.status_code == 200:
+                    text = getattr(response, 'text', '')
+                    if info["check"]:
+                        if re.search(info["check"], text, re.IGNORECASE):
+                            findings.append({"type": "exposed_sensitive_file", "severity": info["severity"], "url": test_url, "title": info["title"], "description": info["description"], "recommendation": f"Remove or restrict access to {path}"})
+                    elif len(text) > 10:
+                        findings.append({"type": "exposed_sensitive_file", "severity": info["severity"], "url": test_url, "title": info["title"], "description": info["description"], "recommendation": f"Remove or restrict access to {path}"})
+            except Exception:
+                continue
+        return findings
+
+    def _run_security_misconfig_checks(self, url: str, progress_cb: Optional[Callable] = None) -> List[Dict[str, Any]]:
+        """Run all security misconfiguration checks (OWASP A02:2021)."""
+        findings = []
+        self._notify_progress(progress_cb, "security-misconfig", "running", "Checking security headers, debug mode, directory listing, exposed files...")
+        try:
+            response = self.http_client.get(url, timeout=15)
+            findings.extend(self._check_security_headers(response))
+            findings.extend(self._check_debug_mode(response))
+        except Exception:
+            pass
+        findings.extend(self._check_directory_listing(url))
+        findings.extend(self._check_exposed_files(url))
+        self._notify_progress(progress_cb, "security-misconfig", "done", f"Found {len(findings)} security misconfigurations")
+        return findings

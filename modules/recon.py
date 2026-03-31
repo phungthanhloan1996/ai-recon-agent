@@ -104,7 +104,8 @@ class ReconEngine:
             progress_cb("recon", "http-validate", "running")
         live_hosts = self.validate_live_hosts(all_urls)
 
-        if len(live_hosts) < config.MIN_LIVE_HOSTS_FOR_FALLBACK and len(all_urls) > 100:
+        min_live_threshold = getattr(config, 'MIN_LIVE_HOSTS_FOR_FALLBACK', 1)
+        if len(live_hosts) < min_live_threshold and len(all_urls) > 100:
             logger.warning(f"[RECON] Only {len(live_hosts)} live hosts, attempting fallback validation")
             live_hosts = self.validate_live_hosts(all_urls[:500], timeout=10)
 
@@ -472,7 +473,7 @@ class ReconEngine:
             logger.info(f"[RECON] Skipping CT lookup for local/non-public target: {self.target_host}")
             return []
         
-        ct_timeout = config.CT_API_TIMEOUT if hasattr(config, 'CT_API_TIMEOUT') else 20
+        ct_timeout = getattr(config, 'CT_API_TIMEOUT', 20)
         
         # Retry with XML/JSON fallback
         for attempt in range(2):

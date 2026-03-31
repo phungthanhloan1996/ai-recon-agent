@@ -1499,59 +1499,179 @@ Format each chain as JSON with:
         return chains
 
     def smart_prioritize(self, chains: List[ExploitChain]) -> List[ExploitChain]:
-        """AI-like prioritization based on impact, feasibility, and state data"""
-        for chain in chains:
-            score = 0
-
-            # Impact score based on postconditions
-            impact_score = self._calculate_impact_score(chain.postconditions)
-            score += impact_score * 2  # Weight impact heavily
-
-            # Likelihood score based on prerequisites and state
-            likelihood_score = self._calculate_likelihood_score(chain.prerequisites, chain.preconditions)
-            score += likelihood_score
-
-            # Complexity penalty: more steps = harder
-            complexity_penalty = len(chain.steps) * 5
-            score -= complexity_penalty
-
-            # Risk level bonus
-            risk_scores = {"CRITICAL": 50, "HIGH": 30, "MEDIUM": 15, "LOW": 5}
-            score += risk_scores.get(chain.risk_level, 0)
-
-            # Target availability bonus
-            targets = {s.target for s in chain.steps}
+        """
+        AI-like prioritization based on impact, feasibility, and state data.
+        
+        Priority order (as per requirements):
+        1. CMS vulnerabilities (WordPress, Drupal, etc.)
+        2. Plugin vulnerabilities (WP plugins, themes, extensions)
+        3. Authentication weaknesses (login bypass, credential stuffing)
+        4. API vulnerabilities (REST, GraphQL, SOAP)
+        5. Misconfigurations (exposed admin, debug endpoints)
+        6. Advanced exploitation (zero-day, custom attacks)
+        
+        Chains with stronger evidence run first. Modules without supporting
+        evidence are deprioritized or filtered out.
+        """
+        # Categorization patterns for chain classification
+        cms_patterns = ['wordpress', 'wp', 'drupal', 'joomla', 'magento', 'shopify', 
+                        'cms', 'content management']
+        plugin_patterns = ['plugin', 'theme', 'extension', 'module', 'addon', 
+                           'wp-plugin', 'wp-theme', 'woocommerce']
+        auth_patterns = ['auth', 'login', 'bypass', 'credential', 'brute', 'password',
+                         'session', 'token', 'jwt', 'oauth', 'saml', 'mfa', '2fa']
+        api_patterns = ['api', 'rest', 'graphql', 'soap', 'endpoint', 'json', 
+                        'graphql', 'rpc', 'webhook']
+        misconfig_patterns = ['misconfig', 'exposed', 'unprotected', 'unauthenticated',
+                              'debug', 'backup', 'directory listing', 'traversal',
+                              'admin panel', 'unprotected']
+        advanced_patterns = ['zero-day', '0day', 'custom', 'unknown', 'advanced',
+                             'rce', 'code execution', 'deserialization', 'injection']
+        
+        def get_chain_category(chain: ExploitChain) -> int:
+            """
+            Get priority category for a chain (1=highest priority).
+            Returns category number based on chain name and description.
+            """
+            chain_text = f"{chain.name} {chain.description}".lower()
+            
+            # Check categories in priority order
+            for pattern in cms_patterns:
+                if pattern in chain_text:
+                    return 1
+            
+            for pattern in plugin_patterns:
+                if pattern in chain_text:
+                    return 2
+            
+            for pattern in auth_patterns:
+                if pattern in chain_text:
+                    return 3
+            
+            for pattern in api_patterns:
+                if pattern in chain_text:
+                    return 4
+            
+            for pattern in misconfig_patterns:
+                if pattern in chain_text:
+                    return 5
+            
+            for pattern in advanced_patterns:
+                if pattern in chain_text:
+                    return 6
+            
+            return 7  # Uncategorized - lowest priority
+        
+        def calculate_evidence_score(chain: ExploitChain) -> float:
+            """
+            Calculate evidence strength score for a chain.
+            Higher score = stronger evidence supporting the chain.
+            """
+            score = 0.0
+            
+            # Check if chain targets are confirmed in state
+            targets = {s.target for s in chain.steps if s.target}
             available_targets = set()
             live_hosts = self.state.get("live_hosts", [])
             for host in live_hosts:
                 available_targets.add(host.get("url", ""))
+            
+            # Target availability bonus
             score += len(targets & available_targets) * 10
-
-            # Vuln confirmation bonus
+            
+            # Vulnerability confirmation bonus
             vulns = self.state.get("vulnerabilities", [])
-            vuln_types = {v.get("name", "").lower() for v in vulns}
-            if any(vt in chain.name.lower() for vt in vuln_types):
-                score += 20
-
-            chain.priority_score = score
-
+            vuln_names = {v.get("name", "").lower() for v in vulns}
+            vuln_types = {v.get("type", "").lower() for v in vulns}
+            all_vuln_text = ' '.join(vuln_names | vuln_types)
+            
+            chain_text = f"{chain.name} {chain.description}".lower()
+            for vuln_text in all_vuln_text.split():
+                if len(vuln_text) > 3 and vuln_text in chain_text:
+                    score += 20
+            
+            # WordPress-specific evidence
+            if self.state.get("wordpress_detected"):
+                if any(p in chain_text for p in ['wp', 'wordpress', 'plugin', 'theme']):
+                    score += 30
+            
+            # Postconditions indicate impact
+            impact_score = self._calculate_impact_score(chain.postconditions)
+            score += impact_score * 2
+            
+            # Risk level bonus
+            risk_scores = {"CRITICAL": 50, "HIGH": 30, "MEDIUM": 15, "LOW": 5}
+            score += risk_scores.get(chain.risk_level, 0)
+            
+            return score
+        
+        def calculate_feasibility_score(chain: ExploitChain) -> float:
+            """
+            Calculate feasibility score - how likely the chain is to succeed.
+            """
+            score = 50.0  # Base score
+            
+            # Check prerequisites against state
+            likelihood_score = self._calculate_likelihood_score(chain.prerequisites, chain.preconditions)
+            score += likelihood_score
+            
+            # Complexity penalty: more steps = harder
+            complexity_penalty = len(chain.steps) * 5
+            score -= complexity_penalty
+            
+            # Shorter chains are preferred (faster to execute)
+            if len(chain.steps) <= 2:
+                score += 15
+            elif len(chain.steps) <= 4:
+                score += 5
+            
+            return score
+        
+        # Score and categorize all chains
+        for chain in chains:
+            category = get_chain_category(chain)
+            evidence_score = calculate_evidence_score(chain)
+            feasibility_score = calculate_feasibility_score(chain)
+            
+            # Combined score: category is primary sort (lower = higher priority)
+            # Within same category, evidence and feasibility determine order
+            # Use negative category so higher priority categories sort first
+            chain.priority_score = (
+                (10 - category) * 1000 +  # Category priority (1-7 mapped to 9000-3000)
+                evidence_score * 10 +      # Evidence strength
+                feasibility_score * 5      # Feasibility
+            )
+            
+            # Store category for reference
+            chain._category = category
+            chain._evidence_score = evidence_score
+            chain._feasibility_score = feasibility_score
+            
             # === ADAPTIVE LEARNING PATCH ===
             if self.learning_engine:
                 learning_data = self.learning_engine.export_learning_data()
-
+                
                 failed = learning_data.get("failed_payloads", [])
                 success = learning_data.get("successful_payloads", [])
-
-                # nếu chain liên quan payload fail nhiều → giảm điểm
+                
+                # If chain relates to frequently failed payloads → reduce score
                 for f in failed[-50:]:
                     if f.get("vuln_type") and f.get("vuln_type").lower() in chain.name.lower():
-                        score -= 5
-
-                # nếu chain từng thành công → boost mạnh
+                        chain.priority_score -= 50
+                
+                # If chain has historical success → boost significantly
                 for s in success:
                     if s.get("vuln_type") and s.get("vuln_type").lower() in chain.name.lower():
-                        score += 10
-
+                        chain.priority_score += 100
+        
+        # Filter out chains with no supporting evidence (score below threshold)
+        # Only filter if we have enough chains (> 3) to be selective
+        if len(chains) > 3:
+            filtered_chains = [c for c in chains if c.priority_score > 0 or c._category <= 3]
+            if filtered_chains:
+                chains = filtered_chains
+        
+        # Sort by priority score (descending)
         return sorted(chains, key=lambda c: getattr(c, 'priority_score', 0), reverse=True)
 
     def _build_conditioned_wp_chains(self) -> List[ExploitChain]:

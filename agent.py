@@ -43,6 +43,7 @@ from core.endpoint_analyzer import EndpointAnalyzer
 from core.exploit_executor import ExploitExecutor
 from core.error_recovery import ErrorRecovery, ConditionalPlaybook
 from core.wordlist_generator import WordlistGenerator
+from core.attack_surface import AttackSurfaceTracker
 
 # ─── Integration Components ─────────────────────────────────────────────────
 from integrations.wp_advanced_scan import WordPressAdvancedScan
@@ -122,6 +123,8 @@ from modules.sqli_exploiter import SQLiExploiter
 from modules.upload_bypass import UploadBypass
 from modules.reverse_shell import ReverseShellGenerator
 from modules.privilege_escalation import PrivilegeEscalation
+from modules.crypto_scanner import CryptographicScanner
+from integrations.sqlmap_runner import SQLMapRunner
 
 # ─── Tier-1 Vulnerability Detection Modules ────────────────────────────────
 from modules.waf_bypass_engine import WAFBypassEngine
@@ -137,7 +140,7 @@ from modules.subdomain_takeover_scanner import SubdomainTakeoverScanner
 
 # ─── Core Intelligence Engines ──────────────────────────────────────────────
 from core.privilege_pivot_engine import analyze_privilege_escalation
-from core.automatic_exploit_selector import select_exploitation_strategy, select_all_strategies
+from core.automatic_exploit_selector import select_exploitation_strategy, select_all_strategies, should_execute_module, AutomaticExploitSelector
 
 # ─── AI Intelligence Engines ────────────────────────────────────────────────
 from ai.adaptive_payload_engine import generate_adaptive_payloads
@@ -279,6 +282,14 @@ class BatchDisplay:
         timestamp = datetime.now().strftime("%H:%M:%S")
         self.ai_feed.appendleft((timestamp, event, domain, detail))
     
+    def _get_progress_bar(self, current: int, total: int, width: int = 10) -> str:
+        """Create a visual progress bar"""
+        if total == 0:
+            return "░" * width
+        filled = int(width * current / total)
+        bar = "█" * filled + "░" * (width - filled)
+        return bar
+
     def _get_progress_text(self, data: dict) -> str:
         """Tạo progress text dựa trên phase"""
         phase = data.get('phase', 'init')
@@ -291,46 +302,52 @@ class BatchDisplay:
             subs = stats.get('subs', 0)
             live = stats.get('live', 0)
             total = stats.get('total_hosts', 0)
-            # Show live/total if available, otherwise just subs
             if total > 0:
                 percent = int((live / total) * 100) if total else 0
-                return f"{percent}% ({live}/{total}) live"
-            return f"{subs} subs"
+                bar = self._get_progress_bar(live, total, 8)
+                return f"{percent:3d}% [{bar}] {live}/{total}"
+            return f"{subs} subs" if subs > 0 else "scanning..."
         elif phase == 'live':
             live = stats.get('live', 0)
             total = stats.get('total_hosts', 0)
-            return f"{live}/{total} live"
+            if total > 0:
+                percent = int((live / total) * 100) if total else 0
+                bar = self._get_progress_bar(live, total, 8)
+                return f"{percent:3d}% [{bar}] {live}/{total}"
+            return f"{live} live" if live > 0 else "detecting..."
         elif phase == 'wp':
             wp_count = stats.get('wp', 0)
-            return f"{wp_count} WP sites" if wp_count > 0 else "scanning WP"
+            return f"🎯 {wp_count} WP" if wp_count > 0 else "🔍 WP..."
         elif phase == 'crawl':
             eps = stats.get('eps', 0)
-            # No total endpoints stored for crawl, just show count
-            return f"{eps} eps"
-        elif phase == 'scan':
-            tested = stats.get('payloads_tested', 0)
-            total = stats.get('total_payloads', 0)
-            # Show percentage with breakdown if total available
-            if total > 0:
-                percent = int((tested / total) * 100) if total else 0
-                return f"{percent}% ({tested}/{total})"
-            return f"{tested} payloads"
+            return f"📁 {eps} eps" if eps > 0 else "🔄 crawling..."
         elif phase == 'toolkit':
-            # Show aggregated toolkit findings
             tech = toolkit_m.get('tech', 0)
             ports = toolkit_m.get('ports', 0)
             dirs = toolkit_m.get('dirs', 0)
             api = toolkit_m.get('api', 0)
-            # If any findings exist, show summary
-            if tech + ports + dirs + api > 0:
-                return f"{tech}t {ports}p {dirs}d {api}a"
-            return "scanning tools"
+            total_findings = tech + ports + dirs + api
+            if total_findings > 0:
+                return f"📊 T:{tech} P:{ports} D:{dirs} A:{api}"
+            return "🔧 scanning..."
+        elif phase == 'scan':
+            tested = stats.get('payloads_tested', 0)
+            total = stats.get('total_payloads', 0)
+            if total > 0:
+                percent = int((tested / total) * 100) if total else 0
+                bar = self._get_progress_bar(tested, total, 8)
+                return f"{percent:3d}% [{bar}]"
+            return f"⚡ {tested} payloads" if tested > 0 else "⏳ testing..."
         elif phase == 'exploit':
             chains = data.get('chains', [])
-            exploited = sum(1 for c in chains if c.get('exploited'))
-            return f"{exploited}/{len(chains)} chains"
+            if chains:
+                exploited = sum(1 for c in chains if c.get('exploited'))
+                percent = int((exploited / len(chains)) * 100) if len(chains) > 0 else 0
+                bar = self._get_progress_bar(exploited, len(chains), 8)
+                return f"{percent:3d}% [{bar}] {exploited}/{len(chains)}"
+            return "💥 analyzing..."
         else:
-            return phase_detail or "working..."
+            return phase_detail[:15] or "working..." if phase_detail else "working..."
     
     def _render_loop(self):
         """Thread render liên tục - 4 lần/giây"""
@@ -342,9 +359,9 @@ class BatchDisplay:
             time.sleep(0.1)
     
     def _render(self):
-        """Vẽ giao diện tối ưu - output ngang hơn"""
+        """Vẽ giao diện dashboard modern"""
         with self.lock:
-            sys.stdout.write('\033[H\033[J')
+            sys.stdout.write('\033[H\033[J')  # Clear screen
             
             # Header
             elapsed = int(time.time() - self.start_time)
@@ -357,12 +374,16 @@ class BatchDisplay:
             completed_count = len(self.completed)
             failed_count = len(self.failed)
             
+            # Calculate throughput metrics
+            throughput = completed_count / (elapsed + 1) * 60 if elapsed > 0 else 0
+            completion_rate = int((completed_count / self.total_domains * 100)) if self.total_domains > 0 else 0
+            
             # Giảm chiều dài header
             print("┌────────────────────────────────────────────────────────────────────────────────────────────────┐")
-            print(f"│ ⚡ AI RECON AGENT [BATCH]  uptime: {hours:02d}:{minutes:02d}:{seconds:02d}  Workers: {active_count}/{self.max_workers}  Waiting: {queue_count}          │")
+            print(f"│ ⚡ AI RECON AGENT [BATCH]  uptime: {hours:02d}:{minutes:02d}:{seconds:02d}")
+            print(f"│ 📊 Speed: {throughput:.1f}/min | Active: {active_count}/{self.max_workers} | Queue: {queue_count} | Done: {completed_count}/{self.total_domains} | Failed: {failed_count}      │")
+            print(f"│ 📈 Total Findings: {self.total_vulns} vulns | {self.total_endpoints} endpoints | {self.total_exploited} exploited | {self.total_live} hosts | {self.total_wordpress} WP     │")
             
-            # Targets file info
-            print(f"│ Targets: {self.targets_file[:30]:<30} ({self.total_domains} total)                            │")
             print("├────────────────────────────────────────────────────────────────────────────────────────────────┤")
             
             # Active targets - compact
@@ -382,7 +403,10 @@ class BatchDisplay:
                     progress = self._get_progress_text(data)
                     domain_display = domain[:25] if len(domain) <= 25 else domain[:22] + "..."
                     
-                    print(f"│  #{idx} {domain_display:<25} [{phase_icon}] {iter_info:<6} | {progress:<20} │")
+                    elapsed_domain = int(time.time() - data.get('start_time', time.time()))
+                    elapsed_str = f"{elapsed_domain // 60}m" if elapsed_domain >= 60 else f"{elapsed_domain}s"
+                    
+                    print(f"│  #{idx} {domain_display:<25} [{phase_icon}] {iter_info:<6} | {progress:<25} | ⏱{elapsed_str:>5}s │")
             else:
                 print("│  (no active targets)                                                                       │")
             
@@ -396,15 +420,24 @@ class BatchDisplay:
                 if queue_count > 2:
                     print(f"│  • ... and {queue_count - 2} more                                                        │")
             
-            # Completed - one line
+            # Completed - show with stats
             if completed_count > 0:
-                completed_brief = ", ".join([d[:15] for d, _, _, _, _, _ in list(self.completed)[:2]])
-                print(f"│ ✅ DONE ({completed_count}): {completed_brief:50}│")
+                print(f"│ ✅ DONE ({completed_count}/{self.total_domains}): [", end="")
+                for i, (d, v, e, c, tc, ts) in enumerate(list(self.completed)[:4]):
+                    if i > 0:
+                        print(", ", end="")
+                    print(f"{d[:12]}({v}v)", end="")
+                print("]" + " " * (48 - 4 * 20) + "│")
             
-            # Failed - one line
+            # Failed - show with reasons
             if failed_count > 0:
-                failed_brief = ", ".join([d[:15] for d, _, _ in list(self.failed)[:2]])
-                print(f"│ ❌ FAILED ({failed_count}): {failed_brief:48}│")
+                print(f"│ ❌ FAILED ({failed_count}): [", end="")
+                for i, (d, reason, ts) in enumerate(list(self.failed)[:3]):
+                    if i > 0:
+                        print(", ", end="")
+                    reason_short = reason[:10] if reason else "?"
+                    print(f"{d[:12]}({reason_short})", end="")
+                print("]" + " " * (45 - 3 * 22) + "│")
             
             print("├────────────────────────────────────────────────────────────────────────────────────────────────┤")
             
@@ -416,22 +449,45 @@ class BatchDisplay:
                 for domain, data in list(self.domains.items())[:2]:
                     stats = data.get('stats', {})
                     phase = data.get('phase', 'init')
+                    phase_detail = data.get('phase_detail', '')
                     
                     print(f"│ {domain}:")
                     
                     if phase == 'recon':
-                        print(f"│   📋 Recon: {stats.get('subs', 0)} subs | {stats.get('live', 0)} live")
+                        subs = stats.get('subs', 0)
+                        live = stats.get('live', 0)
+                        total = stats.get('total_hosts', 0)
+                        bar = self._get_progress_bar(live, total, 8) if total > 0 else "-------"
+                        live_pct = int(live * 100 / total) if total > 0 else 0
+                        print(f"│   📋 Recon: {subs:>5} subs | {live_pct:3d}% [{bar}] {live:>4}/{total:<4} live")
                     elif phase == 'live':
-                        print(f"│   🌐 Live: {stats.get('live', 0)}/{stats.get('total_hosts', 0)} hosts")
+                        live = stats.get('live', 0)
+                        total = stats.get('total_hosts', 0)
+                        live_pct = int(live * 100 / total) if total > 0 else 0
+                        bar = self._get_progress_bar(live, total, 8) if total > 0 else "-------"
+                        print(f"│   🌐 Live: {live_pct:3d}% [{bar}] {live:>4}/{total:<4} hosts responding")
                     elif phase == 'crawl':
-                        print(f"│   📁 Crawl: {stats.get('eps', 0)} endpoints")
+                        eps = stats.get('eps', 0)
+                        print(f"│   📁 Crawl: {eps:>5} endpoints discovered | Active tools")
                     elif phase == 'toolkit':
                         toolkit_m = data.get('toolkit_metrics', {})
-                        print(f"│   🛠️  Tools: Tech={toolkit_m.get('tech', 0)} Ports={toolkit_m.get('ports', 0)} Dirs={toolkit_m.get('dirs', 0)}")
+                        t, p, d, a = toolkit_m.get('tech', 0), toolkit_m.get('ports', 0), toolkit_m.get('dirs', 0), toolkit_m.get('api', 0)
+                        print(f"│   🛠️  Tools: 📱Tech={t:>3} 🔓Ports={p:>3} 📂Dirs={d:>3} 🌐API={a:>3}")
                     elif phase == 'scan':
-                        print(f"│   ⚡ Scan: {stats.get('vulns', 0)} vulns | {stats.get('eps', 0)} eps")
+                        vulns = stats.get('vulns', 0)
+                        eps = stats.get('eps', 0)
+                        tested = stats.get('payloads_tested', 0)
+                        total_p = stats.get('total_payloads', 0)
+                        scan_pct = int(tested * 100 / total_p) if total_p > 0 else 0
+                        print(f"│   ⚡ Scan: {vulns:>3} 🔴vulns found | {eps:>5} endpoints | Payloads: {scan_pct:3d}%")
                     elif phase == 'exploit':
-                        print(f"│   💥 Exploit: {stats.get('exploited', 0)} exploited")
+                        exploited = stats.get('exploited', 0)
+                        chains = data.get('chains', [])
+                        chains_count = len(chains)
+                        exploit_pct = int(exploited * 100 / chains_count) if chains_count > 0 else 0
+                        print(f"│   💥 Exploit: {exploit_pct:3d}% [{self._get_progress_bar(exploited, chains_count, 8)}] {exploited:>2}/{chains_count:<2} chains")
+                    else:
+                        print(f"│   ⚙️  {phase}: {phase_detail or 'processing...'}")
                 
                 print("├────────────────────────────────────────────────────────────────────────────────────────────────┤")
                 
@@ -842,13 +898,33 @@ class BatchDisplay:
                 
                 print("│  └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘")
             
-            # Live feed - compact
+            # Live feed - enhanced with event categorization
             if self.live_feed:
-                print("│ ─ EVENTS ────────────────────────────────────────────────────────────────────────────────────────────────")
-                for timestamp, icon, event, domain, detail in list(self.live_feed)[:4]:
-                    domain_short = domain[:15] if len(domain) <= 15 else domain[:12] + ".."
-                    detail_short = detail[:40] if len(detail) > 40 else detail
-                    print(f"│ {timestamp} {icon} {event:<10} | {domain_short:<15} | {detail_short:<40} │")
+                print("│ ─ 🔔 LIVE EVENTS ─────────────────────────────────────────────────────────────────────────────────────────────────────")
+                for idx, (timestamp, icon, event, domain, detail) in enumerate(list(self.live_feed)[:5]):
+                    if idx >= 5:
+                        break
+                    domain_short = domain[:13] if len(domain) <= 13 else domain[:10] + ".."
+                    detail_short = detail[:38] if len(detail) > 38 else detail
+                    
+                    # Color-code based on event type
+                    event_display = {
+                        'Subdomain': '➕ Subdomain',
+                        'Live': '🌐 Live',
+                        'WordPress': '🎯 WordPress',
+                        'Users': '👤 Users',
+                        'Endpoint': '📁 Endpoint',
+                        'Toolkit': '🛠️  Toolkit',
+                        'Completed': '✅ Done',
+                        'Failed': '❌ Failed',
+                        'SQLi Found': '💧 SQLi',
+                        'Chains': '🔗 Chain',
+                        'Exploited': '💥 Pwned',
+                    }.get(event, f"{icon} {event}")
+                    
+                    print(f"│ {timestamp} {event_display:<18} | {domain_short:<13} | {detail_short:<38} │")
+                if len(self.live_feed) > 5:
+                    print(f"│ ... and {len(self.live_feed) - 5} more events" + " " * 67 + "│")
             
             print("└────────────────────────────────────────────────────────────────────────────────────────────────┘")
             
@@ -942,16 +1018,32 @@ class DomainDisplay:
         print(f"│  API: {api_line:<78} │")
         
         domain_display = self.target[:50] if len(self.target) <= 50 else self.target[:47] + "..."
-        print(f"│  {domain_display} [{phase_icon} {d['phase']}] iter {d['iter']}/{d['max_iter']}  elapsed: {time_str}        │")
+        
+        # Calculate basic metrics
+        progress_iter = int(d['iter'] / d['max_iter'] * 100) if d['max_iter'] > 0 else 0
+        iter_bar = "█" * (progress_iter // 10) + "░" * (10 - progress_iter // 10)
+        
+        print(f"│  {domain_display} [{phase_icon} {d['phase']:>8}] [{iter_bar}] {progress_iter:3d}%        │")
         tool = (d.get('phase_tool') or 'n/a')[:24]
         status = (d.get('phase_status') or 'idle')[:16]
-        print(f"│  Tool: {tool:<24} | Status: {status:<16}                                   │")
+        print(f"│  Tool: {tool:<24} | Status: {status:<16} | ⏱️ {time_str}              │")
         print("├────────────────────────────────────────────────────────────────────────────────┤")
         
-        # Stats
-        print("│  🔍 DISCOVERY                                                                   │")
-        print(f"│  ├─ Subdomains: {stats.get('subs', 0):<4} | Live hosts: {stats.get('live', 0):<4}                              │")
-        print(f"│  ├─ Endpoints: {stats.get('eps', 0):<5} | WordPress: {'✓' if stats.get('wp') else '✗'}                                     │")
+        # Stats - enhanced with icons and better formatting
+        print("│  🔍 DISCOVERY PHASE                                                             │")
+        subs = stats.get('subs', 0)
+        live = stats.get('live', 0)
+        total_hosts = stats.get('total_hosts', 0)
+        
+        if total_hosts > 0:
+            live_pct = int(live * 100 / total_hosts)
+            bar = "█" * (live_pct // 10) + "░" * (10 - live_pct // 10)
+            print(f"│  ├─ Subdomains: {subs:>5} | Live: {live_pct:3d}% [{bar}] {live:>4}/{total_hosts:<4}  │")
+        else:
+            print(f"│  ├─ Subdomains  : {subs:>5} | Live hosts: {live:>5}                      │")
+        
+        eps = stats.get('eps', 0)
+        print(f"│  ├─ Endpoints   : {eps:>5} | WordPress : {'✓ Yes' if stats.get('wp') else '✗ No'}                      │")
         
         # Tech
         tech_list = list(d['tech'].keys())
@@ -970,38 +1062,60 @@ class DomainDisplay:
             toolkit_m = scan_meta.get('toolkit_metrics', {}) or {}
         if toolkit_m and any([toolkit_m.get(k, 0) >= 0 for k in ['tech', 'ports', 'dirs', 'api', 'vulns']]):
             print("│                                                                              │")
-            print("│  🛠️ TOOLKIT SCAN RESULTS                                                    │")
-            print(f"│  ├─ Technologies: {toolkit_m.get('tech', 0):<3}  | Ports     : {toolkit_m.get('ports', 0):<3}                    │")
-            print(f"│  ├─ Directories : {toolkit_m.get('dirs', 0):<3}  | APIs      : {toolkit_m.get('api', 0):<3}                    │")
-            print(f"│  └─ CVEs Found  : {toolkit_m.get('vulns', 0):<3}                                        │")
+            print("│  🛠️  TOOLKIT SCAN RESULTS                                                    │")
+            tech = toolkit_m.get('tech', 0)
+            ports = toolkit_m.get('ports', 0)
+            dirs = toolkit_m.get('dirs', 0)
+            apis = toolkit_m.get('api', 0)
+            cves = toolkit_m.get('vulns', 0)
+            
+            total_findings = tech + ports + dirs + apis
+            print(f"│  ├─ 📱 Tech      : {tech:>4}  | 🔓 Ports: {ports:>4} | 📂 Dirs  : {dirs:>4}")
+            print(f"│  ├─ 🌐 APIs      : {apis:>4}  | 🔴 CVEs : {cves:>4} | 📊 Total : {total_findings:>4}  │")
+            
+            if total_findings > 0:
+                findings_bar = "█" * min(30, total_findings) + "░" * max(0, 30 - min(30, total_findings))
+                print(f"│  └─ [{findings_bar}] {total_findings} findings                │")
         
-        # Endpoints
+        # Endpoints - enhanced display
         eps = d['endpoints']
         if eps['total'] > 0:
             print("│                                                                              │")
-            print("│  📁 ENDPOINTS                                                               │")
-            print(f"│  ├─ Total : {eps['total']:<5}                                               │")
-            print(f"│  ├─ API   : {eps['api']:<5}                                                 │")
-            print(f"│  ├─ Admin : {eps['admin']:<5}                                               │")
-            print(f"│  └─ Upload: {eps['upload']:<5}                                              │")
+            print("│  📁 ENDPOINTS")
+            ep_bar = "█" * min(15, eps['total'] // 5) + "░" * max(0, 15 - eps['total'] // 5)
+            print(f"│  ├─ Total: {eps['total']:>4} [{ep_bar}] | API: {eps['api']:>3} Δž| Admin: {eps['admin']:>2} ⚙️│")
+            print(f"│  └─ Upload: {eps['upload']:<4}                                              │")
         
-        # Vulns
+        # Vulns - enhanced with better formatting
         vuln_types = dict(d['vuln_types'])
         if vuln_types:
             print("│                                                                              │")
-            print("│  🐞 VULNERABILITIES                                                          │")
+            print("│  🐞 VULNERABILITIES")
             total_vulns = sum(vuln_types.values())
-            print(f"│  ├─ Total: {total_vulns}                                                     │")
-            for vtype, count in list(vuln_types.items())[:3]:
-                print(f"│  ├─ {vtype}: {count}                                                       │")
+            vuln_bar = "█" * min(20, total_vulns // 2) + "░" * max(0, 20 - total_vulns // 2)
+            print(f"│  ├─ Total: {total_vulns:>3} [{vuln_bar}]                   │")
+            
+            vuln_icons = {
+                'SQLi': '💧', 'XSS': '✖️', 'IDOR': '🔑', 'RCE': '⚡', 
+                'Auth': '🔐', 'SSRF': '🔀', 'LFI': '📁', 'Default': '🔓'
+            }
+            for i, (vtype, count) in enumerate(list(vuln_types.items())[:4]):
+                icon = vuln_icons.get(vtype, '🔴')
+                print(f"│  ├─ {icon} {vtype:<10}: {count:>4}", end="")
+                if i < 3:
+                    print(" | ", end="")
+                else:
+                    print(" " * 17 + "│")
         
-        # Chains
+        # Chains - enhanced with more details
         chains = d['chains']
         if chains:
             print("│                                                                              │")
-            print("│  🕸️ ATTACK CHAINS                                                            │")
+            print("│  🕸️ ATTACK CHAINS")
             exploited_count = sum(1 for c in chains if c.get('exploited'))
-            print(f"│  ├─ Total: {len(chains)} | Exploited: {exploited_count}                                     │")
+            chain_pct = int(exploited_count * 100 / len(chains)) if len(chains) > 0 else 0
+            chain_bar = "█" * (chain_pct // 5) + "░" * (20 - chain_pct // 5)
+            print(f"│  ├─ Total: {len(chains):>3} | Exploited: {exploited_count:>2} ({chain_pct:>3}%) [{chain_bar}]│")
         
         # Learning
         learning = d['learning']
@@ -1174,6 +1288,12 @@ class ReconAgent:
         self.api_vuln_scanner = APIVulnScanner(output_dir, timeout=30)
         self.subdomain_takeover = SubdomainTakeoverScanner(output_dir, timeout=30)
         
+        # Initialize cryptographic security scanner (OWASP A04)
+        self.crypto_scanner = CryptographicScanner(self.http_client, output_dir)
+        
+        # Initialize SQLMap runner for SQL injection (OWASP A05)
+        self.sqlmap_runner = SQLMapRunner(output_dir)
+        
         # NEW: Initialize post-exploitation modules
         self.mfa_bypass = MFABypass(self.http_client)
         self.oauth_saml_exploit = OAuthSAMLExploit()
@@ -1216,9 +1336,25 @@ class ReconAgent:
         self.toolkit_metrics = {'tech': 0, 'ports': 0, 'dirs': 0, 'api': 0, 'vulns': 0}
         scan_meta = self.state.get("scan_metadata", {}) or {}
         self.completed_phases = set(scan_meta.get("completed_phases", []) or [])
+        
+        # Initialize attack surface tracker for evidence-driven exploitation
+        self.attack_surface = AttackSurfaceTracker()
+        
+        # Initialize exploit selector for evidence-based module gating
+        self.exploit_selector = AutomaticExploitSelector()
+        
+        # Initialize crypto findings storage
+        self.crypto_findings = []
+        self.misconfig_findings = []
+        self.command_injection_findings = []
+        
         if self.resumed_from_state:
             previous_phase = self.state.get("current_phase", "unknown")
             self.last_action = f"resumed from state ({previous_phase})"
+            # Restore attack surface from state if available
+            as_data = self.state.get("attack_surface", {})
+            if as_data:
+                self.attack_surface.from_dict(as_data)
             self._update_stats()
         self._update_display()
 
@@ -1880,6 +2016,11 @@ class ReconAgent:
             self.last_action = f"recon: +{after-before} subdomains"
             if self.batch_display:
                 self.batch_display._add_to_feed("➕", "Subdomain", self.target, f"Found {after-before} new")
+        # Update attack surface with recon findings
+        self.attack_surface.add_clue("tech", f"subdomains:{after}", "recon_engine", 0.9, f"Found {after} subdomains")
+        self.attack_surface.add_clue("recon_complete", json.dumps({"subdomains": after}), "recon_engine", 1.0)
+        self.state.update(attack_surface=self.attack_surface.to_dict())
+        
         self._update_stats()
         self._mark_phase_done("recon")
 
@@ -2768,6 +2909,11 @@ class ReconAgent:
         self.state.update(rce_chain_possibilities=[])
         self.state.update(rce_chain_possibilities=rce_possibilities)
         self.logger.info(f"[ANALYSIS] Identified {len(rce_possibilities)} RCE attack surface(s)")
+
+        # ─── SECURITY MISCONFIGURATION CHECKS (Crypto/SSL/TLS/Sensitive Data) ────────
+        self.phase_detail = "[ANALYSIS] Running security misconfiguration checks..."
+        self._update_display()
+        self._run_security_misconfig_checks()
 
         if vulnerabilities:
             self.last_action = f"analysis: {len(vulnerabilities)} CVEs + {len(findings)} findings"
@@ -4374,6 +4520,16 @@ class ReconAgent:
     
     def _run_mfa_bypass_phase(self):
         """Phase 24: MFA/2FA Bypass & Circumvention"""
+        # Evidence-based gating check
+        as_data = self.attack_surface.to_dict()
+        should_run, reason = should_execute_module("mfa_bypass", as_data)
+        if not should_run:
+            self.logger.info(f"[GATING] Skipping mfa_bypass: {reason}")
+            self.phase_detail = f"[GATING] Skipped mfa_bypass ({reason})"
+            self._update_display()
+            self._mark_phase_done("mfa_bypass")
+            return
+        
         self.phase_detail = "[MFA] Analyzing MFA/2FA protection mechanisms..."
         self._update_display()
         
@@ -4422,6 +4578,16 @@ class ReconAgent:
     
     def _run_oauth_saml_phase(self):
         """Phase 25: OAuth/SAML Exploitation"""
+        # Evidence-based gating check
+        as_data = self.attack_surface.to_dict()
+        should_run, reason = should_execute_module("oauth_saml_exploit", as_data)
+        if not should_run:
+            self.logger.info(f"[GATING] Skipping oauth_saml_exploit: {reason}")
+            self.phase_detail = f"[GATING] Skipped oauth_saml_exploit ({reason})"
+            self._update_display()
+            self._mark_phase_done("oauth_saml")
+            return
+        
         self.phase_detail = "[OAUTH] Probing OAuth/SAML authentication flows..."
         self._update_display()
         
@@ -4566,6 +4732,16 @@ class ReconAgent:
     
     def _run_ssl_pinning_phase(self):
         """Phase 28: SSL/TLS Certificate Pinning Bypass"""
+        # Evidence-based gating check
+        as_data = self.attack_surface.to_dict()
+        should_run, reason = should_execute_module("ssl_pinning_bypass", as_data)
+        if not should_run:
+            self.logger.info(f"[GATING] Skipping ssl_pinning_bypass: {reason}")
+            self.phase_detail = f"[GATING] Skipped ssl_pinning_bypass ({reason})"
+            self._update_display()
+            self._mark_phase_done("ssl_pinning")
+            return
+        
         self.phase_detail = "[SSL] Analyzing SSL/TLS pinning mechanisms..."
         self._update_display()
         
@@ -4614,6 +4790,16 @@ class ReconAgent:
     
     def _run_zero_day_phase(self):
         """Phase 29: Zero-Day Vulnerability Detection"""
+        # Evidence-based gating check
+        as_data = self.attack_surface.to_dict()
+        should_run, reason = should_execute_module("zero_day_detection", as_data)
+        if not should_run:
+            self.logger.info(f"[GATING] Skipping zero_day_detection: {reason}")
+            self.phase_detail = f"[GATING] Skipped zero_day_detection ({reason})"
+            self._update_display()
+            self._mark_phase_done("zero_day")
+            return
+        
         self.phase_detail = "[ZERO] Searching for zero-day vulnerabilities..."
         self._update_display()
         
@@ -4653,6 +4839,16 @@ class ReconAgent:
     
     def _run_container_escape_phase(self):
         """Phase 30: Container/Cloud Environment Escape"""
+        # Evidence-based gating check
+        as_data = self.attack_surface.to_dict()
+        should_run, reason = should_execute_module("container_escape", as_data)
+        if not should_run:
+            self.logger.info(f"[GATING] Skipping container_escape: {reason}")
+            self.phase_detail = f"[GATING] Skipped container_escape ({reason})"
+            self._update_display()
+            self._mark_phase_done("container_escape")
+            return
+        
         self.phase_detail = "[CONTAINER] Probing for container/cloud escape vectors..."
         self._update_display()
         
@@ -4879,6 +5075,88 @@ class ReconAgent:
         
         self.phase_status = "done"
         self._mark_phase_done("ddos")
+
+    def _run_security_misconfig_checks(self):
+        """
+        Run comprehensive security misconfiguration checks using crypto_scanner and sqlmap_runner.
+        Checks: SSL/TLS issues, sensitive data exposure, command injection, SQL injection confirmation.
+        """
+        try:
+            live_hosts = self.state.get("live_hosts", []) or []
+            endpoints = self.state.get("endpoints", []) or []
+            
+            # Get URLs to scan
+            urls_to_scan = []
+            for host in live_hosts[:10]:
+                url = host.get('url', '')
+                if url:
+                    urls_to_scan.append(url)
+            
+            # Also add prioritized endpoints
+            prioritized = self.state.get("prioritized_endpoints", []) or []
+            for ep in prioritized[:10]:
+                url = ep.get('url', '') if isinstance(ep, dict) else str(ep)
+                if url and url not in urls_to_scan:
+                    urls_to_scan.append(url)
+            
+            crypto_findings = []
+            sqlmap_findings = []
+            
+            for url in urls_to_scan[:5]:
+                # ─── Crypto/SSL/TLS Checks ──────────────────────────────
+                try:
+                    self.phase_detail = f"[CRYPTO] Checking {url.split('://')[-1][:30]}..."
+                    self._update_display()
+                    
+                    crypto_result = self.crypto_scanner.scan(url)
+                    if crypto_result:
+                        findings = crypto_result.get('findings', [])
+                        crypto_findings.extend(findings)
+                        
+                        # Store in state
+                        if findings:
+                            self.logger.info(f"[CRYPTO] Found {len(findings)} issues on {url}")
+                            for f in findings[:3]:
+                                self.logger.debug(f"  ├─ {f.get('title', 'N/A')}: {f.get('severity', 'N/A')}")
+                except Exception as e:
+                    self.logger.debug(f"[CRYPTO] Error scanning {url}: {e}")
+                
+                # ─── SQLMap Confirmation (if sqlmap available) ──────────
+                try:
+                    if self.sqlmap_runner.is_sqlmap_available():
+                        self.phase_detail = f"[SQLMAP] Quick test on {url.split('://')[-1][:30]}..."
+                        self._update_display()
+                        
+                        sqli_result = self.sqlmap_runner.test_sqli_quick(url)
+                        if sqli_result and sqli_result.get('vulnerable'):
+                            sqlmap_findings.append({
+                                'url': url,
+                                'vulnerable': True,
+                                'details': sqli_result.get('details', ''),
+                                'source': 'sqlmap'
+                            })
+                            self.logger.warning(f"[SQLMAP] ✅ SQLi confirmed on {url}")
+                            
+                            if self.batch_display:
+                                self.batch_display._add_to_feed("💧", "SQLi Confirmed", url, "sqlmap verified")
+                except Exception as e:
+                    self.logger.debug(f"[SQLMAP] Error on {url}: {e}")
+            
+            # Store findings in state
+            if crypto_findings:
+                self.state.update(crypto_findings=crypto_findings)
+                self.stats['vulns'] += len(crypto_findings)
+                self.logger.info(f"[CRYPTO] Total findings: {len(crypto_findings)}")
+            
+            if sqlmap_findings:
+                self.state.update(sqlmap_findings=sqlmap_findings)
+                self.logger.info(f"[SQLMAP] Confirmed SQLi: {len(sqlmap_findings)} targets")
+            
+            self.last_action = f"misconfig: {len(crypto_findings)} crypto + {len(sqlmap_findings)} SQLi"
+            
+        except Exception as e:
+            self.logger.debug(f"[MISCONFIG] Error in security checks: {e}")
+            self.last_action = f"misconfig error: {str(e)[:40]}"
 
     def _run_learning_phase(self):
         self.phase_detail = "[LEARN] Analyzing results and updating patterns..."
@@ -5815,33 +6093,192 @@ Exploitability estimation:
         self._print_scan_summary()
 
     def _print_scan_summary(self):
-        """Print scan summary to terminal"""
-        vulns = self.state.get("vulnerabilities", [])
-        valid_vulns = [v for v in vulns if v.get('confidence', 0) >= 0.5]
-        exploit_results = self.state.get("exploit_results", [])
+        """Print modern structured scan summary to terminal"""
+        self._print_modern_summary()
+
+    def _print_modern_summary(self):
+        """Print modern structured terminal display showing all phases and findings"""
+        summary = self.state.summary()
+        vulns = self.state.get("confirmed_vulnerabilities", []) or []
+        findings = self.state.get("security_findings", []) or []
+        technologies = self.state.get("technologies", {}) or {}
+        exploit_results = self.state.get("exploit_results", []) or []
+        chains = self.state.get("exploit_chains", []) or []
+        wp_plugins = self.state.get("wp_plugins", []) or []
+        wp_version = self.state.get("wp_version", "")
+        
+        # Get PHP version from findings or detect from state
+        php_version = self.findings.get('php_version', '')
+        if not php_version:
+            # Try to get from technologies
+            for tech_name, tech_data in technologies.items():
+                if 'php' in tech_name.lower():
+                    if isinstance(tech_data, dict):
+                        php_version = tech_data.get('version', '')
+                    else:
+                        php_version = str(tech_data)
+                    break
+        
+        # Count vulnerability types
+        vuln_types = {}
+        for v in vulns:
+            vtype = v.get('type', 'unknown')
+            vuln_types[vtype] = vuln_types.get(vtype, 0) + 1
+        
         successful_exploits = [e for e in exploit_results if e.get('success')]
         
-        print("\n" + "="*70)
-        print("[SCAN SUMMARY]")
-        print("="*70)
-        print(f"  Target:              {self.target}")
-        print(f"  Total Endpoints:     {len(self.state.get('endpoints', []))}")
-        print(f"  Vulnerabilities:")
-        print(f"    - Total Found:     {len(vulns)}")
-        print(f"    - Validated (≥0.5): {len(valid_vulns)}")
-        print(f"  Exploit Results:")
-        print(f"    - Successful:      {len(successful_exploits)}")
-        print(f"    - Failed:          {len(exploit_results) - len(successful_exploits)}")
+        # ─── HEADER ───────────────────────────────────────────────────────────
+        print()
+        print("═" * 64)
+        print("  ⚡ AI RECON AGENT — FINAL REPORT")
+        print("═" * 64)
+        print(f"  Target:     {self.target}")
+        print(f"  Iteration:  {self.iteration_count}/{self.max_iterations}")
+        print(f"  Duration:   {int(time.time() - self.scan_start_time)}s")
+        print("═" * 64)
+        print()
         
-        if valid_vulns:
-            print(f"\n  Top Findings (by confidence):")
-            for v in sorted(valid_vulns, key=lambda x: x.get('confidence', 0), reverse=True)[:5]:
-                conf = v.get('confidence', 0)
-                vuln_type = v.get('type', 'unknown')
-                url = v.get('url', 'unknown')[:50]
-                print(f"    - [{conf:.2f}] {vuln_type:20s} {url}")
+        # ─── [RECON] ──────────────────────────────────────────────────────────
+        print("[RECON]")
+        subs = summary.get('subdomains', 0)
+        live = summary.get('live_hosts', 0)
+        print(f"  Running: subfinder")
+        print(f"  Found: {subs} subdomains")
+        print()
+        print(f"  Running: httpx")
+        print(f"  Live hosts: {live}")
+        print()
+        print("─" * 64)
+        print()
         
-        print("="*70 + "\n")
+        # ─── [DISCOVERY] ──────────────────────────────────────────────────────
+        print("[DISCOVERY]")
+        eps = summary.get('endpoints', 0)
+        print(f"  Running: crawler")
+        print(f"  Endpoints discovered: {eps}")
+        
+        # JS endpoints
+        js_endpoints = self.state.get("js_endpoints", []) or []
+        print()
+        print(f"  Running: js_endpoint_hunter")
+        print(f"  JS endpoints: {len(js_endpoints)}")
+        
+        # Parameters
+        params = self.state.get("discovered_parameters", []) or []
+        print()
+        print(f"  Running: parameter_miner")
+        print(f"  Parameters discovered: {len(params)}")
+        print()
+        print("─" * 64)
+        print()
+        
+        # ─── [TECHNOLOGIES] ───────────────────────────────────────────────────
+        print("[TECHNOLOGIES]")
+        
+        # Server info
+        waf = self.findings.get('waf', '')
+        if waf:
+            print(f"  WAF: {waf}")
+        
+        # WordPress
+        if summary.get('wordpress'):
+            wp_ver = f" WordPress {wp_version}" if wp_version else " WordPress"
+            print(f"  CMS:{wp_ver}")
+            if wp_plugins:
+                for p in wp_plugins[:3]:
+                    pname = p.get('name', '') if isinstance(p, dict) else str(p)
+                    pver = p.get('version', '') if isinstance(p, dict) else ''
+                    ver_str = f":{pver}" if pver else ""
+                    print(f"    Plugin: {pname}{ver_str}")
+        
+        # PHP version
+        if php_version:
+            print(f"  Language: PHP {php_version}")
+        
+        # Other technologies
+        tech_list = list(technologies.keys()) if isinstance(technologies, dict) else []
+        for tech in tech_list[:5]:
+            tech_data = technologies.get(tech, {}) if isinstance(technologies, dict) else {}
+            if isinstance(tech_data, dict):
+                ver = tech_data.get('version', '')
+                if ver and ver not in ('unknown', 'none', ''):
+                    print(f"  {tech}: {ver}")
+                elif 'php' not in tech.lower() and 'wordpress' not in tech.lower():
+                    print(f"  {tech}")
+            elif 'php' not in tech.lower() and 'wordpress' not in tech.lower():
+                print(f"  {tech}")
+        
+        print()
+        print("─" * 64)
+        print()
+        
+        # ─── [VULNERABILITIES] ────────────────────────────────────────────────
+        print("[VULNERABILITIES]")
+        
+        sqli_count = vuln_types.get('sql_injection', 0) + vuln_types.get('sqli', 0)
+        xss_count = vuln_types.get('xss', 0)
+        upload_count = vuln_types.get('file_upload', 0) + vuln_types.get('upload', 0)
+        idor_count = vuln_types.get('idor', 0)
+        rce_count = vuln_types.get('rce', 0)
+        
+        if sqli_count > 0:
+            print(f"  SQL Injection candidates: {sqli_count}")
+        if xss_count > 0:
+            print(f"  XSS candidates: {xss_count}")
+        if upload_count > 0:
+            print(f"  Upload points: {upload_count}")
+        if idor_count > 0:
+            print(f"  IDOR vulnerabilities: {idor_count}")
+        if rce_count > 0:
+            print(f"  RCE vectors: {rce_count}")
+        
+        # Show other vuln types
+        for vtype, count in vuln_types.items():
+            if vtype not in ('sql_injection', 'sqli', 'xss', 'file_upload', 'upload', 'idor', 'rce'):
+                print(f"  {vtype}: {count}")
+        
+        if not vuln_types:
+            print("  No vulnerabilities detected")
+        
+        print()
+        print("─" * 64)
+        print()
+        
+        # ─── [EXPLOITATION] ───────────────────────────────────────────────────
+        print("[EXPLOITATION]")
+        
+        if chains:
+            print(f"  Attack chains identified: {len(chains)}")
+            for chain in chains[:3]:
+                chain_name = chain.get('name', '') if isinstance(chain, dict) else getattr(chain, 'name', '')
+                risk = chain.get('risk', chain.get('risk_level', 'MEDIUM')) if isinstance(chain, dict) else getattr(chain, 'risk_level', 'MEDIUM')
+                print(f"    • [{risk}] {chain_name[:55]}")
+        
+        if successful_exploits:
+            print()
+            print(f"  Successfully exploited: {len(successful_exploits)} chain(s)")
+        
+        # Module gating display - show skipped modules
+        print()
+        gated_modules = self.state.get("gated_modules", []) or []
+        if gated_modules:
+            print("  Skipped modules (evidence-based gating):")
+            for mod in gated_modules:
+                mod_name = mod.get('module', '') if isinstance(mod, dict) else str(mod)
+                reason = mod.get('reason', 'no indicators') if isinstance(mod, dict) else ''
+                print(f"    Skipped: {mod_name} ({reason})")
+        print()
+        print("─" * 64)
+        print()
+        
+        # ─── FINAL STATS ──────────────────────────────────────────────────────
+        print(f"[SUMMARY]")
+        print(f"  Total endpoints:  {eps}")
+        print(f"  Total vulns:      {len(vulns)}")
+        print(f"  Exploited chains: {len(successful_exploits)}")
+        print(f"  Technologies:     {len(tech_list)}")
+        print("═" * 64)
+        print()
 
     # ─── NEW: Enhanced Methods for 10 Critical Improvements ─────────────────────────────
 
@@ -6168,11 +6605,26 @@ def run_batch(targets_file: str, options: dict, args):
     batch_logger = logging.getLogger("batch")
     batch_logger.setLevel(logging.INFO)
     
-    # File handler
-    file_handler = logging.FileHandler(batch_log)
-    file_handler.setLevel(logging.INFO)
-    file_formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
-    file_handler.setFormatter(file_formatter)
+    # File handler - with fallback support
+    file_handler = None
+    try:
+        file_handler = logging.FileHandler(batch_log)
+        file_handler.setLevel(logging.INFO)
+        file_formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
+        file_handler.setFormatter(file_formatter)
+    except (PermissionError, IOError) as e:
+        # Fallback: try to write to user's home directory
+        print(f"⚠️  Cannot write to {batch_log}: {e}")
+        try:
+            fallback_log = os.path.expanduser("~/.agent_batch.log")
+            file_handler = logging.FileHandler(fallback_log)
+            file_handler.setLevel(logging.INFO)
+            file_formatter = logging.Formatter("[%(asctime)s] %(message)s", datefmt="%H:%M:%S")
+            file_handler.setFormatter(file_formatter)
+            print(f"✓ Using fallback log: {fallback_log}")
+        except Exception as e2:
+            print(f"⚠️  Cannot write fallback log either: {e2}")
+            file_handler = None
     
     # Stream handler - for real-time terminal output
     stream_handler = logging.StreamHandler(sys.stdout)
@@ -6182,7 +6634,8 @@ def run_batch(targets_file: str, options: dict, args):
     
     # Remove existing handlers and add new ones
     batch_logger.handlers.clear()
-    batch_logger.addHandler(file_handler)
+    if file_handler:
+        batch_logger.addHandler(file_handler)
     batch_logger.addHandler(stream_handler)
     
     # Initialize display
