@@ -6,7 +6,7 @@ Model vulnerabilities as nodes and exploit relationships as edges
 import networkx as nx
 import json
 import logging
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from dataclasses import dataclass
 
 logger = logging.getLogger("recon.attack_graph")
@@ -48,12 +48,20 @@ class AttackGraph:
     """
     NetworkX-based attack graph modeling exploit relationships.
     Nodes = vulnerabilities, Edges = exploit relationships
+    
+    Includes state tracking to avoid re-adding similar endpoints.
     """
 
     def __init__(self):
         self.graph = nx.DiGraph()
         self.vulnerabilities = {}
         self.exploit_chains = []
+        
+        # ─── STATE TRACKING FOR DEDUPLICATION ─────────────────────────────────────
+        # Track already-added endpoint types to avoid redundancy
+        self._added_endpoint_types = set()  # Set of (host, path_base, vuln_type) tuples
+        self._endpoint_type_counts = {}     # endpoint_type -> count of added nodes
+        self._similarity_threshold = 0.8    # Threshold for considering endpoints similar
 
     def add_vulnerability(self, vuln_data: Dict[str, Any]) -> str:
         """Add a vulnerability node to the graph"""
@@ -238,3 +246,125 @@ class AttackGraph:
 
         self.exploit_chains = data.get('chains', [])
         logger.info(f"[GRAPH] Loaded attack graph from {filepath}")
+
+    # ─── DEDUPLICATION METHODS ──────────────────────────────────────────────────────
+
+    def _normalize_endpoint(self, endpoint: str) -> str:
+        """
+        Normalize endpoint URL for deduplication.
+        Extracts host + base path (without query params or trailing slashes).
+        """
+        from urllib.parse import urlparse
+        parsed = urlparse(endpoint.lower() if '://' in endpoint else f"https://{endpoint}")
+        path = parsed.path.rstrip('/').split('?')[0]
+        return f"{parsed.netloc}{path}"
+
+    def _get_endpoint_signature(self, vuln_data: Dict[str, Any]) -> tuple:
+        """
+        Create a signature for an endpoint to detect duplicates.
+        Returns tuple of (host, base_path, vuln_type).
+        """
+        endpoint = vuln_data.get('endpoint', '')
+        vuln_type = vuln_data.get('type', 'unknown')
+        normalized = self._normalize_endpoint(endpoint)
+        
+        # Extract host and base path
+        parts = normalized.split('/', 1)
+        host = parts[0]
+        base_path = '/' + parts[1] if len(parts) > 1 else '/'
+        
+        # Normalize base path to first 2 levels
+        path_parts = base_path.strip('/').split('/')
+        if len(path_parts) > 2:
+            base_path = '/' + '/'.join(path_parts[:2])
+        
+        return (host, base_path, vuln_type.lower())
+
+    def should_add_vulnerability(self, vuln_data: Dict[str, Any]) -> bool:
+        """
+        Check if this vulnerability should be added to the graph.
+        Prevents adding duplicate or highly similar endpoints.
+        
+        Returns:
+            True if vulnerability should be added, False if duplicate
+        """
+        signature = self._get_endpoint_signature(vuln_data)
+        vuln_type = vuln_data.get('type', 'unknown').lower()
+        
+        # Check if exact signature already exists
+        if signature in self._added_endpoint_types:
+            logger.debug(f"[GRAPH] Skipping duplicate endpoint: {signature}")
+            return False
+        
+        # Check type count limits (max 5 of same type)
+        current_count = self._endpoint_type_counts.get(vuln_type, 0)
+        if current_count >= 5:
+            logger.debug(f"[GRAPH] Max count reached for {vuln_type}: {current_count}")
+            return False
+        
+        # Check similarity with existing endpoints
+        for existing_sig in self._added_endpoint_types:
+            if self._is_similar_endpoint(signature, existing_sig):
+                logger.debug(f"[GRAPH] Skipping similar endpoint: {signature} ~ {existing_sig}")
+                return False
+        
+        return True
+
+    def _is_similar_endpoint(self, sig1: tuple, sig2: tuple) -> bool:
+        """
+        Check if two endpoint signatures are similar enough to be considered duplicates.
+        """
+        host1, path1, type1 = sig1
+        host2, path2, type2 = sig2
+        
+        # Different hosts = not similar
+        if host1 != host2:
+            return False
+        
+        # Same type and same base path = similar
+        if type1 == type2 and path1 == path2:
+            return True
+        
+        # Same type and paths share first segment = similar
+        if type1 == type2:
+            seg1 = path1.strip('/').split('/')[0] if path1.strip('/') else ''
+            seg2 = path2.strip('/').split('/')[0] if path2.strip('/') else ''
+            if seg1 == seg2 and seg1:
+                return True
+        
+        return False
+
+    def add_vulnerability_with_dedup(self, vuln_data: Dict[str, Any]) -> Optional[str]:
+        """
+        Add vulnerability only if it's not a duplicate.
+        Returns vuln_id if added, None if skipped.
+        """
+        if not self.should_add_vulnerability(vuln_data):
+            return None
+        
+        vuln_id = self.add_vulnerability(vuln_data)
+        
+        # Track this endpoint type
+        signature = self._get_endpoint_signature(vuln_data)
+        self._added_endpoint_types.add(signature)
+        
+        vuln_type = vuln_data.get('type', 'unknown').lower()
+        self._endpoint_type_counts[vuln_type] = self._endpoint_type_counts.get(vuln_type, 0) + 1
+        
+        logger.debug(f"[GRAPH] Added vulnerability (type counts: {self._endpoint_type_counts})")
+        return vuln_id
+
+    def get_dedup_stats(self) -> Dict[str, Any]:
+        """Get statistics about deduplication."""
+        return {
+            'total_nodes': len(self.graph.nodes),
+            'endpoint_types_tracked': len(self._added_endpoint_types),
+            'type_counts': dict(self._endpoint_type_counts),
+            'chains_found': len(self.exploit_chains),
+        }
+
+    def reset_dedup_state(self):
+        """Reset deduplication state for new scan session."""
+        self._added_endpoint_types.clear()
+        self._endpoint_type_counts.clear()
+        logger.info("[GRAPH] Reset deduplication state")

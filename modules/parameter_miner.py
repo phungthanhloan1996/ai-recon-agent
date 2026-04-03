@@ -168,11 +168,11 @@ class ParameterMiner:
         """Get baseline response without parameters."""
         try:
             if method == 'GET':
-                response = self.http_client.get(endpoint_url, timeout='fast')
+                response = self.http_client.get(endpoint_url, timeout=30)
             elif method == 'POST':
-                response = self.http_client.post(endpoint_url, data={}, timeout='fast')
+                response = self.http_client.post(endpoint_url, data={}, timeout=30)
             else:
-                response = self.http_client.get(endpoint_url, timeout='fast')
+                response = self.http_client.get(endpoint_url, timeout=30)
             
             return {
                 'status_code': response.status_code,
@@ -206,13 +206,13 @@ class ParameterMiner:
                 # Append to URL
                 separator = '&' if '?' in endpoint_url else '?'
                 test_url = f"{endpoint_url}{separator}{param}={test_value}"
-                response = self.http_client.get(test_url, timeout='fast')
+                response = self.http_client.get(test_url, timeout=30)
             else:
                 # POST with parameter
                 response = self.http_client.post(
                     endpoint_url,
                     data={param: test_value},
-                    timeout='fast'
+                    timeout=30
                 )
             
             # Analyze response

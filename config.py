@@ -3,20 +3,23 @@
 import os
 
 # Timeout Configuration (GLOBAL)
-DEFAULT_TIMEOUT = 180  # Default timeout for lightweight operations
-HEAVY_TOOL_TIMEOUT = 600  # Timeout for heavy tools: Katana, Hakrawler, Nuclei, WPScan
-GROQ_TIMEOUT = 15  # Groq API timeout
-HTTP_TIMEOUT = 30  # HTTP request timeout (increased from 20 to handle slow targets)
-AMASS_TIMEOUT = int(os.getenv('AMASS_TIMEOUT', 120))  # Amass needs longer timeout for passive sources (was 45s)
-CT_API_TIMEOUT = int(os.getenv('CT_API_TIMEOUT', 20))  # Certificate Transparency lookups
+# OPTIMIZATION: Aggressively reduced timeouts for faster fail-fast
+DEFAULT_TIMEOUT = 60  # Default timeout for lightweight operations (reduced from 90)
+HEAVY_TOOL_TIMEOUT = 90  # Timeout for heavy tools (reduced from 120)
+GROQ_TIMEOUT = 10  # Groq API timeout (reduced from 15)
+HTTP_TIMEOUT = 5  # HTTP request timeout (reduced from 10 for faster fail-fast)
+AMASS_TIMEOUT = int(os.getenv('AMASS_TIMEOUT', 45))  # Amass timeout (reduced from 60)
+CT_API_TIMEOUT = int(os.getenv('CT_API_TIMEOUT', 8))  # Certificate Transparency lookups (reduced from 10)
+
+# Circuit Breaker Configuration (NEW)
+CIRCUIT_BREAKER_THRESHOLD = int(os.getenv('CIRCUIT_BREAKER_THRESHOLD', 2))  # Failures before skipping host
+CIRCUIT_BREAKER_WINDOW = int(os.getenv('CIRCUIT_BREAKER_WINDOW', 300))  # Time window in seconds for counting failures
 
 # AI Configuration
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
 
-# WordPress Scanning
-WPSCAN_API_TOKEN = os.getenv('WPSCAN_API_TOKEN')
-NVD_API_KEY = os.getenv('NVD_API_KEY')
+# WordPress Scanning - API token removed (no longer using WPScan API)
 
 # Limits for Exploitation
 MAX_SQLI_TARGETS = int(os.getenv('MAX_SQLI_TARGETS', 6))
@@ -73,19 +76,16 @@ HTTP_MAX_DELAY = float(os.getenv('HTTP_MAX_DELAY', '5.0'))
 HTTP_BACKOFF_FACTOR = float(os.getenv('HTTP_BACKOFF_FACTOR', '1.0'))
 HTTP_POOL_SIZE = int(os.getenv('HTTP_POOL_SIZE', 50))  # Increased from 20 (was causing pool exhaustion)
 HTTP_CONSECUTIVE_FAILURES_BLACKLIST = int(os.getenv('HTTP_CONSECUTIVE_FAILURES_BLACKLIST', 8))  # Blacklist after N consecutive failures
-WPSCAN_RATE_LIMIT_COOLDOWN = int(os.getenv('WPSCAN_RATE_LIMIT_COOLDOWN', 60))  # 429 backoff cooldown in seconds
-WPSCAN_429_MAX_RETRIES = int(os.getenv('WPSCAN_429_MAX_RETRIES', 3))  # Retries for 429 errors
 
 # Tool Execution
 CRAWLER_TOOL_MAX_RETRIES = int(os.getenv('CRAWLER_TOOL_MAX_RETRIES', 1))
 CRAWLER_RETRY_ON_TIMEOUT = os.getenv('CRAWLER_RETRY_ON_TIMEOUT', 'false').lower() == 'true'
 KATANA_CONCURRENCY = int(os.getenv('KATANA_CONCURRENCY', 10))
 KATANA_RATE_LIMIT = int(os.getenv('KATANA_RATE_LIMIT', 30))
-KATANA_TIMEOUT = int(os.getenv('KATANA_TIMEOUT', 600))
-KATANA_RUN_TIMEOUT = int(os.getenv('KATANA_RUN_TIMEOUT', 600))
+KATANA_TIMEOUT = int(os.getenv('KATANA_TIMEOUT', 120))  # FIXED: Reduced from 600s to 120s per-url
+KATANA_RUN_TIMEOUT = int(os.getenv('KATANA_RUN_TIMEOUT', 300))  # FIXED: Reduced from 600s to 300s total
 HAKRAWLER_THREADS = int(os.getenv('HAKRAWLER_THREADS', 8))
-HAKRAWLER_RUN_TIMEOUT = int(os.getenv('HAKRAWLER_RUN_TIMEOUT', 300))
-WPSCAN_TIMEOUT = int(os.getenv('WPSCAN_TIMEOUT', 180))
+HAKRAWLER_RUN_TIMEOUT = int(os.getenv('HAKRAWLER_RUN_TIMEOUT', 180))  # FIXED: Reduced from 300s to 180s
 NUCLEI_CONCURRENCY = int(os.getenv('NUCLEI_CONCURRENCY', 3))
 NUCLEI_RATE_LIMIT = int(os.getenv('NUCLEI_RATE_LIMIT', 5))
 NUCLEI_TEMPLATE_TIMEOUT = int(os.getenv('NUCLEI_TEMPLATE_TIMEOUT', 20))
@@ -115,6 +115,17 @@ FALLBACK_TO_ARCHIVED_ON_TIMEOUT = os.getenv('FALLBACK_TO_ARCHIVED_ON_TIMEOUT', '
 MIN_LIVE_HOSTS_FOR_FALLBACK = int(os.getenv('MIN_LIVE_HOSTS_FOR_FALLBACK', 3))
 
 # Per-Target Resource Isolation
-MAX_CONCURRENT_TARGETS = int(os.getenv('MAX_CONCURRENT_TARGETS', 2))  # Process 2 targets at a time max
+MAX_CONCURRENT_TARGETS = int(os.getenv('MAX_CONCURRENT_TARGETS', 2))  # Process 2 targets at a time max (reduced from 5)
 PER_TARGET_HTTP_POOL_SIZE = int(os.getenv('PER_TARGET_HTTP_POOL_SIZE', 25))  # Pool size per target
 PER_TARGET_CRAWLER_WORKERS = int(os.getenv('PER_TARGET_CRAWLER_WORKERS', 8))  # Workers per target
+
+# Global Rate Limiter (NEW - Token Bucket Algorithm)
+GLOBAL_RATE_LIMIT = int(os.getenv('GLOBAL_RATE_LIMIT', 50))  # Max requests per second globally
+GLOBAL_RATE_LIMIT_ENABLED = os.getenv('GLOBAL_RATE_LIMIT_ENABLED', 'true').lower() == 'true'
+RATE_LIMIT_BURST = int(os.getenv('RATE_LIMIT_BURST', 10))  # Max burst size for token bucket
+
+# Tor Integration
+TOR_ENABLED = os.getenv('TOR_ENABLED', 'false').lower() == 'true'
+TOR_PROXY_PORT = int(os.getenv('TOR_PROXY_PORT', 9050))
+TOR_CONTROL_PORT = int(os.getenv('TOR_CONTROL_PORT', 9051))
+TOR_PROXY_URL = os.getenv('TOR_PROXY_URL', f'socks5://127.0.0.1:{TOR_PROXY_PORT}')

@@ -228,6 +228,134 @@ class StealthLogger:
                 'confidence': confidence
             }
         ))
+
+    def exploit_attempt(
+        self,
+        endpoint: str,
+        exploit_type: str,
+        reasoning: str,
+        payload: str = None,
+        parameter: str = None
+    ):
+        """Log exploit attempt."""
+        self.log_event(ScanEvent(
+            module="EXPLOIT",
+            action="ATTEMPT",
+            reasoning=reasoning,
+            endpoint=endpoint,
+            payload=payload,
+            parameter=parameter,
+            status="info",
+            result={
+                'exploit_type': exploit_type
+            }
+        ))
+
+    def exploit_success(
+        self,
+        endpoint: str,
+        exploit_type: str,
+        shell_path: str = None,
+        verified: bool = False,
+        reasoning: str = "Exploit succeeded"
+    ):
+        """Log successful exploitation."""
+        status = "critical" if verified else "success"
+        self.log_event(ScanEvent(
+            module="EXPLOIT",
+            action="SUCCESS",
+            reasoning=reasoning,
+            endpoint=endpoint,
+            status=status,
+            result={
+                'exploit_type': exploit_type,
+                'shell_path': shell_path,
+                'verified': verified
+            }
+        ))
+
+    def exploit_failed(
+        self,
+        endpoint: str,
+        exploit_type: str,
+        error: str,
+        reasoning: str = "Exploit failed"
+    ):
+        """Log failed exploitation."""
+        self.log_event(ScanEvent(
+            module="EXPLOIT",
+            action="FAILED",
+            reasoning=reasoning,
+            endpoint=endpoint,
+            status="error",
+            result={
+                'exploit_type': exploit_type,
+                'error': error
+            }
+        ))
+
+    def upload_exploit_attempt(
+        self,
+        endpoint: str,
+        param_name: str,
+        filename: str,
+        reasoning: str = "Attempting file upload RCE"
+    ):
+        """Log file upload exploit attempt."""
+        self.log_event(ScanEvent(
+            module="UPLOAD-RCE",
+            action="ATTEMPT",
+            reasoning=reasoning,
+            endpoint=endpoint,
+            parameter=param_name,
+            payload=filename,
+            status="info",
+            result={
+                'exploit_type': 'file_upload_rce',
+                'filename': filename
+            }
+        ))
+
+    def upload_exploit_success(
+        self,
+        endpoint: str,
+        shell_path: str,
+        verified: bool,
+        reasoning: str = "Webshell uploaded successfully"
+    ):
+        """Log successful file upload exploit."""
+        status = "critical" if verified else "success"
+        self.log_event(ScanEvent(
+            module="UPLOAD-RCE",
+            action="SUCCESS",
+            reasoning=reasoning,
+            endpoint=endpoint,
+            status=status,
+            result={
+                'exploit_type': 'file_upload_rce',
+                'shell_path': shell_path,
+                'verified': verified
+            }
+        ))
+
+    def upload_exploit_failed(
+        self,
+        endpoint: str,
+        error: str,
+        reasoning: str = "File upload exploit failed"
+    ):
+        """Log failed file upload exploit."""
+        self.log_event(ScanEvent(
+            module="UPLOAD-RCE",
+            action="FAILED",
+            reasoning=reasoning,
+            endpoint=endpoint,
+            status="error",
+            result={
+                'exploit_type': 'file_upload_rce',
+                'error': error
+            }
+        ))
     
     def get_event_summary(self) -> Dict[str, Any]:
         """Get summary of logged events."""

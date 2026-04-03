@@ -8,16 +8,57 @@ import random
 from typing import Dict, List, Any, Optional
 import atexit
 
-logger = logging.getLogger("recon.ddos")
+logger = logging.getLogger("recon.load_testing")
 
-class DDoSAttacker:
-    def __init__(self, state, output_dir: str, http_client=None):
+class LoadTester:
+    """
+    Load Testing Module (formerly DDoSAttacker)
+    
+    This module performs RESILIENCE CHECKS and LOAD TESTING on target endpoints.
+    It is OPTIONAL and DISABLED by default - only runs when explicitly requested.
+    
+    Purpose: Test target's resilience under load, identify rate limiting,
+    and discover potential DoS vulnerabilities for defensive purposes.
+    
+    Usage: Only enable when explicitly requested by user for authorized testing.
+    """
+    
+    # Default: DISABLED - only run when explicitly enabled
+    ENABLED_BY_DEFAULT = False
+    
+    def __init__(self, state, output_dir: str, http_client=None, enabled: bool = None):
         self.state = state
         self.output_dir = output_dir
         self.http_client = http_client
         self.locust_process = None
         self.temp_dir = tempfile.mkdtemp()
+        
+        # Explicitly check if load testing is enabled
+        # Can be set via: 1) parameter, 2) config, 3) default (disabled)
+        if enabled is not None:
+            self.enabled = enabled
+        else:
+            self.enabled = self.ENABLED_BY_DEFAULT
+        
         atexit.register(self.cleanup)
+        
+        if not self.enabled:
+            logger.info("[LOAD_TEST] Load testing module is DISABLED. "
+                       "Set enabled=True to activate.")
+    
+    def is_enabled(self) -> bool:
+        """Check if load testing is enabled"""
+        return self.enabled
+    
+    def enable(self):
+        """Enable load testing"""
+        self.enabled = True
+        logger.warning("[LOAD_TEST] Load testing ENABLED - will run resilience checks")
+    
+    def disable(self):
+        """Disable load testing"""
+        self.enabled = False
+        logger.info("[LOAD_TEST] Load testing DISABLED")
     
     def cleanup(self):
         if self.locust_process:
@@ -29,14 +70,37 @@ class DDoSAttacker:
             except:
                 pass
     
-    def run_ddos_attack(self, endpoints: List[Dict], users: int = 1000, 
-                        spawn_rate: int = 100, runtime: int = 60,
-                        method: str = "MIX") -> Dict:
+    def run_load_test(self, endpoints: List[Dict], users: int = 100, 
+                      spawn_rate: int = 10, runtime: int = 30,
+                      method: str = "MIX") -> Dict:
         """
-        Run actual DDoS attack using Locust
+        Run load/resilience test using Locust.
+        
+        This is a RESILIENCE CHECK - tests target's ability to handle load.
+        Only runs when explicitly enabled.
+        
+        Args:
+            endpoints: List of target endpoints
+            users: Number of concurrent users (default: 100, reduced from 1000)
+            spawn_rate: Users spawned per second (default: 10, reduced from 100)
+            runtime: Test duration in seconds (default: 30, reduced from 60)
+            method: HTTP method mix (GET/POST/HEAD)
+        
+        Returns:
+            Dict with test results
         """
+        if not self.enabled:
+            logger.info("[LOAD_TEST] Load testing is DISABLED. Skipping.")
+            return {"status": "disabled", "reason": "load testing not enabled"}
+        
+        return self._run_load_test_internal(endpoints, users, spawn_rate, runtime, method)
+    
+    def _run_load_test_internal(self, endpoints: List[Dict], users: int, 
+                                spawn_rate: int, runtime: int,
+                                method: str) -> Dict:
+        """Internal implementation of load test"""
         if not endpoints:
-            logger.warning("[DDoS] No endpoints provided for attack")
+            logger.warning("[LOAD_TEST] No endpoints provided for testing")
             return {"status": "failed", "reason": "no endpoints"}
         
         # Prepare target URLs
@@ -58,19 +122,19 @@ class DDoSAttacker:
                     logger.debug(f"[DDoS] Skipping invalid URL format: {url}")
         
         if not targets:
-            logger.warning(f"[DDoS] No valid targets found from {len(endpoints)} endpoints")
+            logger.warning(f"[LOAD_TEST] No valid targets found from {len(endpoints)} endpoints")
             return {"status": "failed", "reason": "no valid targets"}
         
-        logger.warning(f"[DDoS] Preparing attack on {len(targets)} valid targets (from {len(endpoints)} endpoints)")
+        logger.info(f"[LOAD_TEST] Preparing resilience check on {len(targets)} targets (from {len(endpoints)} endpoints)")
         
         # Create Locustfile
         try:
             locustfile = self._create_locustfile(targets, method)
             if not os.path.exists(locustfile):
-                logger.error(f"[DDoS] Failed to create locustfile: {locustfile}")
+                logger.error(f"[LOAD_TEST] Failed to create locustfile: {locustfile}")
                 return {"status": "failed", "reason": "locustfile creation failed"}
         except Exception as e:
-            logger.error(f"[DDoS] Error creating locustfile: {e}")
+            logger.error(f"[LOAD_TEST] Error creating locustfile: {e}")
             return {"status": "failed", "reason": f"locustfile error: {e}"}
         
         # Run Locust in headless mode
@@ -93,8 +157,8 @@ class DDoSAttacker:
                 "--html", os.path.join(self.output_dir, "ddos_report.html")
             ]
             
-            logger.warning(f"[DDoS] 🚀 Launching attack: {users} users, {runtime}s, {len(targets)} targets")
-            logger.info(f"[DDoS] Command: {' '.join(cmd[:3])} ...")
+            logger.info(f"[LOAD_TEST] 🧪 Starting resilience check: {users} users, {runtime}s, {len(targets)} targets")
+            logger.info(f"[LOAD_TEST] Command: {' '.join(cmd[:3])} ...")
             
             # Run locust
             self.locust_process = subprocess.Popen(
@@ -110,12 +174,12 @@ class DDoSAttacker:
                 
                 # Log output for debugging
                 if stdout:
-                    logger.debug(f"[DDoS] Locust stdout:\n{stdout[:500]}")
+                    logger.debug(f"[LOAD_TEST] Locust stdout:\n{stdout[:500]}")
                 if stderr and "error" in stderr.lower():
-                    logger.warning(f"[DDoS] Locust stderr:\n{stderr[:500]}")
+                    logger.warning(f"[LOAD_TEST] Locust stderr:\n{stderr[:500]}")
                     
             except subprocess.TimeoutExpired:
-                logger.error(f"[DDoS] Attack timeout after {runtime + 30}s")
+                logger.error(f"[LOAD_TEST] Test timeout after {runtime + 30}s")
                 if self.locust_process:
                     self.locust_process.terminate()
                 return {"status": "timeout", "reason": f"timeout after {runtime}s", "users": users, "runtime": runtime}
@@ -129,20 +193,20 @@ class DDoSAttacker:
             results["targets"] = targets
             results["total_targets"] = len(targets)
             
-            logger.warning(f"[DDoS] Attack completed: {results.get('total_requests', 0)} requests, {results.get('current_rps', 0)} rps")
+            logger.info(f"[LOAD_TEST] Resilience check completed: {results.get('total_requests', 0)} requests, {results.get('current_rps', 0)} rps")
             
             return results
             
         except FileNotFoundError as e:
-            logger.error(f"[DDoS] Locust command not found: {e}")
-            logger.error("[DDoS] Install with: pip install locust --break-system-packages")
+            logger.error(f"[LOAD_TEST] Locust command not found: {e}")
+            logger.error("[LOAD_TEST] Install with: pip install locust --break-system-packages")
             return {"status": "failed", "reason": "locust not installed"}
         except Exception as e:
-            logger.error(f"[DDoS] Attack failed with exception: {type(e).__name__}: {e}", exc_info=True)
+            logger.error(f"[LOAD_TEST] Test failed with exception: {type(e).__name__}: {e}", exc_info=True)
             return {"status": "error", "reason": str(e)}
     
     def _create_locustfile(self, targets: List[str], method: str) -> str:
-        """Create Locustfile with optimized DDoS behavior"""
+        """Create Locustfile for load/resilience testing"""
         targets_json = json.dumps(targets)
         
         # Build locustfile content (avoiding f-string issues with nested braces)
@@ -231,9 +295,9 @@ def on_quit(environment, **kwargs):
         try:
             with open(locust_file, "w") as f:
                 f.write(locust_content)
-            logger.debug(f"[DDoS] Locustfile created at: {locust_file}")
+            logger.debug(f"[LOAD_TEST] Locustfile created at: {locust_file}")
         except Exception as e:
-            logger.error(f"[DDoS] Failed to write locustfile: {e}")
+            logger.error(f"[LOAD_TEST] Failed to write locustfile: {e}")
             raise
         
         return locust_file
@@ -248,7 +312,7 @@ def on_quit(environment, **kwargs):
         }
         
         if not os.path.exists(stats_file):
-            logger.warning(f"[DDoS] Stats file not found: {stats_file}")
+            logger.warning(f"[LOAD_TEST] Stats file not found: {stats_file}")
             return results
         
         try:
@@ -264,15 +328,15 @@ def on_quit(environment, **kwargs):
                             results['current_rps'] = float(row.get('Requests/s', 0))
                             results['avg_response_time'] = float(row.get('Average Response Time', 0))
                             results['failures'] = int(row.get('Failure Count', 0))
-                            logger.debug(f"[DDoS] Parsed aggregated stats: {results['total_requests']} requests, {results['current_rps']} rps")
+                            logger.debug(f"[LOAD_TEST] Parsed aggregated stats: {results['total_requests']} requests, {results['current_rps']} rps")
                         except ValueError as ve:
                             logger.warning(f"[DDoS] Error converting stat values: {ve}")
                         break
                 
                 if row_count == 0:
-                    logger.warning(f"[DDoS] Stats file is empty: {stats_file}")
+                    logger.warning(f"[LOAD_TEST] Stats file is empty: {stats_file}")
                     
         except Exception as e:
-            logger.warning(f"[DDoS] Error parsing stats file: {type(e).__name__}: {e}")
+            logger.warning(f"[LOAD_TEST] Error parsing stats file: {type(e).__name__}: {e}")
         
         return results

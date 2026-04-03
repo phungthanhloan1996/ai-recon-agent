@@ -5,12 +5,34 @@ core/endpoint_ranker.py - Risk Scoring Engine
 
 import re
 import logging
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Set
 from urllib.parse import urlparse, parse_qs
 
 logger = logging.getLogger("recon.ranker")
 
-# Static scoring rules
+# Static file extensions that should be EXCLUDED from scanning
+STATIC_EXTENSIONS: Set[str] = {
+    '.css', '.js', '.map', '.json',
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.ico', '.webp', '.tiff',
+    '.woff', '.woff2', '.ttf', '.eot', '.otf',
+    '.mp4', '.mp3', '.avi', '.mov', '.wmv', '.flv', '.webm',
+    '.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx',
+    '.zip', '.rar', '.7z', '.tar', '.gz', '.bz2',
+    '.txt', '.rtf', '.csv',
+    '.xml', '.yaml', '.yml', '.toml', '.ini', '.conf',
+    '.html', '.htm', '.xhtml',
+    '.swf', '.jar', '.class',
+}
+
+# WordPress static upload paths that should be EXCLUDED
+WORDPRESS_STATIC_PATHS = [
+    '/wp-content/uploads/',
+    '/wp-includes/',
+    '/wp-content/cache/',
+    '/wp-content/plugins/',  # Only static assets, not PHP files
+]
+
+# Static scoring rules - ENHANCED with higher scores for parameterized endpoints
 SCORING_RULES = [
     # Upload endpoints - highest risk
     (r"upload|file_upload|fileupload", 9, "File Upload"),
@@ -35,13 +57,18 @@ SCORING_RULES = [
     (r"\.env|config|settings|\.ini|\.cfg|\.conf", 9, "Config Exposure"),
     (r"\.git|\.svn|\.htaccess|web\.config", 8, "SCM/Server Config"),
     
-    # Injection points
-    (r"\?.*=|search|query|q=|s=|keyword", 6, "Search/Injection Point"),
-    (r"id=|user=|page=|file=|path=|dir=|include=", 7, "Parameter Injection"),
+    # Injection points - HIGHER SCORES
+    (r"\?.*=", 8, "Has Query Parameters"),  # Any URL with = in query string
+    (r"search|query|q=|s=|keyword", 7, "Search/Injection Point"),
+    (r"id=|user=|page=|file=|path=|dir=|include=", 8, "Parameter Injection"),
     
     # WordPress specific
-    (r"wp-login|xmlrpc|wp-json|wp-content/uploads", 8, "WordPress"),
+    (r"wp-login|xmlrpc|wp-json", 8, "WordPress Critical"),
     (r"wp-cron|wp-mail|wp-trackback", 7, "WordPress Internal"),
+    # Lower score for wp-content/uploads (mostly static)
+    (r"wp-content/uploads(?!.*\.php)", 2, "WordPress Uploads (Static)"),
+    # Higher score for wp-content/uploads with PHP
+    (r"wp-content/uploads.*\.php", 9, "WordPress Upload PHP"),
     
     # Debug/dev
     (r"debug|test|dev|staging|demo|sample|temp|tmp", 5, "Debug/Dev"),
@@ -52,9 +79,6 @@ SCORING_RULES = [
     
     # SSRF
     (r"url=|redirect=|callback=|fetch=|proxy=|forward=", 8, "Potential SSRF"),
-    
-    # Low risk
-    (r"\.(css|js|png|jpg|jpeg|gif|ico|woff|svg)$", 1, "Static Asset"),
 ]
 
 PARAM_BONUS = {
@@ -219,6 +243,120 @@ class EndpointRanker:
             if reasons:
                 print(f"       Reasons: {', '.join(reasons[:3])}")
         print(f"{'='*60}\n")
+
+    def is_static_file(self, url: str) -> bool:
+        """Check if URL points to a static file that should be excluded"""
+        if not url:
+            return True
+        
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        url_lower = url.lower()
+        
+        # Check for static file extensions
+        for ext in STATIC_EXTENSIONS:
+            if path.endswith(ext):
+                return True
+        
+        # Check for WordPress static paths
+        for wp_path in WORDPRESS_STATIC_PATHS:
+            if wp_path in url_lower:
+                # Allow PHP files in wp-content/uploads (potential shells)
+                if '/wp-content/uploads/' in url_lower:
+                    # Check if it's a PHP file - these are NOT static
+                    if path.endswith('.php'):
+                        return False
+                    # Check if it has query parameters - could be dynamic
+                    if parsed.query:
+                        return False
+                # All other files in WordPress static paths are static
+                return True
+        
+        # Check for common static asset directories
+        static_dirs = [
+            '/assets/', '/static/', '/css/', '/js/', '/images/', '/img/',
+            '/fonts/', '/media/', '/download/',
+        ]
+        for dir_path in static_dirs:
+            if dir_path in path:
+                # But allow if it has query parameters (could be dynamic)
+                if not parsed.query:
+                    return True
+        
+        return False
+
+    def has_parameters(self, url: str) -> bool:
+        """Check if URL has query parameters"""
+        if not url:
+            return False
+        parsed = urlparse(url)
+        return bool(parsed.query)
+
+    def filter_endpoints(
+        self, 
+        endpoints: List[Dict], 
+        min_score: int = 5,
+        require_parameters: bool = False,
+        exclude_static: bool = True
+    ) -> List[Dict]:
+        """
+        Filter endpoints based on multiple criteria.
+        
+        Args:
+            endpoints: List of endpoint dictionaries
+            min_score: Minimum score threshold (0-10)
+            require_parameters: Only include endpoints with query parameters
+            exclude_static: Exclude static files
+        
+        Returns:
+            Filtered list of endpoints
+        """
+        filtered = []
+        stats = {
+            "total": len(endpoints),
+            "static_filtered": 0,
+            "no_params_filtered": 0,
+            "low_score_filtered": 0,
+            "passed": 0
+        }
+        
+        for ep in endpoints:
+            url = ep.get("url", "") if isinstance(ep, dict) else str(ep)
+            if not url:
+                continue
+            
+            # Filter 1: Exclude static files
+            if exclude_static and self.is_static_file(url):
+                stats["static_filtered"] += 1
+                continue
+            
+            # Filter 2: Require parameters (optional)
+            if require_parameters and not self.has_parameters(url):
+                stats["no_params_filtered"] += 1
+                continue
+            
+            # Filter 3: Score threshold
+            score = ep.get("score", 0) if isinstance(ep, dict) else 0
+            if score < min_score:
+                # Re-score if not already scored
+                if not isinstance(ep, dict) or "score" not in ep:
+                    score_result = self.score_endpoint(url)
+                    score = score_result["score"]
+                    if score < min_score:
+                        stats["low_score_filtered"] += 1
+                        continue
+                else:
+                    stats["low_score_filtered"] += 1
+                    continue
+            
+            stats["passed"] += 1
+            filtered.append(ep)
+        
+        logger.info(f"[RANKER] Filter: {stats['total']} → {stats['passed']} passed, "
+                   f"{stats['static_filtered']} static, {stats['no_params_filtered']} no-params, "
+                   f"{stats['low_score_filtered']} low-score")
+        
+        return filtered
 
     def categorize_endpoints(self, endpoints: List[Dict]) -> Dict[str, List[Dict]]:
         """Categorize endpoints into groups"""

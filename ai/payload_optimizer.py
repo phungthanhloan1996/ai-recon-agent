@@ -595,3 +595,59 @@ class PayloadOptimizer:
             }
             for p, s in category_payloads[:count]
         ]
+    
+    def get_top_payloads_by_category(self, category: str = None, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get top performing payloads, optionally filtered by category.
+        
+        Args:
+            category: If provided, filter by this category. If None, return from all categories.
+            limit: Maximum number of payloads to return.
+            
+        Returns:
+            List of payload dictionaries with score, success_rate, and other metadata.
+        """
+        if category:
+            return self.get_top_payloads(category, limit)
+        
+        # All categories, sorted by score
+        all_payloads = list(self.payload_stats.items())
+        all_payloads.sort(key=lambda x: x[1].score, reverse=True)
+        
+        return [
+            {
+                "payload": p,
+                "score": s.score,
+                "success_rate": s.success_rate,
+                "success_count": s.success_count,
+                "category": s.category,
+            }
+            for p, s in all_payloads[:limit]
+        ]
+    
+    def get_successful_payloads(self, category: str = None, min_success_rate: float = 0.5, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get payloads that have a high success rate.
+        
+        Args:
+            category: Filter by category if provided.
+            min_success_rate: Minimum success rate threshold (0.0 to 1.0).
+            limit: Maximum number of payloads to return.
+            
+        Returns:
+            List of successful payload dictionaries.
+        """
+        payloads = []
+        for p, s in self.payload_stats.items():
+            if category and s.category != category:
+                continue
+            if s.success_rate >= min_success_rate and s.success_count >= 2:
+                payloads.append({
+                    "payload": p,
+                    "score": s.score,
+                    "success_rate": s.success_rate,
+                    "success_count": s.success_count,
+                    "category": s.category,
+                })
+        
+        # Sort by success_rate descending
+        payloads.sort(key=lambda x: (x["success_rate"], x["success_count"]), reverse=True)
+        return payloads[:limit]

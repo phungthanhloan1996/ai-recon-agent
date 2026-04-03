@@ -1,6 +1,12 @@
 """
 modules/crawler.py - Discovery Engine
 Endpoint extraction from HTML, JavaScript, forms, and hidden parameters
+
+OPTIMIZATION: Refactored into phased pipeline with endpoint scoring.
+- Phase 1: Passive Recon (already done in recon.py)
+- Phase 2: Live Hosts + Deduplication (already done in recon.py)
+- Phase 3: Smart Crawl (hakrawler lightweight as PRIMARY, browser_crawler as fallback)
+- Phase 4: Heavy Scanning (only on high-value endpoints, score >= 7)
 """
 
 import os
@@ -18,6 +24,7 @@ from core.executor import check_tools, run_command
 from core.state_manager import StateManager
 from core.http_engine import HTTPClient
 from integrations.browser_crawler import BrowserCrawler
+from modules.api_scanner import APIScannerRunner
 
 logger = logging.getLogger("recon.discovery")
 
@@ -78,11 +85,67 @@ class DiscoveryEngine:
             ".map", ".min.js", ".min.css"
         }
 
+    def score_endpoint(self, url: str) -> int:
+        """
+        OPTIMIZATION: Score endpoint for exploitation value (0-15 scale).
+        Only endpoints with score >= 7 will undergo heavy scanning (Nikto, Nuclei, Arjun, mutation).
+        
+        Scoring criteria:
+        - Has parameters (?x=): +2
+        - API patterns (/api/, /v1/, /graphql, /rest/, /wp-json): +3
+        - Admin paths (/admin, /wp-admin, /dashboard, /panel): +3
+        - Auth paths (/login, /auth, /signin, /register): +2
+        - Upload paths (/upload, /file, /media, /attachment): +2
+        - Config/backup files (.env, .bak, .git, wp-config): +3
+        - WordPress indicators: +1
+        """
+        score = 0
+        url_lower = url.lower()
+        parsed = urlparse(url)
+        path = parsed.path.lower()
+        query = parsed.query
+        
+        # Has parameters (injection potential)
+        if query and '=' in query:
+            score += 2
+        
+        # API patterns (high value for automation/testing)
+        api_patterns = ['/api/', '/v1/', '/v2/', '/v3/', '/graphql', '/rest/', '/wp-json/', '/soap', '/rpc']
+        if any(p in url_lower for p in api_patterns):
+            score += 3
+        
+        # Admin/management paths (high privilege operations)
+        admin_patterns = ['/admin', '/wp-admin', '/administrator', '/dashboard', '/panel', '/manager', '/console', '/cpanel']
+        if any(p in path for p in admin_patterns):
+            score += 3
+        
+        # Auth paths (authentication bypass, credential testing)
+        auth_patterns = ['/login', '/auth', '/signin', '/register', '/password', '/wp-login', '/oauth', '/saml']
+        if any(p in path for p in auth_patterns):
+            score += 2
+        
+        # Upload paths (file upload vulnerabilities)
+        upload_patterns = ['/upload', '/file', '/media', '/attachment', '/wp-content/uploads']
+        if any(p in path for p in upload_patterns):
+            score += 2
+        
+        # Config/backup files (information disclosure)
+        config_patterns = ['.env', '.bak', '.git', '.svn', 'wp-config', '.sql', '.tar', '.zip', 'phpinfo']
+        if any(p in url_lower for p in config_patterns):
+            score += 3
+        
+        # WordPress indicators (large attack surface)
+        wp_patterns = ['wp-content', 'wp-includes', 'xmlrpc', 'wp-json']
+        if any(p in url_lower for p in wp_patterns):
+            score += 1
+        
+        return min(score, 15)
+
     def run(self, progress_cb: Optional[Callable[[str, str, str], None]] = None):
         """Execute endpoint discovery pipeline"""
         logger.info("[DISCOVERY] Starting endpoint discovery")
 
-        urls = self.state.get("urls", [])
+        urls = self._prepare_seed_urls(self.state.get("urls", []))
         discovered_endpoints = []
         seed_limit = int(self.budget.get("crawl_seed_urls", 260))
         browser_limit = int(self.budget.get("crawl_browser_urls", 40))
@@ -169,6 +232,16 @@ class DiscoveryEngine:
         # Classify endpoints
         classified = self.classify_endpoints(unique_endpoints)
 
+        # NEW: Run API scanner on discovered endpoints to detect API surfaces
+        api_endpoints = self._scan_for_apis(classified)
+        if api_endpoints:
+            logger.info(f"[DISCOVERY] API scanner found {len(api_endpoints)} API endpoints")
+            # Merge API findings into endpoints
+            existing_urls = {ep.get('url') for ep in classified}
+            for api_ep in api_endpoints:
+                if api_ep.get('url') not in existing_urls:
+                    classified.append(api_ep)
+
         self.state.update(endpoints=classified)
 
         # Save to file
@@ -179,6 +252,42 @@ class DiscoveryEngine:
 
         logger.info(f"[DISCOVERY] Discovered {len(classified)} unique endpoints")
 
+    def _prepare_seed_urls(self, urls: List[str]) -> List[str]:
+        """Prioritize crawl seeds that are already known-live and preserve explicit ports."""
+        live_urls = [
+            host.get("url", "")
+            for host in (self.state.get("live_hosts", []) or [])
+            if isinstance(host, dict) and host.get("url", "").startswith(("http://", "https://"))
+        ]
+        merged = list(dict.fromkeys(live_urls + (urls or [])))
+        if not merged:
+            return []
+
+        target_parsed = urlparse(self.target or "")
+        target_host = target_parsed.hostname or ""
+        target_port = target_parsed.port
+
+        prepared: List[str] = []
+        seen = set()
+        for url in merged:
+            if not url.startswith(("http://", "https://")):
+                continue
+            parsed = urlparse(url)
+            key = (parsed.scheme, parsed.netloc, parsed.path, parsed.query)
+            if key in seen:
+                continue
+
+            # When the original target includes an explicit port, deprioritize
+            # synthetic default-port URLs for that same host to avoid wasting crawl budget.
+            if target_host and target_port and parsed.hostname == target_host and parsed.port in (None, 80, 443):
+                if parsed.port != target_port and parsed.netloc != f"{target_host}:{target_port}":
+                    continue
+
+            seen.add(key)
+            prepared.append(url)
+
+        return prepared
+
     def _discover_with_katana(self, seed_urls: List[str]) -> List[Dict]:
         """Use katana CLI for deeper JS-aware crawling with retry mechanism."""
         if not check_tools(["katana"]).get("katana"):
@@ -188,17 +297,19 @@ class DiscoveryEngine:
             return []
         
         max_retries = max(1, config.CRAWLER_TOOL_MAX_RETRIES)
+        per_url_timeout = min(int(config.KATANA_TIMEOUT), 45)
+        run_timeout = min(int(config.KATANA_RUN_TIMEOUT), max(45, 6 * len(seeds)))
         for attempt in range(max_retries):
             rc, stdout, stderr = run_command(
                 [
                     "katana", "-silent", "-d", "3", "-list", "-",
                     "-c", str(config.KATANA_CONCURRENCY),
                     "-rl", str(config.KATANA_RATE_LIMIT),
-                    "-timeout", str(config.KATANA_TIMEOUT),
+                    "-timeout", str(per_url_timeout),
                     "-retry", "1",
                     "-mrs", "2000000"
                 ],
-                timeout=config.KATANA_RUN_TIMEOUT,
+                timeout=run_timeout,
                 stdin_data="\n".join(seeds) + "\n"
             )
             if rc == 0 and stdout:
@@ -612,6 +723,77 @@ class DiscoveryEngine:
 
         logger.debug(f"[CRAWLER] Deduplicated {len(endpoints)} → {len(unique)} endpoints")
         return unique
+
+    def _scan_for_apis(self, endpoints: List[Dict]) -> List[Dict]:
+        """Run API scanner on endpoints to detect REST/GraphQL APIs.
+        
+        NEW: Integrates API scanner into the discovery phase to identify
+        API endpoints early and add them to the endpoint pool for testing.
+        """
+        api_scanner = APIScannerRunner(self.output_dir)
+        api_findings = []
+        
+        # Get base URLs from endpoints
+        base_urls = set()
+        for ep in endpoints:
+            url = ep.get('url', '')
+            if url:
+                parsed = urlparse(url)
+                base_url = f"{parsed.scheme}://{parsed.netloc}"
+                base_urls.add(base_url)
+        
+        # Scan each base URL for APIs
+        for base_url in list(base_urls)[:5]:  # Limit to 5 base URLs
+            try:
+                # Get content for scanning
+                content = ""
+                try:
+                    response = self.http_client.get(base_url, timeout=10)
+                    if response.status_code == 200:
+                        content = response.text
+                except:
+                    pass
+                
+                # Run API scanner
+                result = api_scanner.scan(base_url, content=content)
+                
+                # Convert API findings to endpoint format
+                for rest_ep in result.get('rest_endpoints', []):
+                    if isinstance(rest_ep, str):
+                        full_url = rest_ep if rest_ep.startswith('http') else f"{base_url}{rest_ep}"
+                        api_findings.append({
+                            'url': full_url,
+                            'type': 'api_rest',
+                            'source': 'api_scanner',
+                            'method': 'GET',
+                            'categories': ['api', 'rest'],
+                            'parameters': []
+                        })
+                
+                for graphql_ep in result.get('graphql_endpoints', []):
+                    if isinstance(graphql_ep, str):
+                        full_url = graphql_ep if graphql_ep.startswith('http') else f"{base_url}{graphql_ep}"
+                        api_findings.append({
+                            'url': full_url,
+                            'type': 'api_graphql',
+                            'source': 'api_scanner',
+                            'method': 'POST',
+                            'categories': ['api', 'graphql'],
+                            'parameters': []
+                        })
+                
+                # Store API vulnerabilities in state for later exploitation
+                api_vulns = result.get('vulnerabilities', [])
+                if api_vulns:
+                    existing_api_vulns = self.state.get('api_vulnerabilities', []) or []
+                    existing_api_vulns.extend(api_vulns)
+                    self.state.update(api_vulnerabilities=existing_api_vulns)
+                    logger.warning(f"[DISCOVERY] API scanner found {len(api_vulns)} API vulnerabilities on {base_url}")
+                
+            except Exception as e:
+                logger.debug(f"[DISCOVERY] API scanner failed for {base_url}: {e}")
+        
+        return api_findings
 
     def classify_endpoints(self, endpoints: List[Dict]) -> List[Dict]:
         """Add classification metadata to endpoints"""

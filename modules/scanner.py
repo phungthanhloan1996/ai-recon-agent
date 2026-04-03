@@ -24,6 +24,7 @@ from learning.learning_engine import LearningEngine
 from integrations.dalfox_runner import DalfoxRunner
 from integrations.nuclei_runner import NucleiRunner
 from core.executor import run_command, tool_available
+from core.resource_manager import get_nuclei_pool, get_concurrency_manager
 
 logger = logging.getLogger("recon.scanning")
 
@@ -155,7 +156,21 @@ class ScanningEngine:
         if confirmed:
             self.state.update(confirmed_vulnerabilities=confirmed)
             # 🔥 FIX: SYNC confirmed_vulnerabilities INTO vulnerabilities
-            all_vulns = self.state.get("vulnerabilities", []) + confirmed
+            existing_vulns = self.state.get("vulnerabilities", []) or []
+            deduped = []
+            seen = set()
+            for vuln in existing_vulns + confirmed:
+                key = (
+                    vuln.get("url") or vuln.get("endpoint"),
+                    vuln.get("type"),
+                    vuln.get("payload"),
+                    vuln.get("source"),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(vuln)
+            all_vulns = deduped
             self.state.update(vulnerabilities=all_vulns)
             logger.debug(f"[SCANNING] Synced {len(confirmed)} vulnerabilities to vulnerabilities field")
 
@@ -167,6 +182,13 @@ class ScanningEngine:
             return []
         
         url = endpoint.get("url", "")
+        
+        # FIX: Track scanned endpoints for resume functionality
+        # Check if this endpoint was already scanned in a previous session
+        scanned_endpoints = self.state.get("scanned_endpoints", [])
+        if url in scanned_endpoints:
+            logger.debug(f"[SCANNING] Endpoint already scanned, skipping: {url[:80]}")
+            return []
         url = url.replace('\\/', '/').replace('\\/','/')  # fix escaped slashes
 
         if not self._is_valid_url(url):
@@ -245,7 +267,13 @@ class ScanningEngine:
         baseline_response = self.get_baseline_response(url)
         if not baseline_response:
             logger.debug(f"[SCANNING] Failed to get baseline for {url}")
-            return responses
+            # FIX: Save scanned endpoint to state for resume functionality
+        scanned_endpoints = self.state.get("scanned_endpoints", [])
+        if url not in scanned_endpoints:
+            scanned_endpoints.append(url)
+            self.state.update(scanned_endpoints=scanned_endpoints)
+        
+        return responses
 
         endpoint_score = self._estimate_endpoint_score(url, categories, parameters)
 
@@ -261,7 +289,12 @@ class ScanningEngine:
                     current_vulns.append(vuln)
                     self.state.update(vulnerabilities=current_vulns)
                     
-        # Run nuclei for general scan
+        # Resource Management: Initialize nuclei pool and concurrency manager on first use
+        if not hasattr(self, '_nuclei_pool'):
+            self._nuclei_pool = get_nuclei_pool(max_workers=3, default_timeout=300)
+            self._nuclei_concurrency = get_concurrency_manager(max_concurrent=20)
+        
+        # Run nuclei for general scan using NucleiWorkerPool
         # BUG 6 FIX: Only run on URLs with real query params or important keywords
         parsed_url = urllib.parse.urlparse(url)
         has_real_query_params = bool(parsed_url.query)
@@ -270,12 +303,28 @@ class ScanningEngine:
         has_important_keyword = any(kw in url_lower for kw in important_keywords)
         
         if (has_real_query_params or has_important_keyword) and endpoint_score >= config.NUCLEI_MIN_ENDPOINT_SCORE:
-            nuclei_result = self.nuclei_runner.run(url)
-            if nuclei_result.get("success"):
-                vuln = {"type": "general", "url": url, "tool": "nuclei", "output": nuclei_result["output"]}
-                current_vulns = self.state.get("vulnerabilities", [])
-                current_vulns.append(vuln)
-                self.state.update(vulnerabilities=current_vulns)
+            # Resource Management: Use NucleiWorkerPool with concurrency control
+            operation_id = f"nuclei_scan_{hash(url)}"
+            if self._nuclei_concurrency.acquire(operation_id, timeout=300):
+                try:
+                    # Submit scan to the worker pool for managed execution
+                    scan = self._nuclei_pool.submit_scan(url, lambda u, timeout: self.nuclei_runner.run(u))
+                    # Wait for result with timeout
+                    try:
+                        nuclei_result = scan['future'].result(timeout=300)
+                        if nuclei_result.get("success"):
+                            vuln = {"type": "general", "url": url, "tool": "nuclei", "output": nuclei_result["output"]}
+                            current_vulns = self.state.get("vulnerabilities", [])
+                            current_vulns.append(vuln)
+                            self.state.update(vulnerabilities=current_vulns)
+                    except concurrent.futures.TimeoutError:
+                        logger.warning(f"[SCANNING] Nuclei scan timed out for {url}")
+                except Exception as e:
+                    logger.error(f"[SCANNING] Nuclei pool error for {url}: {e}")
+                finally:
+                    self._nuclei_concurrency.release(operation_id)
+            else:
+                logger.warning(f"[SCANNING] Could not acquire concurrency slot for nuclei on {url}")
 
         # Generate payloads based on endpoint type
         if parameters:
@@ -514,6 +563,52 @@ class ScanningEngine:
         auth_ctx: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """Test a single payload against an endpoint with baseline comparison and WAF bypass"""
+        
+        # FILTER: Skip non-scannable URLs (mailto:, tel:, javascript:, data:, etc.)
+        # These URLs cannot be exploited and waste WAF bypass attempts
+        from urllib.parse import urlparse
+        parsed_url = urlparse(url)
+        if parsed_url.scheme in ['mailto', 'tel', 'javascript', 'data', 'file', 'ftp']:
+            logger.debug(f"[SCANNING] Skipping non-scannable URL scheme: {url[:100]}")
+            return {
+                "endpoint": url,
+                "payload": payload.get("value", ""),
+                "method": "GET",
+                "status_code": 0,
+                "content_length": 0,
+                "response_time": 0,
+                "baseline_status": baseline.get("status_code", 0),
+                "baseline_length": baseline.get("content_length", 0),
+                "baseline_time": baseline.get("response_time", 0),
+                "category": category,
+                "vulnerable": False,
+                "confidence": 0,
+                "reason": "Non-scannable URL scheme (mailto/tel/javascript/data/file/ftp)",
+                "timestamp": time.time()
+            }
+        
+        # FILTER: Skip URLs with no path or just root path and no query params
+        # These are unlikely to have injection points
+        if not parsed_url.path or parsed_url.path == '/':
+            if not parsed_url.query:
+                logger.debug(f"[SCANNING] Skipping URL with no path/query: {url[:100]}")
+                return {
+                    "endpoint": url,
+                    "payload": payload.get("value", ""),
+                    "method": "GET",
+                    "status_code": 0,
+                    "content_length": 0,
+                    "response_time": 0,
+                    "baseline_status": baseline.get("status_code", 0),
+                    "baseline_length": baseline.get("content_length", 0),
+                    "baseline_time": baseline.get("response_time", 0),
+                    "category": category,
+                    "vulnerable": False,
+                    "confidence": 0,
+                    "reason": "URL has no injectable path or query parameters",
+                    "timestamp": time.time()
+                }
+        
         payload_value = payload.get("value", "")
         method = payload.get("method", "GET")
         params = payload.get("params", {})
@@ -725,15 +820,47 @@ class ScanningEngine:
         }
 
     def _is_waf_blocked(self, response) -> bool:
-        """Detect if response indicates WAF blocking"""
-        if response.status_code == 403:
-            return True
-        body = response.text.lower()
-        waf_indicators = [
-            "waf", "blocked", "forbidden", "access denied", "cloudflare",
-            "akamai", "imperva", "sucuri", "mod_security", "firewall"
-        ]
-        return any(indicator in body for indicator in waf_indicators)
+        """Detect if response indicates WAF blocking - IMPROVED
+        
+        FIX: Phân biệt rõ WAF block vs các lỗi khác để giảm false positive.
+        Chỉ coi là WAF block khi có bằng chứng rõ ràng (WAF signatures).
+        """
+        # Case 1: 403/406 status codes - need to check for WAF signatures
+        if response.status_code in [403, 406]:
+            headers_str = str(response.headers).lower()
+            body = response.text.lower()
+            
+            # Strong WAF signatures only (specific WAF products)
+            strong_waf_signs = [
+                'cloudflare', 'akamai', 'sucuri', 'mod_security',
+                'wordfence', 'imperva', 'x-sucuri-id', 'cf-ray',
+                'aws waf', 'f5 traefik', 'big-ip', 'netscaler'
+            ]
+            
+            if any(sign in headers_str or sign in body for sign in strong_waf_signs):
+                logger.debug(f"[WAF] Confirmed WAF blocking (status {response.status_code})")
+                return True
+            
+            # 403/406 without WAF signature is likely auth/authz issue, not WAF
+            logger.debug(f"[WAF] Status {response.status_code} without WAF signature - likely auth issue, not WAF")
+            return False
+        
+        # Case 2: Connection errors (status 0) are NOT WAF blocks
+        if response.status_code == 0:
+            logger.debug(f"[WAF] Connection error (status 0) - not WAF block")
+            return False
+        
+        # Case 3: Rate limiting (429) is not WAF block per se
+        if response.status_code == 429:
+            logger.debug(f"[WAF] Rate limiting (429) - not WAF block")
+            return False
+        
+        # Case 4: Server errors (5xx) are not WAF blocks
+        if response.status_code >= 500:
+            logger.debug(f"[WAF] Server error ({response.status_code}) - not WAF block")
+            return False
+        
+        return False
 
     def _apply_waf_bypass(self, payload: str, category: str) -> List[str]:
         """Apply multiple WAF bypass mutations"""

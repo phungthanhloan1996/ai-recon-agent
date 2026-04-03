@@ -10,6 +10,7 @@ from typing import Dict, List, Any, Optional, Callable
 from urllib.parse import urljoin, parse_qs, urlparse
 
 from core.http_engine import HTTPClient
+from core.attack_surface import AttackSurfaceTracker
 
 logger = logging.getLogger("recon.api_vuln")
 
@@ -22,6 +23,7 @@ class APIVulnScanner:
         self.timeout = timeout
         self.http_client = HTTPClient(timeout=timeout)
         self.findings_file = f"{output_dir}/api_vuln_findings.json"
+        self.attack_surface = AttackSurfaceTracker()
     
     def scan(
         self,
@@ -84,6 +86,9 @@ class APIVulnScanner:
                 json.dump(result, f, indent=2)
         except Exception as e:
             logger.error(f"[API_VULN] Error saving: {e}")
+        
+        # NEW: Update attack surface with API vulnerability findings
+        self._update_attack_surface(url, result)
         
         if progress_cb:
             vuln_count = len(result['vulnerabilities'])
@@ -251,6 +256,8 @@ class APIVulnScanner:
                     'severity': 'critical',
                     'description': 'API error messages reveal SQL injection possibility'
                 })
+                # Add to attack surface
+                self.attack_surface.add_clue("sqli_vulnerability", f"API endpoint: {endpoint}", "api_vuln_scanner", 0.85)
             
             # Test for XSS
             xss_payload = '<img src=x onerror=alert(1)>'
@@ -267,6 +274,8 @@ class APIVulnScanner:
                     'severity': 'high',
                     'description': 'API reflects user input without encoding'
                 })
+                # Add to attack surface
+                self.attack_surface.add_clue("xss_vulnerability", f"API endpoint: {endpoint}", "api_vuln_scanner", 0.8)
             
             # Test for XXE
             xxe_payload = '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>'
@@ -283,8 +292,76 @@ class APIVulnScanner:
                     'severity': 'critical',
                     'description': 'API is vulnerable to XML External Entity attacks'
                 })
+                # Add to attack surface
+                self.attack_surface.add_clue("xxe_vulnerability", f"API endpoint: {endpoint}", "api_vuln_scanner", 0.9)
         
         except Exception as e:
             logger.debug(f"[API_VULN] Input validation test failed: {e}")
         
         return vulns
+
+    def _update_attack_surface(self, url: str, result: Dict[str, Any]):
+        """Update attack surface tracker with API vulnerability findings.
+        
+        NEW: Feeds API scan results into the attack surface for evidence-driven exploitation.
+        """
+        # Add API surface clues
+        if result.get('endpoints_tested', 0) > 0:
+            self.attack_surface.add_clue(
+                "api_surface",
+                f"API scan: {result['endpoints_tested']} endpoints tested on {url}",
+                "api_vuln_scanner",
+                0.7
+            )
+        
+        # Add vulnerability-specific clues
+        for vuln in result.get('vulnerabilities', []):
+            vuln_type = vuln.get('type', 'unknown')
+            severity = vuln.get('severity', 'medium')
+            endpoint = vuln.get('endpoint', '')
+            
+            # Map severity to confidence
+            confidence_map = {
+                'critical': 0.95,
+                'high': 0.85,
+                'medium': 0.7,
+                'low': 0.5,
+                'info': 0.3
+            }
+            confidence = confidence_map.get(severity, 0.5)
+            
+            self.attack_surface.add_clue(
+                f"api_{vuln_type}",
+                f"API vuln: {vuln_type} on {endpoint}",
+                "api_vuln_scanner",
+                confidence
+            )
+        
+        # Add auth bypass clues
+        for bypass in result.get('auth_bypass', []):
+            self.attack_surface.add_clue(
+                "auth_bypass",
+                f"Auth bypass: {bypass.get('endpoint', '')}",
+                "api_vuln_scanner",
+                0.9
+            )
+        
+        # Add rate limiting clues
+        if result.get('rate_limiting'):
+            rate_info = result['rate_limiting']
+            if rate_info.get('type') == 'no_rate_limiting':
+                self.attack_surface.add_clue(
+                    "no_rate_limiting",
+                    f"No rate limiting on {rate_info.get('endpoint', '')}",
+                    "api_vuln_scanner",
+                    0.6
+                )
+        
+        # Add sensitive data exposure clues
+        for sensitive in result.get('sensitive_data', []):
+            self.attack_surface.add_clue(
+                f"sensitive_data_{sensitive.get('type', 'unknown')}",
+                f"Sensitive data: {sensitive.get('type', '')} on {sensitive.get('endpoint', '')}",
+                "api_vuln_scanner",
+                0.85
+            )

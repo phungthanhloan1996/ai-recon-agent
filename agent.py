@@ -1,7 +1,7 @@
 import argparse
 import warnings
 # Thêm vào sau các import modules
-from modules.ddos_attacker import DDoSAttacker
+from modules.ddos_attacker import LoadTester
 try:
     from bs4 import XMLParsedAsHTMLWarning
     warnings.filterwarnings('ignore', category=XMLParsedAsHTMLWarning)
@@ -24,6 +24,10 @@ import threading
 from collections import defaultdict, deque
 from typing import Dict, List, Optional, Any
 import config
+
+# ─── Resource Management ─────────────────────────────────────────────────────
+# Global concurrency manager for resource control across all modules
+from core.resource_manager import get_concurrency_manager, shutdown_all as shutdown_resource_managers
 # ─── Suppress ALL logs from libraries (connection errors, timeouts, etc.) ────
 logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.CRITICAL)
@@ -163,7 +167,6 @@ from ai.adaptive_payload_engine import generate_adaptive_payloads
 def check_api_keys() -> dict:
     """Kiểm tra trạng thái các API key cần thiết."""
     groq_key = os.environ.get("GROQ_API_KEY", "") or os.environ.get("GROQ_APIKEY", "")
-    wps_token = os.environ.get("WPScan_API_TOKEN", "") or os.environ.get("WPSCAN_API_TOKEN", "")
     nvd_key = os.environ.get("NVD_API_KEY", "") or os.environ.get("NVDAPI_KEY", "")
 
     def status(key):
@@ -171,8 +174,7 @@ def check_api_keys() -> dict:
 
     return {
         "Groq": status(groq_key),
-        "WPScan": status(wps_token),
-        "NVD": status(nvd_key)
+        "NVD": status(nvd_key),
     }
 
 
@@ -425,11 +427,58 @@ class BatchDisplay:
         return frame
 
     def _get_phase_progress(self, current_phase: str) -> str:
-        """Tính toán số thứ tự phase hiện tại / tổng số phase"""
+        """Tính toán số thứ tự phase hiện tại / tổng số phase với tên phase"""
         if current_phase not in self.PHASE_ORDER:
-            return f"0/{len(self.ALL_PHASES)}"
+            return f"init 0/{len(self.ALL_PHASES)}"
         current_idx = self.PHASE_ORDER[current_phase]
-        return f"{current_idx + 1}/{len(self.ALL_PHASES)}"
+        # Map phase names to display names
+        phase_display_names = {
+            'recon': 'recon',
+            'live': 'live',
+            'wp': 'wordpress',
+            'toolkit': 'toolkit',
+            'crawl': 'discovery',
+            'wp_detect_state': 'wp-detect',
+            'js_hunter': 'js-hunter',
+            'param_mine': 'param-mine',
+            'auth': 'auth',
+            'classify': 'classify',
+            'rank': 'rank',
+            'scan': 'scan',
+            'analyze': 'analyze',
+            'cve_analysis': 'cve-analysis',
+            'pivot': 'pivot',
+            'graph': 'graph',
+            'chain': 'chain',
+            'select': 'select',
+            'exploit': 'exploit',
+            'sqli_exploit': 'sqli-exploit',
+            'upload_bypass': 'upload-bypass',
+            'reverse_shell': 'reverse-shell',
+            'privesc': 'privesc',
+            'waf_bypass': 'waf-bypass',
+            'boolean_sqli': 'bool-sqli',
+            'xss': 'xss',
+            'idor': 'idor',
+            'default_creds': 'default-creds',
+            'cve_exploit': 'cve-exploit',
+            'api_vuln': 'api-vuln',
+            'subdomain_takeover': 'subdomain-takeover',
+            'mfa_bypass': 'mfa-bypass',
+            'oauth_saml': 'oauth-saml',
+            'persistence': 'persistence',
+            'lateral_movement': 'lateral-movement',
+            'ssl_pinning': 'ssl-pinning',
+            'zero_day': 'zero-day',
+            'container_escape': 'container-escape',
+            'custom_exploit': 'custom-exploit',
+            'log_evasion': 'log-evasion',
+            'learn': 'learn',
+            'ddos': 'ddos',
+            'report': 'report',
+        }
+        display_name = phase_display_names.get(current_phase, current_phase)
+        return f"{display_name} {current_idx + 1}/{len(self.ALL_PHASES)}"
 
     def _get_progress_text(self, data: dict) -> str:
         """Tạo progress text dựa trên phase"""
@@ -491,13 +540,13 @@ class BatchDisplay:
             return phase_detail[:15] or "working..." if phase_detail else "working..."
     
     def _render_loop(self):
-        """Thread render liên tục - 4 lần/giây"""
+        """Thread render liên tục - 1 lần/giây để tiết kiệm CPU"""
         while self.running:
             current_time = time.time()
             if current_time - self.last_render_time >= 1.0:
                 self._render()
                 self.last_render_time = current_time
-            time.sleep(0.1)
+            time.sleep(0.5)  # Tối ưu: sleep 0.5s thay vì 0.1s để giảm CPU wake-ups
     
     def _render(self):
         """Vẽ giao diện dashboard modern với màu sắc và progress bar đẹp"""
@@ -791,14 +840,54 @@ class BatchDisplay:
                         if ai_decision:
                             print(f"  │  │  {C.BRIGHT_MAGENTA}├─ 🧠 AI Decision:{C.RESET} {ai_decision[:55]}{' ' * max(0, W - 55 - len(ai_decision))}│  {T.BORDER}║{C.RESET}")
                     
-                    # WordPress findings
-                    if findings and phase in ['wp', 'crawl', 'scan']:
+                    # WordPress & Security findings - show in ALL phases when available
+                    if findings:
+                        # Show WordPress version
                         if findings.get('cms_version'):
                             print(f"  │  │  {C.BRIGHT_YELLOW}├─ 🎯 WordPress:{C.RESET} {findings['cms_version'][:50]}{' ' * max(0, W - 50)}│  {T.BORDER}║{C.RESET}")
+                        
+                        # Show users
+                        if findings.get('users'):
+                            users = findings['users'][:5]
+                            print(f"  │  │  {C.BRIGHT_GREEN}├─ 👤 Users:{C.RESET} {', '.join(users)}{' ' * max(0, W - 45)}│  {T.BORDER}║{C.RESET}")
+                        
+                        # Show plugins
                         if findings.get('plugins'):
                             plugins = [p.get('name', '')[:15] for p in findings['plugins'][:3]]
                             if plugins:
-                                print(f"  │  │  {C.BRIGHT_YELLOW}├─ Plugins:{C.RESET} {', '.join(plugins)}{' ' * max(0, W - 45)}│  {T.BORDER}║{C.RESET}")
+                                vuln_count = sum(1 for p in findings['plugins'][:3] if p.get('vulnerabilities'))
+                                vuln_marker = f" {C.BRIGHT_RED}({vuln_count} vuln){C.RESET}" if vuln_count > 0 else ""
+                                print(f"  │  │  {C.BRIGHT_BLUE}├─ 🔌 Plugins:{C.RESET} {', '.join(plugins)}{vuln_marker}{' ' * max(0, W - 45)}│  {T.BORDER}║{C.RESET}")
+                        
+                        # Show themes
+                        if findings.get('themes'):
+                            themes = [t.get('name', '')[:15] for t in findings['themes'][:3]]
+                            if themes:
+                                print(f"  │  │  {C.BRIGHT_MAGENTA}├─ 🎨 Themes:{C.RESET} {', '.join(themes)}{' ' * max(0, W - 45)}│  {T.BORDER}║{C.RESET}")
+                        
+                        # Show conditioned chains (high-confidence exploit chains)
+                        if findings.get('conditioned_chains'):
+                            chains = findings['conditioned_chains']
+                            print(f"  │  │  {C.BRIGHT_RED}├─ 🎯 Exploit Chains:{C.RESET} {len(chains)} ready{' ' * max(0, W - 45)}│  {T.BORDER}║{C.RESET}")
+                        
+                        # Show WP vulnerabilities with details
+                        if findings.get('wp_vulns'):
+                            vulns = findings['wp_vulns'][:5]  # Show top 5
+                            print(f"  │  │  {C.BRIGHT_RED}├─ 🔴 WP Vulns:{C.RESET} {len(findings['wp_vulns'])} found{' ' * max(0, W - 45)}│  {T.BORDER}║{C.RESET}")
+                            for v in vulns:
+                                vtype = v.get('type', 'unknown')[:25] if isinstance(v, dict) else str(v)[:25]
+                                severity = v.get('severity', 'MEDIUM')[:8] if isinstance(v, dict) else 'MEDIUM'
+                                sev_color = C.BRIGHT_RED if severity == 'CRITICAL' else C.RED if severity == 'HIGH' else C.YELLOW
+                                cve = v.get('cve_id', '')[:12] if isinstance(v, dict) and v.get('cve_id') else ''
+                                cve_str = f" [{cve}]" if cve else ""
+                                vuln_line = f"  │  │  │  {sev_color}├─ [{severity}]{cve_str} {vtype}{' ' * max(0, W - 55 - len(vtype) - len(cve_str))}│  "
+                                print(f"{vuln_line}{T.BORDER}║{C.RESET}")
+                        
+                        # Show technologies
+                        if findings.get('technologies'):
+                            techs = findings['technologies'][:5]
+                            if techs:
+                                print(f"  │  │  {C.CYAN}├─ 🛠️ Tech:{C.RESET} {', '.join(techs)}{' ' * max(0, W - 45)}│  {T.BORDER}║{C.RESET}")
                     
                     # Last action
                     last_action = data.get('last_action', '')
@@ -862,217 +951,6 @@ class BatchDisplay:
             print(f"{T.BORDER}╚{'═' * (W + 2)}╝{C.RESET}")
             
             sys.stdout.flush()
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # ACTIVE TARGETS
-            # ═══════════════════════════════════════════════════════════════════
-            print(f"{T.BORDER}║{C.RESET}  {T.RUNNING}▶ ACTIVE ({active_count}/{self.max_workers}){C.RESET}{' ' * max(0, W - 22)}{T.BORDER}║{C.RESET}")
-            
-            phase_icons = {
-                'recon': '🔍', 'live': '🌐', 'wp': '🎯', 'crawl': '📄',
-                'auth': '🔐', 'toolkit': '🔧', 'classify': '🏷️', 'rank': '📊',
-                'scan': '⚡', 'analyze': '🧪', 'graph': '🕸️', 'chain': '🔗',
-                'exploit': '💣', 'learn': '📚', 'init': '⚙️', 'report': '📋',
-                'select': '🎯', 'pivot': '🔄', 'hunt': '🔎', 'mine': '⛏️',
-                'cve_analysis': '📖', 'mfa_bypass': '🔓', 'oauth_saml': '🔑',
-                'persistence': '👻', 'lateral_movement': '↔️', 'ssl_pinning': '🔒',
-                'zero_day': '🌟', 'container_escape': '📦', 'custom_exploit': '🛠️',
-                'log_evasion': '🧹', 'sqli_exploit': '💧', 'upload_bypass': '📤',
-                'reverse_shell': '🐚', 'privesc': '⬆️', 'waf_bypass': '🛡️',
-                'boolean_sqli': '🔍', 'xss': '✨', 'idor': '🔑', 'default_creds': '🔐',
-                'cve_exploit': '🎯', 'api_vuln': '🔌', 'subdomain_takeover': '🏴',
-                'service_fp': '🔍', 'verify_vulns': '✅', 'fp_filter': '🎯',
-                'chain_validate': '🔗', 'ddos': '💣'
-            }
-            
-            for idx, (domain, data) in enumerate(list(self.domains.items())[:self.max_workers], 1):
-                phase = data.get('phase', 'init')
-                icon = phase_icons.get(phase, '⚙️')
-                stats_data = data.get('stats', {})
-                
-                # Progress info
-                progress_info = self._get_progress_text(data)
-                
-                # Domain (max 28 chars)
-                dname = domain[:28] if len(domain) <= 28 else domain[:25] + "..."
-                
-                # Iteration
-                it = data.get('iter', 1)
-                max_it = data.get('max_iter', 5)
-                
-                # Elapsed time
-                el = int(time.time() - data.get('start_time', time.time()))
-                etime = f"{el // 60}m" if el >= 60 else f"{el}s"
-                
-                line = f"  {C.BOLD}#{idx}{C.RESET} {icon} {dname:<28}  I:{it}/{max_it}  {progress_info}  ⏱{etime}"
-                pad = max(0, W - len(line) + 4)
-                print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
-            
-            if active_count == 0:
-                print(f"{T.BORDER}║{C.RESET}  {T.TEXT_DIM}  (no active targets){C.RESET}{' ' * max(0, W - 22)}{T.BORDER}║{C.RESET}")
-            
-            # Queue
-            if queue_count > 0:
-                print(f"{T.BORDER}║{C.RESET}  {T.WAITING}⏳ QUEUE ({queue_count}){C.RESET}{' ' * max(0, W - 15)}{T.BORDER}║{C.RESET}")
-                for domain, added_time in list(self.queue)[:2]:
-                    wt = int((time.time() - added_time.timestamp()) / 60)
-                    dn = domain[:30] if len(domain) <= 30 else domain[:27] + "..."
-                    line = f"    • {T.TEXT_SECONDARY}{dn}{C.RESET}  ({wt}m)"
-                    pad = max(0, W - len(line) + 4)
-                    print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
-            
-            # Completed
-            if completed_count > 0:
-                print(f"{T.BORDER}║{C.RESET}  {T.COMPLETED}✅ DONE ({completed_count}){C.RESET}{' ' * max(0, W - 13)}{T.BORDER}║{C.RESET}")
-                for d, v, e, c, tc, ts in list(self.completed)[:2]:
-                    vc = T.DANGER if v > 0 else T.TEXT_DIM
-                    dn = d[:24] if len(d) <= 24 else d[:21] + "..."
-                    line = f"    • {T.TEXT_SECONDARY}{dn}{C.RESET}  {vc}{v} vulns{C.RESET}"
-                    pad = max(0, W - len(line) + 4)
-                    print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
-            
-            # Failed
-            if failed_count > 0:
-                print(f"{T.BORDER}║{C.RESET}  {T.FAILED}❌ FAILED ({failed_count}){C.RESET}{' ' * max(0, W - 16)}{T.BORDER}║{C.RESET}")
-                for d, reason, ts in list(self.failed)[:1]:
-                    dn = d[:24] if len(d) <= 24 else d[:21] + "..."
-                    rs = reason[:20] if reason else "?"
-                    line = f"    • {T.TEXT_SECONDARY}{dn}{C.RESET}  {T.FAILED}{rs}{C.RESET}"
-                    pad = max(0, W - len(line) + 4)
-                    print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
-            
-            print(f"{T.BORDER}╟{'─' * (W + 2)}╢{C.RESET}")
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # DETAILED STATUS PER DOMAIN
-            # ═══════════════════════════════════════════════════════════════════
-            if active_count > 0:
-                for domain, data in list(self.domains.items())[:self.max_workers]:
-                    dn = domain[:40] if len(domain) <= 40 else domain[:37] + "..."
-                    phase = data.get('phase', 'init')
-                    stats_data = data.get('stats', {})
-                    toolkit_m = data.get('toolkit_metrics', {}) or {}
-                    phase_tool = data.get('phase_tool', '')
-                    phase_detail = data.get('phase_detail', '')
-                    findings = data.get('findings', {})
-                    chains = data.get('chains', [])
-                    
-                    # Header for this domain
-                    print(f"{T.BORDER}║{C.RESET}  {C.BOLD}{C.CYAN}{dn}{C.RESET}{' ' * max(0, W - len(dn) - 2)}{T.BORDER}║{C.RESET}")
-                    
-                    # Phase & Tool info
-                    tool_str = phase_tool[:30] if phase_tool else "idle"
-                    detail_str = phase_detail[:50] if phase_detail else "processing..."
-                    print(f"{T.BORDER}║{C.RESET}  {T.RUNNING}Phase:{C.RESET} {C.YELLOW}{phase:<12}{C.RESET}  {T.RUNNING}Tool:{C.RESET} {tool_str:<30}  {T.TEXT_DIM}{detail_str[:35]}{C.RESET}{' ' * max(0, W - 55 - len(detail_str))}{T.BORDER}║{C.RESET}")
-                    
-                    # Phase-specific details
-                    if phase in ['recon', 'init']:
-                        subs = stats_data.get('subs', 0)
-                        live = stats_data.get('live', 0)
-                        total = stats_data.get('total_hosts', 0)
-                        if total > 0:
-                            pct = int(live * 100 / total)
-                            bar = self._get_progress_bar(live, total, 10)
-                            print(f"{T.BORDER}║{C.RESET}  🔍 Subdomains: {subs:>5} | Live: {pct:>3}% [{bar}] {live:>4}/{total:<4}{' ' * max(0, W - 55)}{T.BORDER}║{C.RESET}")
-                        else:
-                            print(f"{T.BORDER}║{C.RESET}  🔍 Subdomains: {subs:>5} | Live: {live:>4}{' ' * max(0, W - 35)}{T.BORDER}║{C.RESET}")
-                    
-                    elif phase == 'live':
-                        live = stats_data.get('live', 0)
-                        total = stats_data.get('total_hosts', 0)
-                        if total > 0:
-                            pct = int(live * 100 / total)
-                            bar = self._get_progress_bar(live, total, 10)
-                            print(f"{T.BORDER}║{C.RESET}  🌐 Live Hosts: {pct:>3}% [{bar}] {live:>4}/{total:<4}{' ' * max(0, W - 50)}{T.BORDER}║{C.RESET}")
-                        else:
-                            print(f"{T.BORDER}║{C.RESET}  🌐 Live Hosts: {live:>4}{' ' * max(0, W - 25)}{T.BORDER}║{C.RESET}")
-                    
-                    elif phase == 'crawl':
-                        eps = stats_data.get('eps', 0)
-                        print(f"{T.BORDER}║{C.RESET}  📄 Endpoints: {eps:>5}{' ' * max(0, W - 22)}{T.BORDER}║{C.RESET}")
-                    
-                    elif phase == 'toolkit':
-                        t = toolkit_m.get('tech', 0)
-                        p = toolkit_m.get('ports', 0)
-                        d = toolkit_m.get('dirs', 0)
-                        a = toolkit_m.get('api', 0)
-                        total_findings = t + p + d + a
-                        print(f"{T.BORDER}║{C.RESET}  🔧 Tech:{t:>3} Ports:{p:>3} Dirs:{d:>3} API:{a:>3} | Total:{total_findings:>4}{' ' * max(0, W - 55)}{T.BORDER}║{C.RESET}")
-                    
-                    elif phase in ['scan', 'classify', 'rank']:
-                        vulns = stats_data.get('vulns', 0)
-                        eps = stats_data.get('eps', 0)
-                        tested = stats_data.get('payloads_tested', 0)
-                        total_p = stats_data.get('total_payloads', 100)
-                        pct = int(tested * 100 / total_p) if total_p > 0 else 0
-                        bar = self._get_progress_bar(tested, total_p, 10) if total_p > 0 else ""
-                        print(f"{T.BORDER}║{C.RESET}  ⚡ Eps:{eps:>4} Vulns:{vulns:>3} | Payloads: {pct:>3}% [{bar}]{' ' * max(0, W - 55)}{T.BORDER}║{C.RESET}")
-                    
-                    elif phase in ['chain', 'graph', 'select']:
-                        chains_count = len(chains)
-                        exploited = sum(1 for c in chains if c.get('exploited', False))
-                        print(f"{T.BORDER}║{C.RESET}  🔗 Chains: {chains_count:>3} total | {exploited:>2} exploited{' ' * max(0, W - 40)}{T.BORDER}║{C.RESET}")
-                    
-                    elif phase == 'exploit':
-                        exploited = stats_data.get('exploited', 0)
-                        chains_count = len(chains)
-                        pct = int(exploited * 100 / chains_count) if chains_count > 0 else 0
-                        bar = self._get_progress_bar(exploited, chains_count, 10) if chains_count > 0 else ""
-                        print(f"{T.BORDER}║{C.RESET}  💣 Exploited: {exploited:>2}/{chains_count} ({pct:>3}%) [{bar}]{' ' * max(0, W - 50)}{T.BORDER}║{C.RESET}")
-                    
-                    # Findings (WordPress data)
-                    if findings:
-                        findings_parts = []
-                        if findings.get('plugins'):
-                            plugins = findings['plugins'][:3]
-                            p_names = [p.get('name', '')[:15] for p in plugins]
-                            findings_parts.append(f"Plugins: {', '.join(p_names)}")
-                        if findings.get('cms_version'):
-                            findings_parts.append(f"CMS: {findings['cms_version'][:20]}")
-                        if findings.get('users'):
-                            users = findings['users'][:3]
-                            findings_parts.append(f"Users: {', '.join(users)}")
-                        if findings_parts:
-                            fstr = "  ".join(findings_parts[:2])
-                            print(f"{T.BORDER}║{C.RESET}  {T.WARNING}📋 {fstr}{' ' * max(0, W - len(fstr) - 4)}{T.BORDER}║{C.RESET}")
-                    
-                    # Separator between domains
-                    if len(self.domains) > 1:
-                        print(f"{T.BORDER}║{C.RESET}  {T.TEXT_DIM}{'─' * (W)}{C.RESET}{' ' * max(0, W - W)}{T.BORDER}║{C.RESET}")
-            
-            print(f"{T.BORDER}╟{'─' * (W + 2)}╢{C.RESET}")
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # LIVE EVENTS
-            # ═══════════════════════════════════════════════════════════════════
-            if self.live_feed:
-                print(f"{T.BORDER}║{C.RESET}  {T.WARNING}🔔 EVENTS{C.RESET}{' ' * max(0, W - 10)}{T.BORDER}║{C.RESET}")
-                
-                for ts, icon, event, domain, detail in list(self.live_feed)[:4]:
-                    dn = domain[:14] if len(domain) <= 14 else domain[:11] + ".."
-                    dt = detail[:45] if len(detail) > 45 else detail
-                    line = f"  {C.DIM}{ts}{C.RESET} {icon} {event:<14} {C.CYAN}{dn}{C.RESET}  {dt}"
-                    pad = max(0, W - len(line) + 4)
-                    print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
-                
-                print(f"{T.BORDER}╟{'─' * (W + 2)}╢{C.RESET}")
-            
-            # ═══════════════════════════════════════════════════════════════════
-            # AI DECISION FEED
-            # ═══════════════════════════════════════════════════════════════════
-            if self.ai_feed:
-                print(f"{T.BORDER}║{C.RESET}  {T.RUNNING}🧠 AI DECISIONS{C.RESET}{' ' * max(0, W - 16)}{T.BORDER}║{C.RESET}")
-                for ts, event, domain, detail in list(self.ai_feed)[:2]:
-                    dn = domain[:14] if len(domain) <= 14 else domain[:11] + ".."
-                    dt = detail[:50] if len(detail) > 50 else detail
-                    line = f"  {C.DIM}{ts}{C.RESET}  {event:<18} {C.CYAN}{dn}{C.RESET}  {dt}"
-                    pad = max(0, W - len(line) + 4)
-                    print(f"{T.BORDER}║{C.RESET}{line}{' ' * pad}{T.BORDER}║{C.RESET}")
-            
-            # Footer
-            print(f"{T.BORDER}╚{'═' * (W + 2)}╝{C.RESET}")
-            
-            sys.stdout.flush()
 
 
 # ─── DOMAIN DISPLAY (Single mode) ───────────────────────────────────────────
@@ -1126,12 +1004,13 @@ class DomainDisplay:
                 self.data[key] = value
     
     def _render_loop(self):
+        """Thread render cho single domain mode - 2 lần/giây để tiết kiệm CPU"""
         while self.running:
             current_time = time.time()
             if current_time - self.last_render_time >= 0.5:
                 self._render()
                 self.last_render_time = current_time
-            time.sleep(0.1)
+            time.sleep(0.25)  # Tối ưu: sleep 0.25s thay vì 0.1s để giảm CPU wake-ups
     
     def _render(self):
         sys.stdout.write('\033[H\033[J')
@@ -1341,17 +1220,20 @@ def setup_logging(output_dir: str, verbose: bool = False) -> logging.Logger:
 # ─── MAIN AGENT ───────────────────────────────────────────────────────────
 class ReconAgent:
     def __init__(self, target: str, output_dir: str, options: dict,
-                 wps_token: str = "", nvd_key: str = "", 
+                 nvd_key: str = "", 
                  urls_file: str = "", subdomains_file: str = "", auth_file: str = "", force_recon: bool = False,
                  batch_display: BatchDisplay = None,
                  api_status: Optional[dict] = None,
                  target_index: int = 1,
-                 total_targets: int = 1):
+                 total_targets: int = 1,
+                 allowed_domains: list = None):
+        
+        # Initialize logger FIRST before any logging calls
+        self.logger = logging.getLogger("recon.agent")
         
         self.target = target.lower().strip()
         self.output_dir = output_dir
         self.options = options
-        self.wps_token = wps_token or os.environ.get("WPScan_API_TOKEN", "") or os.environ.get("WPSCAN_API_TOKEN", "")
         self.nvd_key = nvd_key or os.environ.get("NVD_API_KEY", "") or os.environ.get("NVDAPI_KEY", "")
         self.urls_file = urls_file
         self.subdomains_file = subdomains_file
@@ -1361,6 +1243,7 @@ class ReconAgent:
         self.api_status = api_status or {}
         self.target_index = target_index
         self.total_targets = total_targets
+        self.allowed_domains = allowed_domains or []
         self.scan_start_time = time.time()
         # Force full profile by default (no scan-strength selection).
         self.budget = ScanBudget.build(self.target, aggressive=True)
@@ -1380,6 +1263,12 @@ class ReconAgent:
         scan_meta["budget"] = self.budget.to_dict()
         scan_meta["aggressive"] = True
         self.state.update(scan_metadata=scan_meta)
+        
+        # Set allowed_domains from targets.txt for multi-domain filtering
+        # This allows URLs from any domain in targets.txt to pass through filters
+        if self.allowed_domains:
+            self.state.update(allowed_domains=self.allowed_domains)
+            self.logger.info(f"[INIT] Set allowed_domains: {len(self.allowed_domains)} domains from targets.txt")
         self.session = SessionManager(self.output_dir)
         self.http_client = HTTPClient(self.session)
         self.response_analyzer = ResponseAnalyzer()
@@ -1410,7 +1299,7 @@ class ReconAgent:
         self.discovery_engine = DiscoveryEngine(self.state, output_dir)
         self.scanning_engine = ScanningEngine(self.state, output_dir, self.payload_gen, self.payload_mutator, self.learning_engine)
         self.exploit_engine = ExploitTestEngine(self.state, output_dir, self.learning_engine)
-        self.wp_scanner = WordPressScannerEngine(self.state, output_dir, self.wps_token)
+        self.wp_scanner = WordPressScannerEngine(self.state, output_dir)
         self.auth_engine = AuthScannerEngine(self.state, output_dir, self.session)
         self.toolkit = ToolkitScanner(self.state, output_dir, aggressive=True)
         
@@ -1448,11 +1337,11 @@ class ReconAgent:
         self.container_escape = ContainerEscapeEngine()
         self.custom_exploit = CustomExploitFramework(exploits_dir=os.path.join(output_dir, "custom_exploits"))
         self.log_evasion = LogEvasion()
-        
-        self.logger = logging.getLogger("recon.agent")
         self.iteration_count = 0
         self.max_iterations = 3
         self.confidence_threshold = 0.8
+        self._last_iteration_snapshot = None
+        self._stagnant_iterations = 0
         self.reflection_history = []  # Self-reflection loop
         self.phase_errors = defaultdict(int)  # Track errors per phase
         self.playbook_state = {}  # Conditional playbook state
@@ -1506,10 +1395,52 @@ class ReconAgent:
             as_data = self.state.get("attack_surface", {})
             if as_data:
                 self.attack_surface.from_dict(as_data)
+            # 🔥 FIX: Restore findings from previous session for display
+            self._restore_findings_from_state()
             self._update_stats()
+            # 🔥 FIX: Force immediate display update with restored data
+            # Build comprehensive findings dict from restored state
+            self._force_display_refresh()
+            
+            # 🔥 FIX: Mark the interrupted phase as done so we skip it on resume
+            resume_phase = self._get_resume_phase()
+            if resume_phase:
+                self.logger.info(f"[RESUME] Marking interrupted phase '{resume_phase}' as done, will continue from next phase")
+                self._mark_phase_done(resume_phase)
+                self.last_action = f"resumed — skipping {resume_phase}, continuing to next phase"
+        
         self._update_display()
 
     def _update_display(self):
+        # Build comprehensive findings dict from state for real-time display
+        findings_display = self.findings.copy()
+        
+        # Add WordPress findings from state (these are updated by wp_scanner)
+        wp_plugins = self.state.get("wp_plugins", []) or []
+        wp_themes = self.state.get("wp_themes", []) or []
+        wp_users = self.state.get("wp_users", []) or []
+        wp_version = self.state.get("wp_version", "unknown")
+        wp_vulns = self.state.get("wp_vulnerabilities", []) or []
+        wp_conditioned = self.state.get("wp_conditioned_findings", []) or []
+        
+        if wp_plugins:
+            findings_display['plugins'] = wp_plugins[:10]
+        if wp_themes:
+            findings_display['themes'] = wp_themes[:5]
+        if wp_users:
+            findings_display['users'] = wp_users[:10]
+        if wp_version and wp_version != "unknown":
+            findings_display['cms_version'] = f"WordPress {wp_version}"
+        if wp_vulns:
+            findings_display['wp_vulns'] = wp_vulns[:10]
+        if wp_conditioned:
+            findings_display['conditioned_chains'] = [c for c in wp_conditioned if c.get('chain_candidate') and c.get('confidence', 0) >= 70][:5]
+        
+        # Add technologies from state
+        technologies = self.state.get("technologies", {}) or {}
+        if technologies:
+            findings_display['technologies'] = list(technologies.keys())[:15]
+        
         if self.batch_display:
             self.batch_display.update(self.batch_id, {
                 'phase': self.current_phase,
@@ -1527,7 +1458,7 @@ class ReconAgent:
                 'endpoints': self.endpoint_stats.copy(),
                 'toolkit_metrics': self.toolkit_metrics.copy(),
                 'scan_metadata': self.state.get("scan_metadata", {}) or {},
-                'findings': self.findings.copy(),
+                'findings': findings_display,
                 'last_action': self.last_action,
                 'start_time': self.scan_start_time,
                 'conditioned_chains': self.state.get("conditioned_chains", [])
@@ -1548,6 +1479,7 @@ class ReconAgent:
                     learning=self.learning_stats.copy(),
                     toolkit_metrics=self.toolkit_metrics.copy(),
                     scan_metadata=self.state.get("scan_metadata", {}) or {},
+                    findings=findings_display,
                     last_action=self.last_action
                 )
 
@@ -1683,9 +1615,9 @@ class ReconAgent:
                     self._run_wordpress_detection_from_state()
 
                 # Phase 4.3: JavaScript Endpoint Hunter
-                # Extract hidden endpoints from JS files
+                # Extract endpoints from JavaScript files
                 if self.iteration_count == 1 and not self._should_skip_phase("js_hunter"):
-                    self.current_phase = "hunt"
+                    self.current_phase = "js_hunter"
                     self.phase_detail = "js-extraction"
                     self.phase_tool = "endpoint-hunter"
                     self.phase_status = "running"
@@ -1695,7 +1627,7 @@ class ReconAgent:
                 # Phase 4.4: Parameter Miner
                 # Discover hidden parameters on endpoints
                 if self.iteration_count == 1 and not self._should_skip_phase("param_mine"):
-                    self.current_phase = "mine"
+                    self.current_phase = "param_mine"
                     self.phase_detail = "parameter-discovery"
                     self.phase_tool = "param-fuzzer"
                     self.phase_status = "running"
@@ -2005,6 +1937,12 @@ class ReconAgent:
                 
                 if self._check_confidence_threshold():
                     break
+
+                if self._should_stop_due_to_stagnation():
+                    self.logger.info("[AGENT] Stopping early due to stagnant iterations")
+                    self.last_action = "stopping early: no new signal across iterations"
+                    self._update_display()
+                    break
                     
                 self._adapt_for_next_iteration()
             
@@ -2045,6 +1983,20 @@ class ReconAgent:
             self._update_display()
             self.logger.warning("Scan interrupted")
             self.state.save()
+            
+            # 🔥 HIỂN THỊ TẤT CẢ FINDINGS ĐÃ THU THẬP ĐƯỢC TRƯỚC KHI THOÁT
+            print("\n\n")
+            print(f"{C.BOLD}{C.BRIGHT_RED}{'═' * 70}{C.RESET}")
+            print(f"{C.BOLD}{C.BRIGHT_RED}║  ⚡ SCAN INTERRUPTED — Displaying collected findings ⚡{C.RESET}{' ' * 12}{C.BOLD}{C.BRIGHT_RED}║{C.RESET}")
+            print(f"{C.BOLD}{C.BRIGHT_RED}{'═' * 70}{C.RESET}")
+            print()
+            
+            # Gọi _print_modern_summary để hiển thị tất cả findings đã thu thập
+            try:
+                self._print_modern_summary()
+            except Exception as e:
+                print(f"Error displaying summary: {e}")
+            
             self._generate_final_report()
             if self.batch_display:
                 self.batch_display.mark_failed(self.target, "interrupted")
@@ -2056,6 +2008,165 @@ class ReconAgent:
             self.state.add_error(str(e))
             if self.batch_display:
                 self.batch_display.mark_failed(self.target, str(e)[:30])
+
+    def _force_display_refresh(self):
+        """
+        🔥 Force immediate display refresh with all restored data.
+        This method ensures that when resuming a scan, all previously discovered
+        findings are immediately visible in the dashboard.
+        """
+        # Log the restoration for debugging
+        self.logger.info("[DISPLAY] Force refreshing display with restored data...")
+        
+        # Update last_action to show resume status
+        previous_phase = self.state.get("current_phase", "unknown")
+        self.last_action = f"resumed — continuing from {previous_phase}"
+        
+        # Force update stats from state
+        self._update_stats()
+        
+        # Log what was restored
+        summary = self.state.summary()
+        self.logger.info(f"[DISPLAY] Restored state summary: {summary}")
+        
+        # Add a feed event to notify about resume
+        if self.batch_display:
+            subs = summary.get('subdomains', 0)
+            live = summary.get('live_hosts', 0)
+            eps = summary.get('endpoints', 0)
+            wp = summary.get('wordpress', False)
+            
+            details = []
+            if subs > 0:
+                details.append(f"{subs} subs")
+            if live > 0:
+                details.append(f"{live} live")
+            if eps > 0:
+                details.append(f"{eps} eps")
+            if wp:
+                details.append("WordPress")
+            
+            if details:
+                self.batch_display._add_to_feed(
+                    "♻️", "Resumed", self.target,
+                    f"Loaded: {', '.join(details)}"
+                )
+        
+        # Force display update
+        self._update_display()
+        self.logger.info("[DISPLAY] Display refresh complete")
+
+    def _restore_findings_from_state(self):
+        """
+        🔥 Restore findings from previous session when resuming a scan.
+        This ensures all WordPress findings (plugins, themes, users, etc.) are
+        properly loaded and displayed when continuing from a saved state.
+        """
+        if not self.resumed_from_state:
+            return
+        
+        self.logger.info("[RESTORE] Restoring findings from previous session...")
+        
+        # Restore WordPress findings from state
+        wp_plugins = self.state.get("wp_plugins", []) or []
+        wp_themes = self.state.get("wp_themes", []) or []
+        wp_users = self.state.get("wp_users", []) or []
+        wp_version = self.state.get("wp_version", "unknown")
+        wp_vulns = self.state.get("wp_vulnerabilities", []) or []
+        wp_conditioned = self.state.get("wp_conditioned_findings", []) or []
+        
+        # Update self.findings with restored data
+        if wp_plugins:
+            self.findings['plugins'] = wp_plugins[:10]
+            self.logger.info(f"[RESTORE] Restored {len(wp_plugins)} plugins")
+        
+        if wp_themes:
+            self.findings['themes'] = wp_themes[:5]
+            self.logger.info(f"[RESTORE] Restored {len(wp_themes)} themes")
+        
+        if wp_users:
+            self.findings['users'] = wp_users[:10]
+            self.logger.info(f"[RESTORE] Restored {len(wp_users)} users")
+        
+        if wp_version and wp_version != "unknown":
+            self.findings['cms_version'] = f"WordPress {wp_version}"
+            self.logger.info(f"[RESTORE] Restored WordPress version: {wp_version}")
+        
+        if wp_vulns:
+            self.findings['wp_vulns'] = wp_vulns[:10]
+            self.logger.info(f"[RESTORE] Restored {len(wp_vulns)} WordPress vulnerabilities")
+        
+        if wp_conditioned:
+            high_conf = [c for c in wp_conditioned if c.get('chain_candidate') and c.get('confidence', 0) >= 70]
+            if high_conf:
+                self.findings['conditioned_chains'] = high_conf[:5]
+                self.logger.info(f"[RESTORE] Restored {len(high_conf)} high-confidence exploit chains")
+        
+        # Restore technologies from state
+        technologies = self.state.get("technologies", {}) or {}
+        if technologies:
+            tech_list = list(technologies.keys())[:15]
+            self.findings['technologies'] = tech_list
+            self.tech_stack = {tech: technologies.get(tech, {}) for tech in tech_list}
+            self.logger.info(f"[RESTORE] Restored {len(tech_list)} technologies")
+        
+        # Restore toolkit metrics from state
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        toolkit_m = scan_meta.get("toolkit_metrics", {}) or {}
+        if toolkit_m:
+            self.toolkit_metrics = {
+                'tech': toolkit_m.get('tech', 0),
+                'ports': toolkit_m.get('ports', 0),
+                'dirs': toolkit_m.get('dirs', 0),
+                'api': toolkit_m.get('api', 0),
+                'vulns': toolkit_m.get('vulns', 0),
+            }
+            self.logger.info(f"[RESTORE] Restored toolkit metrics: {toolkit_m}")
+        
+        # Restore chains data from state
+        exploit_chains = self.state.get("exploit_chains", []) or []
+        if exploit_chains:
+            self.chains_data = []
+            for i, chain in enumerate(exploit_chains[:5], 1):
+                chain_name = chain.get("name", "") if isinstance(chain, dict) else getattr(chain, "name", f"Chain-{i}")
+                chain_risk = (
+                    (chain.get("risk") or chain.get("risk_level") or chain.get("severity"))
+                    if isinstance(chain, dict)
+                    else getattr(chain, "risk_level", "MEDIUM")
+                )
+                chain_steps = chain.get("steps", []) if isinstance(chain, dict) else getattr(chain, "steps", [])
+                
+                chain_info = {
+                    'name': chain_name[:50],
+                    'risk': chain_risk or 'MEDIUM',
+                    'exploited': False,
+                    'partial': False,
+                    'steps': [],
+                    'result': ''
+                }
+                
+                for step in chain_steps[:3]:
+                    step_desc = step.get('description', '') if isinstance(step, dict) else getattr(step, "name", "")
+                    step_info = {
+                        'desc': step_desc[:50],
+                        'success': step.get('exploited', False) if isinstance(step, dict) else False,
+                        'partial': step.get('partial', False) if isinstance(step, dict) else False,
+                    }
+                    chain_info['steps'].append(step_info)
+                
+                self.chains_data.append(chain_info)
+            self.logger.info(f"[RESTORE] Restored {len(self.chains_data)} exploit chains")
+        
+        # Restore vuln_types from state
+        vulns = self.state.get("confirmed_vulnerabilities", []) or []
+        if vulns:
+            self.vuln_types.clear()
+            for v in vulns:
+                vtype = v.get('type', 'unknown')
+                self.vuln_types[vtype] += 1
+            self.logger.info(f"[RESTORE] Restored {len(vulns)} vulnerabilities")
+        
+        self.logger.info("[RESTORE] Findings restoration complete")
 
     def _update_stats(self):
         # Lấy vulns trực tiếp từ confirmed_vulnerabilities (chính xác hơn)
@@ -2145,6 +2256,7 @@ class ReconAgent:
             self._update_display()
 
     def _should_skip_phase(self, phase: str) -> bool:
+        """Check if a phase should be skipped based on completion status or user options."""
         skip_map = {
             "recon": "skip_recon",
             "live_hosts": "skip_live_hosts",
@@ -2158,6 +2270,68 @@ class ReconAgent:
         if self.options.get(skip_map.get(phase, ""), False):
             return True
         return phase in self.completed_phases
+
+    def _get_resume_phase(self) -> str:
+        """Get the phase to resume from when restarting after interruption.
+        
+        Returns the phase that was interrupted (if any), so we can skip it
+        and continue from the next phase.
+        """
+        if not self.resumed_from_state:
+            return None
+        
+        previous_phase = self.state.get("current_phase", "")
+        if not previous_phase or previous_phase in self.completed_phases:
+            return None
+        
+        # Map phase names to their canonical names used in completed_phases
+        phase_mapping = {
+            "recon": "recon",
+            "live": "live_hosts", 
+            "wp": "wordpress",
+            "toolkit": "toolkit",
+            "crawl": "discovery",
+            "wp_detect_state": "wp_detect_state",
+            "js_hunter": "js_hunter",
+            "param_mine": "param_mine",
+            "auth": "auth",
+            "classify": "classify",
+            "rank": "rank",
+            "scan": "scan",
+            "analyze": "analyze",
+            "cve_analysis": "cve_analysis",
+            "pivot": "priv_pivot",
+            "graph": "graph",
+            "chain": "chain",
+            "select": "exploit_select",
+            "exploit": "exploit",
+            "sqli_exploit": "sqli_exploit",
+            "upload_bypass": "upload_bypass",
+            "reverse_shell": "reverse_shell",
+            "privesc": "privesc",
+            "waf_bypass": "waf_bypass",
+            "boolean_sqli": "boolean_sqli",
+            "xss": "xss",
+            "idor": "idor",
+            "default_creds": "default_creds",
+            "cve_exploit": "cve_exploit",
+            "api_vuln": "api_vuln",
+            "subdomain_takeover": "subdomain_takeover",
+            "mfa_bypass": "mfa_bypass",
+            "oauth_saml": "oauth_saml",
+            "persistence": "persistence",
+            "lateral_movement": "lateral_movement",
+            "ssl_pinning": "ssl_pinning",
+            "zero_day": "zero_day",
+            "container_escape": "container_escape",
+            "custom_exploit": "custom_exploit",
+            "log_evasion": "log_evasion",
+            "learn": "learn",
+        }
+        
+        canonical_phase = phase_mapping.get(previous_phase, previous_phase)
+        self.logger.info(f"[RESUME] Previous interrupted phase: {previous_phase} -> {canonical_phase}")
+        return canonical_phase
 
     def _mark_phase_done(self, phase: str):
         if not phase:
@@ -2221,7 +2395,7 @@ class ReconAgent:
         
         # Probe all targets (seeds + discoveries)
         if all_targets:
-            self.live_host_engine.detect_live_hosts(all_targets)
+            self.live_host_engine.detect_live_hosts(all_targets, skip_dev_test=True)
         
         self._set_activity("live-host-detector", "done", "detect")
         after = len(self.state.get("live_hosts", []))
@@ -2232,6 +2406,7 @@ class ReconAgent:
             self.last_action = f"live hosts: +{after-before} live"
             if self.batch_display:
                 self.batch_display._add_to_feed("🌐", "Live", self.target, f"Found {after-before} live")
+        self._canonicalize_state_urls()
         self._update_stats()
         self._mark_phase_done("live_hosts")
 
@@ -2326,7 +2501,7 @@ class ReconAgent:
 
     def _run_wordpress_phase(self):
         self._set_activity("wpscan+wp-fingerprint", "running", "scan")
-        live_hosts = self._select_live_hosts_for_deep_scan(limit=40)
+        live_hosts = self._select_live_hosts_for_deep_scan(limit=15)  # Tối ưu: giảm từ 40 xuống 15 để tránh treo
         from urllib.parse import urlparse
         target_urls = []
         seen = set()
@@ -2350,21 +2525,131 @@ class ReconAgent:
                 self.stats['wp'] = len(wp_sites)
                 self.last_action = f"wordpress: {len(wp_sites)} sites"
                 
+                # 🔥 PRINT FINDINGS TO TERMINAL IMMEDIATELY 🔥
+                print(f"\n{Colors.BOLD}{Colors.BRIGHT_YELLOW}{'═' * 60}{Colors.RESET}")
+                print(f"{Colors.BOLD}{Colors.BRIGHT_YELLOW}║  🎯 WORDPRESS DETECTION RESULTS{Colors.RESET}{' ' * 25}{Colors.BOLD}{Colors.BRIGHT_YELLOW}║{Colors.RESET}")
+                print(f"{Colors.BOLD}{Colors.BRIGHT_YELLOW}{'═' * 60}{Colors.RESET}")
+                
                 # Extract findings from WordPress scan
                 all_plugins = []
                 all_themes = []
                 all_users = []
                 wp_versions = []
+                php_version_found = ""
                 
                 for site_url, site_data in wp_sites.items():
-                    if site_data.get('plugins'):
-                        all_plugins.extend(site_data['plugins'][:5])
-                    if site_data.get('themes'):
-                        all_themes.extend(site_data['themes'][:3])
-                    if site_data.get('users'):
-                        all_users.extend(site_data['users'][:5])
+                    domain = site_url.replace("https://", "").replace("http://", "").split("/")[0]
+                    
+                    # Print WordPress version
                     if site_data.get('version'):
-                        wp_versions.append(site_data['version'])
+                        version = site_data['version']
+                        wp_versions.append(version)
+                        eol_marker = ""
+                        # Check for EOL status
+                        tech_details = self.state.get("technical_details", {}) or {}
+                        wp_advanced = tech_details.get("wordpress_advanced_scan", {}) or {}
+                        if wp_advanced.get("version_detection"):
+                            is_eol = wp_advanced["version_detection"].get("eol", False)
+                            if is_eol:
+                                eol_marker = f" {Colors.BRIGHT_RED}(EOL - End of Life){Colors.RESET}"
+                        print(f"\n{Colors.BOLD}{Colors.CYAN}📌 Site: {domain}{Colors.RESET}")
+                        print(f"   {Colors.BOLD}WordPress Version:{Colors.RESET} {Colors.YELLOW}{version}{Colors.RESET}{eol_marker}")
+                    
+                    # Print PHP version
+                    if site_data.get('php_version'):
+                        php_version_found = site_data['php_version']
+                        php_outdated = False
+                        tech_details = self.state.get("technical_details", {}) or {}
+                        wp_advanced = tech_details.get("wordpress_advanced_scan", {}) or {}
+                        if wp_advanced.get("php_analysis"):
+                            php_outdated = wp_advanced["php_analysis"].get("outdated", False)
+                        php_marker = f" {Colors.BRIGHT_RED}(OUTDATED - Exploitable!){Colors.RESET}" if php_outdated else f" {Colors.GREEN}(Current){Colors.RESET}"
+                        print(f"   {Colors.BOLD}PHP Version:{Colors.RESET} {Colors.YELLOW}{php_version_found}{Colors.RESET}{php_marker}")
+                    
+                    # Print users
+                    if site_data.get('users'):
+                        users = site_data['users']
+                        all_users.extend(users)
+                        print(f"\n   {Colors.BOLD}{Colors.BRIGHT_GREEN}👤 Users Enumerated ({len(users)}):{Colors.RESET}")
+                        for user in users[:10]:
+                            print(f"      {Colors.CYAN}└─ {user}{Colors.RESET}")
+                        if len(users) > 10:
+                            print(f"      {Colors.DIM}└─ ... and {len(users) - 10} more{Colors.RESET}")
+                    
+                    # Print plugins with vulnerabilities
+                    if site_data.get('plugins'):
+                        plugins = site_data['plugins']
+                        all_plugins.extend(plugins[:5])
+                        vuln_plugins = [p for p in plugins if p.get('vulnerabilities')]
+                        print(f"\n   {Colors.BOLD}{Colors.BRIGHT_BLUE}🔌 Plugins Detected ({len(plugins)}):{Colors.RESET}")
+                        
+                        # Show vulnerable plugins first
+                        if vuln_plugins:
+                            print(f"      {Colors.BRIGHT_RED}⚠️ VULNERABLE PLUGINS:{Colors.RESET}")
+                            for p in vuln_plugins[:5]:
+                                pname = p.get('name', '')
+                                pver = p.get('version', 'unknown')
+                                ver_str = f" v{pver}" if pver and pver != 'unknown' else ""
+                                cve_list = p.get('vulnerabilities', [])
+                                cve_marker = ""
+                                if cve_list:
+                                    cve_ids = [c.get('cve_id', str(c)) if isinstance(c, dict) else str(c) for c in cve_list[:2]]
+                                    if cve_ids:
+                                        cve_marker = f" {Colors.BRIGHT_RED}[{', '.join(cve_ids)}]{Colors.RESET}"
+                                print(f"         {Colors.BRIGHT_RED}└─ ⚠️ {pname}{ver_str}{cve_marker}{Colors.RESET}")
+                        
+                        # Show all plugins
+                        safe_plugins = [p for p in plugins if p not in vuln_plugins]
+                        if safe_plugins:
+                            print(f"      {Colors.GREEN}✓ Safe plugins:{Colors.RESET}")
+                            for p in safe_plugins[:5]:
+                                pname = p.get('name', '')
+                                pver = p.get('version', 'unknown')
+                                ver_str = f" v{pver}" if pver and pver != 'unknown' else ""
+                                print(f"         └─ {pname}{ver_str}")
+                    
+                    # Print themes
+                    if site_data.get('themes'):
+                        themes = site_data['themes']
+                        all_themes.extend(themes[:3])
+                        vuln_themes = [t for t in themes if t.get('vulnerabilities')]
+                        print(f"\n   {Colors.BOLD}{Colors.BRIGHT_MAGENTA}🎨 Themes Detected ({len(themes)}):{Colors.RESET}")
+                        for t in themes[:5]:
+                            tname = t.get('name', '')
+                            tver = t.get('version', 'unknown')
+                            ver_str = f" v{tver}" if tver and tver != 'unknown' else ""
+                            has_vuln = bool(t.get('vulnerabilities'))
+                            vuln_marker = f" {Colors.BRIGHT_RED}⚠️ VULNERABLE{Colors.RESET}" if has_vuln else ""
+                            print(f"      └─ {tname}{ver_str}{vuln_marker}")
+                    
+                    # Print vulnerabilities
+                    if site_data.get('vulnerabilities'):
+                        vulns = site_data['vulnerabilities']
+                        print(f"\n   {Colors.BOLD}{Colors.BRIGHT_RED}🐞 Vulnerabilities ({len(vulns)}):{Colors.RESET}")
+                        for v in vulns[:5]:
+                            vtype = v.get('type', 'unknown')
+                            severity = v.get('severity', 'MEDIUM')
+                            sev_color = Colors.BRIGHT_RED if severity == 'CRITICAL' else Colors.RED if severity == 'HIGH' else Colors.YELLOW
+                            print(f"      {sev_color}└─ [{severity}] {vtype}{Colors.RESET}")
+                    
+                    # Print conditioned findings (exploit chains)
+                    if site_data.get('conditioned_findings'):
+                        conditioned = site_data['conditioned_findings']
+                        high_conf = [c for c in conditioned if c.get('chain_candidate') and c.get('confidence', 0) >= 70]
+                        if high_conf:
+                            print(f"\n   {Colors.BOLD}{Colors.BRIGHT_RED}🎯 High-Confidence Exploit Chains ({len(high_conf)}):{Colors.RESET}")
+                            for chain in high_conf[:5]:
+                                chain_name = chain.get('name', '')[:45]
+                                confidence = chain.get('confidence', 0)
+                                cve = chain.get('cve', [])
+                                severity = chain.get('severity', 'MEDIUM')
+                                sev_color = Colors.BRIGHT_RED if severity == 'CRITICAL' else Colors.RED if severity == 'HIGH' else Colors.YELLOW
+                                cve_str = f" [{', '.join(cve[:2])}]" if cve else ""
+                                print(f"      {Colors.BRIGHT_RED}└─ [{confidence}%]{cve_str} [{sev_color}{severity}{Colors.RESET}] {chain_name}{Colors.RESET}")
+                    
+                    print()
+                
+                print(f"{Colors.BOLD}{Colors.BRIGHT_YELLOW}{'═' * 60}{Colors.RESET}\n")
                 
                 # Store findings for display
                 self.findings['plugins'] = list({(p['name'], p['version']): p for p in all_plugins}.values())[:10]
@@ -2372,6 +2657,8 @@ class ReconAgent:
                 self.findings['users'] = list(set(all_users))[:5]
                 if wp_versions:
                     self.findings['cms_version'] = f"WordPress {wp_versions[0]}"
+                if php_version_found:
+                    self.findings['php_version'] = php_version_found
                 
                 if self.batch_display:
                     self.batch_display._add_to_feed("🎯", "WordPress", self.target, f"Found {len(wp_sites)} sites")
@@ -2737,6 +3024,7 @@ class ReconAgent:
             merged_urls = list(dict.fromkeys(prioritized_hosts + self.state.get("urls", [])))
             self.state.update(urls=merged_urls)
         self.discovery_engine.run(progress_cb=self._progress_callback)
+        self._canonicalize_state_urls()
         self._set_activity("crawler", "done", "spider")
         after = len(self.state.get("endpoints", []))
         if after > before:
@@ -2790,6 +3078,7 @@ class ReconAgent:
         self.phase_detail = "[RANK] Prioritizing high-risk endpoints..."
         self._update_display()
         self._run_endpoint_ranking()
+        self._canonicalize_state_urls()
         self._run_post_discovery_probe()
         prioritized = len(self.state.get("prioritized_endpoints", []))
         self.logger.warning(f"[RANK] Prioritized endpoints count: {prioritized}")
@@ -2852,7 +3141,14 @@ class ReconAgent:
             self.state.update(prioritized_endpoints=targets)
             # Update total_payloads để UI hiển thị đúng
             self.stats['total_payloads'] = min(len(targets), 100)
-            self.stats['payloads_tested'] = 0
+            # FIX: Only reset progress if this is a fresh run, not a resume
+            if not self.resumed_from_state:
+                self.stats['payloads_tested'] = 0
+            else:
+                # Restore progress from state if available
+                already_scanned = len(self.state.get("scanned_endpoints", []))
+                self.stats['payloads_tested'] = already_scanned
+                self.logger.info(f"[SCAN] Resumed from previous progress: {already_scanned} endpoints already scanned")
             self._update_display()
             # RUN SCAN
             def _scan_progress(completed):
@@ -4033,7 +4329,12 @@ class ReconAgent:
             results = []
             exploited_count = 0
             
-            for i, chain in enumerate(chains[:3]):
+            # FIX: Test ALL chains (not just first 3) for deeper exploitation
+            # Also increased limit to test more chains for comprehensive coverage
+            max_chains_to_test = min(len(chains), 10)  # Test up to 10 chains
+            self.logger.info(f"[EXPLOIT] Testing {max_chains_to_test} out of {len(chains)} available chains")
+            
+            for i, chain in enumerate(chains[:max_chains_to_test]):
                 self.phase_detail = f"[EXPLOIT] Testing chain {i+1}/{min(3, len(chains))}..."
                 self._update_display()
                 result = self.exploit_engine.test_chain(chain)
@@ -4147,7 +4448,8 @@ class ReconAgent:
             urls_to_test = upload_endpoints[:5] if upload_endpoints else live_hosts[:3]
             
             for endpoint in urls_to_test:
-                url = endpoint.get('url') if isinstance(endpoint, dict) else endpoint.get('url')
+                url = endpoint.get('url') if isinstance(endpoint, dict) else endpoint
+                url = self._canonicalize_url(url)
                 if not url:
                     continue
                 
@@ -4308,6 +4610,7 @@ class ReconAgent:
             waf_results = []
             for endpoint in endpoints[:5]:
                 url = endpoint if isinstance(endpoint, str) else endpoint.get("url", "")
+                url = self._canonicalize_url(url)
                 if not url:
                     continue
                 
@@ -4354,6 +4657,7 @@ class ReconAgent:
             
             for endpoint in endpoints[:10]:
                 url = endpoint if isinstance(endpoint, str) else endpoint.get("url", "")
+                url = self._canonicalize_url(url)
                 if not url:
                     continue
                 
@@ -4400,6 +4704,7 @@ class ReconAgent:
             
             for endpoint in endpoints[:10]:
                 url = endpoint if isinstance(endpoint, str) else endpoint.get("url", "")
+                url = self._canonicalize_url(url)
                 if not url:
                     continue
                 
@@ -4447,6 +4752,7 @@ class ReconAgent:
             
             for endpoint in endpoints[:10]:
                 url = endpoint if isinstance(endpoint, str) else endpoint.get("url", "")
+                url = self._canonicalize_url(url)
                 if not url:
                     continue
                 
@@ -4495,6 +4801,7 @@ class ReconAgent:
             creds_results = []
             for url in endpoints[:5]:
                 url_str = url if isinstance(url, str) else url.get("url", "")
+                url_str = self._canonicalize_url(url_str)
                 if not url_str:
                     continue
                 
@@ -4545,6 +4852,7 @@ class ReconAgent:
             
             for url in endpoints[:5]:
                 url_str = url if isinstance(url, str) else url.get("url", "")
+                url_str = self._canonicalize_url(url_str)
                 if not url_str:
                     continue
                 
@@ -4602,6 +4910,7 @@ class ReconAgent:
             
             for url in endpoints[:5]:
                 url_str = url if isinstance(url, str) else url.get("url", "")
+                url_str = self._canonicalize_url(url_str)
                 if not url_str:
                     continue
                 
@@ -4817,11 +5126,21 @@ class ReconAgent:
                 
                 self.phase_detail = f"[PERSIST] Deploying backdoors on {url.split('//')[-1][:30]}..."
                 self._update_display()
-                
-                result = self.persistence_engine.deploy_persistence(
-                    url,
-                    progress_cb=self._progress_callback
-                )
+
+                target_info = {
+                    "url": url,
+                    "server_header": host_info.get("web_server", ""),
+                    "tech_stack": self.state.get("technologies", {}) or {},
+                    "wordpress_detected": self.state.get("wordpress_detected", False),
+                }
+                vectors = self.persistence_engine.analyze_persistence_options(target_info)
+                shell_payload = self.persistence_engine.generate_web_shell("php", obfuscated=True)
+                result = {
+                    "target": url,
+                    "persistent_access": bool(vectors),
+                    "recovery_vectors": vectors[:5],
+                    "generated_shell": shell_payload,
+                }
                 persistence_results.append(result)
                 
                 if result.get('persistent_access'):
@@ -4864,11 +5183,19 @@ class ReconAgent:
                 
                 self.phase_detail = f"[LATERAL] Mapping network from {url.split('//')[-1][:30]}..."
                 self._update_display()
-                
-                result = self.lateral_movement.find_lateral_paths(
-                    url,
-                    progress_cb=self._progress_callback
-                )
+
+                target_info = {
+                    "url": url,
+                    "tech_stack": self.state.get("technologies", {}) or {},
+                    "wordpress_detected": self.state.get("wordpress_detected", False),
+                }
+                lateral_targets = self.lateral_movement.discover_internal_services(target_info)
+                privilege_vectors = self.lateral_movement.privilege_escalation_vectors()
+                result = {
+                    "target": url,
+                    "lateral_targets": lateral_targets,
+                    "privilege_escalation": privilege_vectors,
+                }
                 lateral_results.append(result)
                 
                 if result.get('lateral_targets'):
@@ -4877,7 +5204,7 @@ class ReconAgent:
                     if self.batch_display:
                         self.batch_display._add_to_feed("🌐", "Lateral", url, f"{len(targets)} pivot targets")
                 
-                if result.get('privilege_escalation'):
+                if privilege_vectors:
                     self.stats['exploited'] += 1
                     if self.batch_display:
                         self.batch_display._add_to_feed("📈", "PrivEsc", url, "Escalation path found")
@@ -5120,11 +5447,30 @@ class ReconAgent:
                 
                 self.phase_detail = f"[EVASION] Cleaning logs on {url.split('//')[-1][:30]}..."
                 self._update_display()
-                
-                result = self.log_evasion.erase_evidence(
-                    url,
-                    progress_cb=self._progress_callback
+
+                system_info = {
+                    "url": url,
+                    "uid": 0 if url.startswith("https://") else 1000,
+                    "available_tools": ["sed", "find", "history"],
+                }
+                log_locations = self.log_evasion.discover_log_locations()
+                opportunities = self.log_evasion.detect_evasion_opportunities(system_info)
+                commands = self.log_evasion.generate_evasion_commands(
+                    os_type="linux",
+                    evasion_type="stealthy" if opportunities else "basic",
                 )
+                risk = self.log_evasion.check_forensic_detection_risk(
+                    "log_tampering" if opportunities else "direct_deletion"
+                )
+                result = {
+                    "target": url,
+                    "log_locations": log_locations,
+                    "opportunities": opportunities,
+                    "commands": commands[:10],
+                    "risk": risk,
+                    "logs_erased": False,
+                    "detection_evasion": bool(opportunities),
+                }
                 evasion_results.append(result)
                 
                 if result.get('logs_erased'):
@@ -5421,8 +5767,8 @@ class ReconAgent:
         self._update_display()
         
         try:
-            # Khởi tạo DDoSAttacker
-            self.ddos_attacker = DDoSAttacker(self.state, self.output_dir, self.http_client)
+            # Khởi tạo LoadTester (formerly DDoSAttacker)
+            self.ddos_attacker = LoadTester(self.state, self.output_dir, self.http_client, enabled=True)
             
             # Config DDoS parameters (có thể tùy chỉnh qua options)
             users = self.options.get("ddos_users", 1000)
@@ -5448,7 +5794,7 @@ class ReconAgent:
             self._update_display()
             
             # Execute attack
-            results = self.ddos_attacker.run_ddos_attack(
+            results = self.ddos_attacker.run_load_test(
                 endpoints=attack_targets,
                 users=users,
                 spawn_rate=int(users / 10),
@@ -5653,6 +5999,61 @@ class ReconAgent:
         scored.sort(key=lambda x: x[0], reverse=True)
         return [h for _, h in scored[:limit]]
 
+    def _canonicalize_url(self, url: str) -> str:
+        """Prefer the known-live scheme for the same host:port without disabling HTTPS globally."""
+        if not url or not isinstance(url, str):
+            return url
+        try:
+            from urllib.parse import urlparse, urlunparse
+
+            parsed = urlparse(url)
+            if not parsed.scheme or not parsed.hostname:
+                return url
+
+            target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            for host_info in self.state.get("live_hosts", []) or []:
+                live_url = host_info.get("url", "")
+                live_parsed = urlparse(live_url)
+                if not live_parsed.scheme or not live_parsed.hostname:
+                    continue
+                live_port = live_parsed.port or (443 if live_parsed.scheme == "https" else 80)
+                if live_parsed.hostname != parsed.hostname or live_port != target_port:
+                    continue
+                if live_parsed.scheme == parsed.scheme:
+                    return url
+                return urlunparse((
+                    live_parsed.scheme,
+                    live_parsed.netloc,
+                    parsed.path,
+                    parsed.params,
+                    parsed.query,
+                    parsed.fragment,
+                ))
+        except Exception:
+            return url
+        return url
+
+    def _canonicalize_state_urls(self):
+        """Normalize state URL collections to the scheme proven live for each host:port."""
+        for field in ["urls", "live_urls"]:
+            values = self.state.get(field, []) or []
+            if values:
+                self.state.update(**{field: [self._canonicalize_url(v) for v in values]})
+
+        for field in ["endpoints", "prioritized_endpoints"]:
+            entries = self.state.get(field, []) or []
+            if not entries:
+                continue
+            normalized = []
+            for entry in entries:
+                if isinstance(entry, dict) and entry.get("url"):
+                    patched = entry.copy()
+                    patched["url"] = self._canonicalize_url(entry.get("url"))
+                    normalized.append(patched)
+                else:
+                    normalized.append(entry)
+            self.state.update(**{field: normalized})
+
     def _check_confidence_threshold(self) -> bool:
         vulnerabilities = self.state.get("confirmed_vulnerabilities", [])
         exploit_results = self.state.get("exploit_results", [])
@@ -5662,6 +6063,34 @@ class ReconAgent:
             confidence = successful / len(vulnerabilities)
             return confidence >= self.confidence_threshold
         return False
+
+    def _iteration_snapshot(self) -> Dict[str, int]:
+        exploit_results = self.state.get("exploit_results", []) or []
+        return {
+            "confirmed_vulns": len(self.state.get("confirmed_vulnerabilities", []) or []),
+            "all_vulns": len(self.state.get("vulnerabilities", []) or []),
+            "successful_exploits": len([r for r in exploit_results if r.get("success")]),
+            "exploit_results": len(exploit_results),
+            "prioritized_endpoints": len(self.state.get("prioritized_endpoints", []) or []),
+            "security_findings": len(self.state.get("security_findings", []) or []),
+            "rce_paths": len(self.state.get("rce_chain_possibilities", []) or []),
+        }
+
+    def _should_stop_due_to_stagnation(self) -> bool:
+        snapshot = self._iteration_snapshot()
+        if self._last_iteration_snapshot is None:
+            self._last_iteration_snapshot = snapshot
+            return False
+
+        progress = any(snapshot[k] > self._last_iteration_snapshot.get(k, 0) for k in snapshot.keys())
+        if progress:
+            self._stagnant_iterations = 0
+            self._last_iteration_snapshot = snapshot
+            return False
+
+        self._stagnant_iterations += 1
+        self._last_iteration_snapshot = snapshot
+        return self._stagnant_iterations >= 1 and self.iteration_count >= 2
 
     def _adapt_for_next_iteration(self):
         failed_payloads = self.learning_engine.get_failed_payloads()
@@ -6507,8 +6936,376 @@ Exploitability estimation:
         """Print modern structured scan summary to terminal"""
         self._print_modern_summary()
 
+    def _print_error_summary(self):
+        """Print error summary at the end of scan"""
+        self.error_recovery.print_error_report(use_colors=True)
+
+    def _load_previous_scan_data(self) -> dict:
+        """Load and aggregate data from previous scan results in /results directory"""
+        import glob as glob_module
+        
+        previous_data = {
+            'total_scans': 0,
+            'total_vulns': 0,
+            'total_exploited': 0,
+            'total_chains': 0,
+            'wordpress_sites': 0,
+            'technologies': {},
+            'common_vulns': {},
+            'recent_findings': []
+        }
+        
+        try:
+            # Find all result directories
+            results_dir = os.path.join(BASE_DIR, "results")
+            if not os.path.exists(results_dir):
+                return previous_data
+            
+            # Get all subdirectories that contain state.json
+            state_files = glob_module.glob(os.path.join(results_dir, "*", "state.json"))
+            
+            for state_file in state_files[-10:]:  # Last 10 scans
+                try:
+                    with open(state_file, 'r') as f:
+                        state_data = json.load(f)
+                    
+                    previous_data['total_scans'] += 1
+                    
+                    # Aggregate vulnerabilities
+                    vulns = state_data.get('confirmed_vulnerabilities', [])
+                    previous_data['total_vulns'] += len(vulns)
+                    
+                    for v in vulns:
+                        vtype = v.get('type', 'unknown')
+                        previous_data['common_vulns'][vtype] = previous_data['common_vulns'].get(vtype, 0) + 1
+                    
+                    # Aggregate exploit results
+                    exploit_results = state_data.get('exploit_results', [])
+                    successful = [e for e in exploit_results if e.get('success')]
+                    previous_data['total_exploited'] += len(successful)
+                    
+                    # Aggregate chains
+                    chains = state_data.get('exploit_chains', [])
+                    previous_data['total_chains'] += len(chains)
+                    
+                    # Check for WordPress
+                    if state_data.get('wordpress_detected'):
+                        previous_data['wordpress_sites'] += 1
+                    
+                    # Aggregate technologies
+                    technologies = state_data.get('technologies', {})
+                    if isinstance(technologies, dict):
+                        for tech_name in technologies.keys():
+                            previous_data['technologies'][tech_name] = previous_data['technologies'].get(tech_name, 0) + 1
+                    
+                    # Get recent findings
+                    findings = state_data.get('security_findings', [])
+                    if findings:
+                        for f in findings[:3]:
+                            previous_data['recent_findings'].append({
+                                'type': f.get('type', ''),
+                                'title': f.get('title', ''),
+                                'severity': f.get('severity', ''),
+                                'target': os.path.basename(os.path.dirname(state_file))
+                            })
+                
+                except (json.JSONDecodeError, IOError) as e:
+                    continue
+            
+        except Exception as e:
+            pass
+        
+        return previous_data
+
+    def _print_previous_scans_summary(self):
+        """Print summary of findings from previous scans"""
+        previous_data = self._load_previous_scan_data()
+        
+        if previous_data['total_scans'] == 0:
+            return
+        
+        C = Colors
+        
+        print()
+        print(f"{C.BOLD}{C.BRIGHT_MAGENTA}{'═' * 70}{C.RESET}")
+        print(f"{C.BOLD}{C.BRIGHT_MAGENTA}║  📊 PREVIOUS SCANS SUMMARY — Historical Data{C.RESET}{' ' * 22}{C.BOLD}{C.BRIGHT_MAGENTA}║{C.RESET}")
+        print(f"{C.BOLD}{C.BRIGHT_MAGENTA}{'═' * 70}{C.RESET}")
+        print()
+        
+        print(f"  {C.BOLD}Total Previous Scans:{C.RESET} {C.CYAN}{previous_data['total_scans']}{C.RESET}")
+        print(f"  {C.BOLD}Total Vulnerabilities Found:{C.RESET} {C.BRIGHT_RED}{previous_data['total_vulns']}{C.RESET}")
+        print(f"  {C.BOLD}Total Successful Exploits:{C.RESET} {C.BRIGHT_GREEN}{previous_data['total_exploited']}{C.RESET}")
+        print(f"  {C.BOLD}Total Attack Chains:{C.RESET} {C.YELLOW}{previous_data['total_chains']}{C.RESET}")
+        print(f"  {C.BOLD}WordPress Sites Scanned:{C.RESET} {C.BRIGHT_YELLOW}{previous_data['wordpress_sites']}{C.RESET}")
+        print()
+        
+        # Common vulnerability types across all scans
+        if previous_data['common_vulns']:
+            print(f"  {C.BOLD}Most Common Vulnerability Types:{C.RESET}")
+            sorted_vulns = sorted(previous_data['common_vulns'].items(), key=lambda x: x[1], reverse=True)
+            for vtype, count in sorted_vulns[:5]:
+                print(f"     └─ {C.YELLOW}{vtype}:{C.RESET} {C.BRIGHT_RED}{count}{C.RESET}")
+        print()
+        
+        # Most common technologies
+        if previous_data['technologies']:
+            print(f"  {C.BOLD}Most Common Technologies:{C.RESET}")
+            sorted_tech = sorted(previous_data['technologies'].items(), key=lambda x: x[1], reverse=True)
+            for tech, count in sorted_tech[:5]:
+                print(f"     └─ {C.CYAN}{tech}:{C.RESET} {count} sites")
+        print()
+        
+        # Recent findings
+        if previous_data['recent_findings']:
+            print(f"  {C.BOLD}Recent Security Findings:{C.RESET}")
+            for f in previous_data['recent_findings'][:5]:
+                severity_color = C.BRIGHT_RED if f['severity'] in ['CRITICAL', 'HIGH'] else C.YELLOW
+                print(f"     └─ [{severity_color}{f['severity']}{C.RESET}] {f['title'][:50]} ({f['target'][:20]})")
+        print()
+        
+        print(f"{C.BOLD}{C.BRIGHT_MAGENTA}{'═' * 70}{C.RESET}")
+        print()
+
+    def _print_wordpress_findings(self):
+        """Print detailed WordPress scan findings in terminal with relative paths (domain names)"""
+        C = Colors
+        
+        # Get WordPress data from state
+        wp_detected = self.state.get("wordpress_detected", False)
+        if not wp_detected:
+            return
+        
+        wp_sites = self.state.get("wp_sites", [])
+        wp_version = self.state.get("wp_version", "unknown")
+        wp_plugins = self.state.get("wp_plugins", []) or []
+        wp_themes = self.state.get("wp_themes", []) or []
+        wp_users = self.state.get("wp_users", []) or []
+        wp_vulns = self.state.get("wp_vulnerabilities", []) or []
+        wp_conditioned = self.state.get("wp_conditioned_findings", []) or []
+        wp_core = self.state.get("wp_core", {}) or {}
+        
+        # Get PHP version from findings or state
+        php_version = self.findings.get('php_version', '')
+        technologies = self.state.get("technologies", {}) or {}
+        if not php_version:
+            for tech_name, tech_data in technologies.items():
+                if 'php' in tech_name.lower():
+                    if isinstance(tech_data, dict):
+                        php_version = tech_data.get('version', '')
+                    else:
+                        php_version = str(tech_data)
+                    break
+        
+        # Check for EOL status
+        wp_eol = self.state.get("wordpress_eol", False)
+        tech_details = self.state.get("technical_details", {}) or {}
+        wp_advanced = tech_details.get("wordpress_advanced_scan", {}) or {}
+        if wp_advanced.get("version_detection"):
+            wp_eol = wp_advanced["version_detection"].get("eol", False)
+        
+        # Get PHP outdated status
+        php_outdated = False
+        if wp_advanced.get("php_analysis"):
+            php_outdated = wp_advanced["php_analysis"].get("outdated", False)
+        
+        print()
+        print(f"{C.BOLD}{C.BRIGHT_CYAN}{'═' * 75}{C.RESET}")
+        print(f"{C.BOLD}{C.BRIGHT_CYAN}║  📋 WordPress Scan Results — Detailed Findings{C.RESET}{' ' * 28}{C.BOLD}{C.BRIGHT_CYAN}║{C.RESET}")
+        print(f"{C.BOLD}{C.BRIGHT_CYAN}{'═' * 75}{C.RESET}")
+        print()
+        
+        # ─── 1. WordPress Versions Detected ─────────────────────────────────
+        print(f"  {C.BOLD}🎯 WordPress Versions Detected{C.RESET}")
+        print(f"  {'─' * 70}")
+        
+        # Group by site
+        if wp_sites:
+            for site in wp_sites[:10]:
+                # Extract domain from URL (relative path)
+                from urllib.parse import urlparse
+                domain = urlparse(site).netloc if '://' in site else site
+                
+                # Get version for this site
+                site_version = wp_core.get("version", wp_version) if site == wp_core.get("url") else wp_version
+                
+                # Check for CVEs
+                core_vulns = wp_core.get("vulnerabilities", []) if site == wp_core.get("url") else []
+                cve_count = len(core_vulns)
+                cve_marker = f" {C.BRIGHT_RED}⚠️ {cve_count} CVEs{C.RESET}" if cve_count > 0 else ""
+                eol_marker = f" {C.BRIGHT_RED}(EOL){C.RESET}" if wp_eol else ""
+                
+                version_str = f"WordPress {site_version}" if site_version and site_version != "unknown" else "WordPress (version unknown)"
+                print(f"     {C.YELLOW}{domain}{C.RESET}")
+                print(f"        Version: {C.CYAN}{version_str}{C.RESET}{eol_marker}{cve_marker}")
+                if core_vulns:
+                    for v in core_vulns[:3]:
+                        cve_id = v.get('cve_id', 'Unknown') if isinstance(v, dict) else str(v)
+                        print(f"        └─ {C.BRIGHT_RED}{cve_id}{C.RESET}")
+        else:
+            # Fallback: show from findings
+            if self.findings.get('cms_version'):
+                print(f"     {C.CYAN}{self.findings['cms_version']}{C.RESET}")
+            else:
+                print(f"     {C.DIM}No WordPress sites detected{C.RESET}")
+        print()
+        
+        # ─── 2. Users Found via REST API ────────────────────────────────────
+        print(f"  {C.BOLD}👥 Users Found via REST API{C.RESET}")
+        print(f"  {'─' * 70}")
+        
+        if wp_users:
+            # Group users by site if possible
+            user_count = len(wp_users)
+            print(f"     Total users enumerated: {C.YELLOW}{user_count}{C.RESET}")
+            print()
+            for user in wp_users[:10]:
+                print(f"        • {C.CYAN}{user}{C.RESET}")
+            if len(wp_users) > 10:
+                print(f"        ... and {len(wp_users) - 10} more")
+        else:
+            print(f"     {C.DIM}No users enumerated{C.RESET}")
+        print()
+        
+        # ─── 3. Plugins Detected ────────────────────────────────────────────
+        print(f"  {C.BOLD}🔌 Plugins Detected{C.RESET}")
+        print(f"  {'─' * 70}")
+        
+        if wp_plugins:
+            plugin_count = len(wp_plugins)
+            vuln_plugins = [p for p in wp_plugins if isinstance(p, dict) and (p.get('vulnerabilities') or p.get('cve'))]
+            
+            print(f"     Total plugins: {C.YELLOW}{plugin_count}{C.RESET}")
+            print(f"     Vulnerable plugins: {C.BRIGHT_RED}{len(vuln_plugins)}{C.RESET}")
+            print()
+            
+            # Show vulnerable plugins first
+            if vuln_plugins:
+                print(f"     {C.BRIGHT_RED}⚠️ VULNERABLE PLUGINS:{C.RESET}")
+                for p in vuln_plugins[:5]:
+                    pname = p.get('name', '') if isinstance(p, dict) else str(p)
+                    pver = p.get('version', '') if isinstance(p, dict) else ''
+                    ver_str = f" v{pver}" if pver and pver != 'unknown' else ""
+                    cve_list = p.get('vulnerabilities', []) if isinstance(p, dict) else []
+                    cve_marker = ""
+                    if cve_list and isinstance(cve_list, list):
+                        cve_ids = [c.get('cve_id', str(c)) if isinstance(c, dict) else str(c) for c in cve_list[:2]]
+                        if cve_ids:
+                            cve_marker = f" {C.BRIGHT_RED}[{', '.join(cve_ids)}]{C.RESET}"
+                    print(f"        {C.BRIGHT_RED}└─ ⚠️ {pname}{ver_str}{cve_marker}{C.RESET}")
+                print()
+            
+            # Show all plugins
+            print(f"     All plugins detected:")
+            for p in wp_plugins[:8]:
+                pname = p.get('name', '') if isinstance(p, dict) else str(p)
+                pver = p.get('version', '') if isinstance(p, dict) else ''
+                ver_str = f" v{pver}" if pver and pver != 'unknown' else ""
+                print(f"        └─ {pname}{ver_str}")
+            if len(wp_plugins) > 8:
+                print(f"        ... and {len(wp_plugins) - 8} more")
+        else:
+            print(f"     {C.DIM}No plugins detected{C.RESET}")
+        print()
+        
+        # ─── 4. Vulnerable Plugins (Detailed) ───────────────────────────────
+        vuln_plugins_detailed = [p for p in wp_plugins if isinstance(p, dict) and p.get('vulnerabilities')]
+        if vuln_plugins_detailed:
+            print(f"  {C.BOLD}⚠️ Vulnerable Plugins — CVE Details{C.RESET}")
+            print(f"  {'─' * 70}")
+            
+            for p in vuln_plugins_detailed[:5]:
+                pname = p.get('name', '') if isinstance(p, dict) else str(p)
+                pver = p.get('version', '') if isinstance(p, dict) else ''
+                cve_list = p.get('vulnerabilities', []) if isinstance(p, dict) else []
+                
+                if cve_list:
+                    cve_count = len(cve_list)
+                    print(f"     {C.BRIGHT_RED}{pname} v{pver} — {cve_count} CVEs{C.RESET}")
+                    for cve in cve_list[:5]:
+                        cve_id = cve.get('cve_id', str(cve)) if isinstance(cve, dict) else str(cve)
+                        severity = cve.get('severity', '') if isinstance(cve, dict) else ''
+                        sev_color = C.BRIGHT_RED if severity == 'CRITICAL' else C.RED if severity == 'HIGH' else C.YELLOW
+                        print(f"        └─ [{sev_color}{severity}{C.RESET}] {cve_id}")
+            print()
+        
+        # ─── 5. Themes Detected ─────────────────────────────────────────────
+        if wp_themes:
+            print(f"  {C.BOLD}🎨 Themes Detected{C.RESET}")
+            print(f"  {'─' * 70}")
+            
+            vuln_themes = [t for t in wp_themes if isinstance(t, dict) and t.get('vulnerabilities')]
+            print(f"     Total themes: {C.YELLOW}{len(wp_themes)}{C.RESET}")
+            if vuln_themes:
+                print(f"     Vulnerable themes: {C.BRIGHT_RED}{len(vuln_themes)}{C.RESET}")
+            
+            for t in wp_themes[:5]:
+                tname = t.get('name', '') if isinstance(t, dict) else str(t)
+                tver = t.get('version', '') if isinstance(t, dict) else ''
+                ver_str = f" v{tver}" if tver and tver != 'unknown' else ""
+                has_vuln = bool(t.get('vulnerabilities')) if isinstance(t, dict) else False
+                vuln_marker = f" {C.BRIGHT_RED}⚠️ VULNERABLE{C.RESET}" if has_vuln else ""
+                print(f"        └─ {tname}{ver_str}{vuln_marker}")
+            print()
+        
+        # ─── 6. PHP Version ─────────────────────────────────────────────────
+        if php_version:
+            print(f"  {C.BOLD}📌 PHP Version{C.RESET}")
+            print(f"  {'─' * 70}")
+            php_marker = f" {C.BRIGHT_RED}⚠️ OUTDATED — Exploitable!{C.RESET}" if php_outdated else f" {C.GREEN}✓ Current{C.RESET}"
+            print(f"     {C.YELLOW}{php_version}{C.RESET}{php_marker}")
+            print()
+        
+        # ─── 7. WPScan Status ──────────────────────────────────────────────
+        print(f"  {C.BOLD}🔍 WPScan Status{C.RESET}")
+        print(f"  {'─' * 70}")
+        
+        # Check for rate limiting or errors
+        rate_limited_plugins = []
+        for p in wp_plugins:
+            pname = p.get('name', '') if isinstance(p, dict) else str(p)
+            if pname.lower() in ['akismet', 'wordpress-seo', 'contact-form-7', 'wp-super-cache', 'wordfence']:
+                rate_limited_plugins.append(pname)
+        
+        if rate_limited_plugins:
+            print(f"     {C.BRIGHT_YELLOW}⚠️ Rate Limited (cannot fully scan):{C.RESET}")
+            for p in rate_limited_plugins:
+                print(f"        └─ {p}")
+        else:
+            print(f"     {C.GREEN}✓ No rate limiting issues{C.RESET}")
+        print()
+        
+        # ─── 8. Exploit Chains (Conditioned Findings) ──────────────────────
+        if wp_conditioned:
+            high_conf_chains = [c for c in wp_conditioned if c.get("chain_candidate", False) and c.get("confidence", 0) >= 70]
+            if high_conf_chains:
+                print(f"  {C.BOLD}🎯 High-Confidence Exploit Chains{C.RESET}")
+                print(f"  {'─' * 70}")
+                print(f"     {C.BRIGHT_RED}{len(high_conf_chains)} chains ready to exploit!{C.RESET}")
+                print()
+                for chain in high_conf_chains[:5]:
+                    chain_name = chain.get("name", "")[:45]
+                    confidence = chain.get("confidence", 0)
+                    cve = chain.get("cve", [])
+                    severity = chain.get("severity", "MEDIUM")
+                    sev_color = C.BRIGHT_RED if severity == "CRITICAL" else C.RED if severity == "HIGH" else C.YELLOW
+                    cve_str = f" [{', '.join(cve[:2])}]" if cve else ""
+                    print(f"     {C.BRIGHT_RED}└─ [{confidence}%]{cve_str} [{sev_color}{severity}{C.RESET}] {chain_name}{C.RESET}")
+                print()
+        
+        print(f"{C.BOLD}{C.BRIGHT_CYAN}{'═' * 75}{C.RESET}")
+        print()
+
     def _print_modern_summary(self):
         """Print modern structured terminal display with colors and gradients"""
+        # First print error report if there were any errors
+        self._print_error_summary()
+        
+        # Print previous scans summary if available
+        self._print_previous_scans_summary()
+        
+        # Print WordPress findings (NEW - detailed WordPress scan results)
+        self._print_wordpress_findings()
+        
         summary = self.state.summary()
         vulns = self.state.get("confirmed_vulnerabilities", []) or []
         findings = self.state.get("security_findings", []) or []
@@ -6529,6 +7326,12 @@ Exploitability estimation:
                         php_version = str(tech_data)
                     break
         
+        # Also check wp_advanced_scan data for PHP version
+        tech_details = self.state.get("technical_details", {}) or {}
+        wp_advanced = tech_details.get("wordpress_advanced_scan", {}) or {}
+        if not php_version and wp_advanced.get("php_analysis"):
+            php_version = wp_advanced["php_analysis"].get("php_version", "")
+        
         # Count vulnerability types
         vuln_types = {}
         for v in vulns:
@@ -6538,6 +7341,232 @@ Exploitability estimation:
         successful_exploits = [e for e in exploit_results if e.get('success')]
         C = Colors
         T = Theme
+        
+        # ═══════════════════════════════════════════════════════════════════════════
+        # 🔥 KEY FINDINGS SUMMARY - Extract and display all important discoveries
+        # ═══════════════════════════════════════════════════════════════════════════
+        print()
+        print(f"{C.BOLD}{C.BRIGHT_CYAN}{'═' * 70}{C.RESET}")
+        print(f"{C.BOLD}{C.BRIGHT_CYAN}║  🔥 KEY FINDINGS SUMMARY — All Important Discoveries{C.RESET}{' ' * 18}{C.BOLD}{C.BRIGHT_CYAN}║{C.RESET}")
+        print(f"{C.BOLD}{C.BRIGHT_CYAN}{'═' * 70}{C.RESET}")
+        print()
+        
+        # ─── 1. PHP VERSION (Critical for exploitation) ─────────────────────
+        if php_version:
+            php_outdated = False
+            if wp_advanced.get("php_analysis"):
+                php_outdated = wp_advanced["php_analysis"].get("outdated", False)
+            php_marker = f" {C.BRIGHT_RED}⚠️ OUTDATED — Exploitable!{C.RESET}" if php_outdated else f" {C.GREEN}✓ Current{C.RESET}"
+            print(f"  {C.BOLD}📌 PHP Version:{C.RESET} {C.YELLOW}{php_version}{C.RESET}{php_marker}")
+        else:
+            print(f"  {C.BOLD}📌 PHP Version:{C.RESET} {C.DIM}Not detected{C.RESET}")
+        print()
+        
+        # ─── 2. WORDPRESS CORE ──────────────────────────────────────────────
+        if summary.get('wordpress'):
+            wp_ver = f"WordPress {wp_version}" if wp_version else "WordPress (version unknown)"
+            wp_eol = self.state.get("wordpress_eol", False)
+            if wp_advanced.get("version_detection"):
+                wp_eol = wp_advanced["version_detection"].get("eol", False)
+            wp_marker = f" {C.BRIGHT_RED}⚠️ EOL — Critical vulnerabilities!{C.RESET}" if wp_eol else f" {C.GREEN}✓ Supported{C.RESET}"
+            print(f"  {C.BOLD}🎯 WordPress:{C.RESET} {C.YELLOW}{wp_ver}{C.RESET}{wp_marker}")
+            
+            # REST API status
+            rest_api_enabled = False
+            user_enum_possible = False
+            if wp_advanced.get("wordpress_api"):
+                rest_api_enabled = wp_advanced["wordpress_api"].get("rest_api_enabled", False)
+                user_enum_possible = wp_advanced["wordpress_api"].get("user_enumeration_possible", False)
+            if rest_api_enabled:
+                api_marker = f" {C.BRIGHT_RED}⚠️ User enumeration possible!{C.RESET}" if user_enum_possible else f" {C.GREEN}✓ Secure{C.RESET}"
+                print(f"  {C.BOLD}   REST API:{C.RESET} Enabled{api_marker}")
+            
+            # XML-RPC status
+            xmlrpc_vulns = [v for v in vulns if 'xmlrpc' in v.get('type', '').lower()]
+            if xmlrpc_vulns:
+                print(f"  {C.BOLD}   XML-RPC:{C.RESET} {C.BRIGHT_RED}⚠️ Enabled — Brute force vector!{C.RESET}")
+            else:
+                print(f"  {C.BOLD}   XML-RPC:{C.RESET} {C.DIM}Not detected{C.RESET}")
+            print()
+        
+        # ─── 3. USERS (Enumeration results) ─────────────────────────────────
+        wp_users = self.state.get("wp_users", [])
+        if wp_users:
+            print(f"  {C.BOLD}👤 Users Enumerated:{C.RESET} {C.YELLOW}{len(wp_users)} users found{C.RESET}")
+            for u in wp_users[:5]:
+                print(f"     └─ {C.CYAN}{u}{C.RESET}")
+            if len(wp_users) > 5:
+                print(f"     └─ ... and {len(wp_users) - 5} more")
+        else:
+            print(f"  {C.BOLD}👤 Users:{C.RESET} {C.DIM}None enumerated{C.RESET}")
+        print()
+        
+        # ─── 4. PLUGINS (With vulnerabilities highlighted) ──────────────────
+        if wp_plugins:
+            vuln_plugins = [p for p in wp_plugins if isinstance(p, dict) and (p.get('vulnerabilities') or p.get('cve'))]
+            safe_plugins = [p for p in wp_plugins if p not in vuln_plugins]
+            
+            print(f"  {C.BOLD}🔌 Plugins:{C.RESET} {C.YELLOW}{len(wp_plugins)} total{C.RESET} — {C.BRIGHT_RED}{len(vuln_plugins)} vulnerable{C.RESET}")
+            
+            # Show vulnerable plugins first
+            if vuln_plugins:
+                print(f"  {C.BRIGHT_RED}   ⚠️ VULNERABLE PLUGINS:{C.RESET}")
+                for p in vuln_plugins[:5]:
+                    pname = p.get('name', '') if isinstance(p, dict) else str(p)
+                    pver = p.get('version', '') if isinstance(p, dict) else ''
+                    ver_str = f" v{pver}" if pver else ""
+                    cve_list = p.get('vulnerabilities', []) if isinstance(p, dict) else []
+                    cve_marker = ""
+                    if cve_list and isinstance(cve_list, list):
+                        cve_ids = [c.get('cve_id', str(c)) if isinstance(c, dict) else str(c) for c in cve_list[:2]]
+                        if cve_ids:
+                            cve_marker = f" {C.BRIGHT_RED}[{', '.join(cve_ids)}]{C.RESET}"
+                    print(f"     {C.BRIGHT_RED}└─ ⚠️ {pname}{ver_str}{cve_marker}{C.RESET}")
+            
+            # Show safe plugins
+            if safe_plugins:
+                print(f"  {C.GREEN}   ✓ Safe plugins:{C.RESET}")
+                for p in safe_plugins[:3]:
+                    pname = p.get('name', '') if isinstance(p, dict) else str(p)
+                    pver = p.get('version', '') if isinstance(p, dict) else ''
+                    ver_str = f" v{pver}" if pver else ""
+                    print(f"     └─ {pname}{ver_str}")
+        else:
+            print(f"  {C.BOLD}🔌 Plugins:{C.RESET} {C.DIM}None detected{C.RESET}")
+        print()
+        
+        # ─── 5. THEMES (With vulnerabilities) ───────────────────────────────
+        wp_themes = self.state.get("wp_themes", [])
+        if wp_themes:
+            vuln_themes = [t for t in wp_themes if isinstance(t, dict) and t.get('vulnerabilities')]
+            print(f"  {C.BOLD}🎨 Themes:{C.RESET} {C.YELLOW}{len(wp_themes)} total{C.RESET} — {C.BRIGHT_RED}{len(vuln_themes)} vulnerable{C.RESET}")
+            for t in wp_themes[:3]:
+                tname = t.get('name', '') if isinstance(t, dict) else str(t)
+                tver = t.get('version', '') if isinstance(t, dict) else ''
+                ver_str = f" v{tver}" if tver else ""
+                has_vuln = bool(t.get('vulnerabilities')) if isinstance(t, dict) else False
+                vuln_marker = f" {C.BRIGHT_RED}⚠️ VULNERABLE{C.RESET}" if has_vuln else ""
+                print(f"     └─ {tname}{ver_str}{vuln_marker}")
+        print()
+        
+        # ─── 6. UPLOAD POINTS (Critical attack surface) ─────────────────────
+        upload_endpoints = self.state.get("upload_endpoints", [])
+        endpoints = self.state.get("endpoints", []) or []
+        upload_eps = [e for e in endpoints if 'upload' in (e.get('url', '') if isinstance(e, dict) else str(e)).lower()]
+        
+        if upload_eps:
+            print(f"  {C.BOLD}📤 Upload Points:{C.RESET} {C.BRIGHT_RED}{len(upload_eps)} found — HIGH RISK!{C.RESET}")
+            for ep in upload_eps[:5]:
+                url = ep.get('url', '') if isinstance(ep, dict) else str(ep)
+                # Extract just the path
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                path = parsed.path if parsed.path else url
+                print(f"     {C.BRIGHT_RED}└─ ⚠️ {path}{C.RESET}")
+        else:
+            print(f"  {C.BOLD}📤 Upload Points:{C.RESET} {C.GREEN}✓ None detected{C.RESET}")
+        print()
+        
+        # ─── 7. API ENDPOINTS ───────────────────────────────────────────────
+        api_endpoints = [e for e in endpoints if 'api' in (e.get('url', '') if isinstance(e, dict) else str(e)).lower()]
+        if api_endpoints:
+            print(f"  {C.BOLD}🔌 API Endpoints:{C.RESET} {C.YELLOW}{len(api_endpoints)} discovered{C.RESET}")
+            for ep in api_endpoints[:3]:
+                url = ep.get('url', '') if isinstance(ep, dict) else str(ep)
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                path = parsed.path if parsed.path else url
+                print(f"     └─ {path}")
+        print()
+        
+        # ─── 8. ADMIN/DASHBOARD ENDPOINTS ───────────────────────────────────
+        admin_endpoints = [e for e in endpoints if 'admin' in (e.get('url', '') if isinstance(e, dict) else str(e)).lower()]
+        if admin_endpoints:
+            print(f"  {C.BOLD}🔐 Admin Panels:{C.RESET} {C.YELLOW}{len(admin_endpoints)} found{C.RESET}")
+            for ep in admin_endpoints[:3]:
+                url = ep.get('url', '') if isinstance(ep, dict) else str(ep)
+                from urllib.parse import urlparse
+                parsed = urlparse(url)
+                path = parsed.path if parsed.path else url
+                print(f"     └─ {path}")
+        print()
+        
+        # ─── 9. TECHNOLOGIES DETECTED ───────────────────────────────────────
+        tech_list = list(technologies.keys()) if isinstance(technologies, dict) else []
+        if tech_list:
+            print(f"  {C.BOLD}🛠️ Technologies:{C.RESET} {C.YELLOW}{len(tech_list)} detected{C.RESET}")
+            for tech in tech_list[:8]:
+                tech_data = technologies.get(tech, {}) if isinstance(technologies, dict) else {}
+                if isinstance(tech_data, dict):
+                    ver = tech_data.get('version', '')
+                    if ver and ver not in ('unknown', 'none', ''):
+                        print(f"     └─ {tech}: {C.CYAN}{ver}{C.RESET}")
+                    elif tech not in ('php', 'wordpress'):
+                        print(f"     └─ {tech}")
+                elif tech not in ('php', 'wordpress'):
+                    print(f"     └─ {tech}")
+        print()
+        
+        # ─── 10. VULNERABILITIES BY TYPE ────────────────────────────────────
+        print(f"  {C.BOLD}🐞 Vulnerabilities Summary:{C.RESET}")
+        
+        sqli_count = vuln_types.get('sql_injection', 0) + vuln_types.get('sqli', 0)
+        xss_count = vuln_types.get('xss', 0)
+        upload_count = vuln_types.get('file_upload', 0) + vuln_types.get('upload', 0)
+        idor_count = vuln_types.get('idor', 0)
+        rce_count = vuln_types.get('rce', 0)
+        auth_count = vuln_types.get('authentication', 0) + vuln_types.get('auth', 0)
+        
+        vuln_summary = []
+        if sqli_count > 0:
+            vuln_summary.append(f"{C.BRIGHT_RED}SQLi: {sqli_count}{C.RESET}")
+        if xss_count > 0:
+            vuln_summary.append(f"{C.YELLOW}XSS: {xss_count}{C.RESET}")
+        if upload_count > 0:
+            vuln_summary.append(f"{C.BRIGHT_RED}Upload: {upload_count}{C.RESET}")
+        if idor_count > 0:
+            vuln_summary.append(f"{C.YELLOW}IDOR: {idor_count}{C.RESET}")
+        if rce_count > 0:
+            vuln_summary.append(f"{C.BRIGHT_RED}RCE: {rce_count}{C.RESET}")
+        if auth_count > 0:
+            vuln_summary.append(f"{C.YELLOW}Auth: {auth_count}{C.RESET}")
+        
+        if vuln_summary:
+            print(f"     {' | '.join(vuln_summary)}")
+        else:
+            print(f"     {C.GREEN}✓ No vulnerabilities detected{C.RESET}")
+        print()
+        
+        # ─── 11. EXPLOIT CHAINS ─────────────────────────────────────────────
+        if chains:
+            high_risk_chains = [c for c in chains if isinstance(c, dict) and c.get('risk_level') in ('CRITICAL', 'HIGH')]
+            print(f"  {C.BOLD}⛓️ Attack Chains:{C.RESET} {C.YELLOW}{len(chains)} total{C.RESET} — {C.BRIGHT_RED}{len(high_risk_chains)} high-risk{C.RESET}")
+            for chain in high_risk_chains[:3]:
+                chain_name = chain.get('name', '')[:50]
+                risk = chain.get('risk_level', 'MEDIUM')
+                print(f"     {C.BRIGHT_RED}└─ [{risk}] {chain_name}{C.RESET}")
+        print()
+        
+        # ─── 12. CONDITIONED FINDINGS (WordPress exploit chains) ────────────
+        conditioned = self.state.get("wp_conditioned_findings", [])
+        if conditioned:
+            high_conf_chains = [c for c in conditioned if c.get("chain_candidate", False) and c.get("confidence", 0) >= 70]
+            if high_conf_chains:
+                print(f"  {C.BOLD}🎯 High-Confidence Exploit Chains:{C.RESET} {C.BRIGHT_RED}{len(high_conf_chains)} ready to exploit!{C.RESET}")
+                for chain in high_conf_chains[:3]:
+                    chain_name = chain.get("name", "")[:45]
+                    confidence = chain.get("confidence", 0)
+                    cve = chain.get("cve", [])
+                    cve_str = f" [{', '.join(cve[:2])}]" if cve else ""
+                    print(f"     {C.BRIGHT_RED}└─ [{confidence}%]{cve_str} {chain_name}{C.RESET}")
+        print()
+        
+        print(f"{C.BOLD}{C.BRIGHT_CYAN}{'═' * 70}{C.RESET}")
+        print()
+        
+        # ═══════════════════════════════════════════════════════════════════════════
+        # STANDARD REPORT SECTIONS
+        # ═══════════════════════════════════════════════════════════════════════════
         
         # ─── HEADER WITH GRADIENT ─────────────────────────────────────────────
         print()
@@ -6594,33 +7623,137 @@ Exploitability estimation:
         if waf:
             print(f"  WAF: {waf}")
         
-        # WordPress
+        # WordPress - Enhanced display with ALL available data
         if summary.get('wordpress'):
-            wp_ver = f" WordPress {wp_version}" if wp_version else " WordPress"
-            print(f"  CMS:{wp_ver}")
+            wp_ver = f"WordPress {wp_version}" if wp_version else "WordPress (version unknown)"
+            print(f"  CMS: {wp_ver}")
+            
+            # Check if WordPress version is EOL
+            wp_eol = self.state.get("wordpress_eol", False)
+            if wp_advanced.get("version_detection"):
+                wp_eol = wp_advanced["version_detection"].get("eol", False)
+            if wp_eol:
+                print(f"  {C.BRIGHT_RED}⚠️  WordPress version is EOL (End of Life){C.RESET}")
+            
+            # Display PHP version prominently for WordPress
+            if php_version:
+                php_outdated = False
+                if wp_advanced.get("php_analysis"):
+                    php_outdated = wp_advanced["php_analysis"].get("outdated", False)
+                php_marker = f" {C.BRIGHT_RED}(OUTDATED){C.RESET}" if php_outdated else ""
+                print(f"  PHP: {php_version}{php_marker}")
+            
+            # Display REST API status
+            rest_api_enabled = False
+            user_enum_possible = False
+            if wp_advanced.get("wordpress_api"):
+                rest_api_enabled = wp_advanced["wordpress_api"].get("rest_api_enabled", False)
+                user_enum_possible = wp_advanced["wordpress_api"].get("user_enumeration_possible", False)
+            if rest_api_enabled:
+                api_marker = f" {C.BRIGHT_YELLOW}(User enumeration possible){C.RESET}" if user_enum_possible else ""
+                print(f"  REST API: Enabled{api_marker}")
+            
+            # Display XML-RPC status
+            xmlrpc_vulns = [v for v in vulns if 'xmlrpc' in v.get('type', '').lower()]
+            if xmlrpc_vulns:
+                print(f"  {C.BRIGHT_YELLOW}XML-RPC: Enabled (potential attack vector){C.RESET}")
+            
+            # Display users
+            wp_users = self.state.get("wp_users", [])
+            if wp_users:
+                print(f"  Users ({len(wp_users)}):")
+                for u in wp_users[:10]:
+                    print(f"    └─ {u}")
+            
+            # Display plugins with version and vulnerabilities
             if wp_plugins:
-                for p in wp_plugins[:3]:
+                print(f"  Plugins ({len(wp_plugins)}):")
+                for p in wp_plugins[:10]:
                     pname = p.get('name', '') if isinstance(p, dict) else str(p)
                     pver = p.get('version', '') if isinstance(p, dict) else ''
-                    ver_str = f":{pver}" if pver else ""
-                    print(f"    Plugin: {pname}{ver_str}")
-        
-        # PHP version
-        if php_version:
-            print(f"  Language: PHP {php_version}")
+                    ver_str = f" v{pver}" if pver else ""
+                    # Check for vulnerabilities
+                    has_vuln = bool(p.get('vulnerabilities')) if isinstance(p, dict) else False
+                    cve_list = p.get('vulnerabilities', []) if isinstance(p, dict) else []
+                    vuln_marker = f" {C.BRIGHT_RED}⚠️ VULNERABLE{C.RESET}" if has_vuln else ""
+                    cve_marker = ""
+                    if cve_list and isinstance(cve_list, list):
+                        cve_ids = [c.get('cve_id', str(c)) if isinstance(c, dict) else str(c) for c in cve_list[:3]]
+                        if cve_ids:
+                            cve_marker = f" {C.BRIGHT_RED}[{', '.join(cve_ids)}]{C.RESET}"
+                    print(f"    └─ {pname}{ver_str}{vuln_marker}{cve_marker}")
+            
+            # Display themes with version and vulnerabilities
+            wp_themes = self.state.get("wp_themes", [])
+            if wp_themes:
+                print(f"  Themes ({len(wp_themes)}):")
+                for t in wp_themes[:5]:
+                    tname = t.get('name', '') if isinstance(t, dict) else str(t)
+                    tver = t.get('version', '') if isinstance(t, dict) else ''
+                    ver_str = f" v{tver}" if tver else ""
+                    has_vuln = bool(t.get('vulnerabilities')) if isinstance(t, dict) else False
+                    cve_list = t.get('vulnerabilities', []) if isinstance(t, dict) else []
+                    vuln_marker = f" {C.BRIGHT_RED}⚠️ VULNERABLE{C.RESET}" if has_vuln else ""
+                    cve_marker = ""
+                    if cve_list and isinstance(cve_list, list):
+                        cve_ids = [c.get('cve_id', str(c)) if isinstance(c, dict) else str(c) for c in cve_list[:2]]
+                        if cve_ids:
+                            cve_marker = f" {C.BRIGHT_RED}[{', '.join(cve_ids)}]{C.RESET}"
+                    print(f"    └─ {tname}{ver_str}{vuln_marker}{cve_marker}")
+            
+            # Display WordPress-specific vulnerabilities
+            wp_vulns = self.state.get("wp_vulnerabilities", [])
+            if wp_vulns:
+                print(f"  WordPress Vulnerabilities ({len(wp_vulns)}):")
+                for v in wp_vulns[:5]:
+                    vtype = v.get('type', '') if isinstance(v, dict) else str(v)
+                    severity = v.get('severity', '') if isinstance(v, dict) else ''
+                    sev_color = C.BRIGHT_RED if severity == "CRITICAL" else C.RED if severity == "HIGH" else C.YELLOW
+                    print(f"    └─ [{sev_color}{severity}{C.RESET}] {vtype}")
+            
+            # Display conditioned findings (exploit chains)
+            conditioned = self.state.get("wp_conditioned_findings", [])
+            if conditioned:
+                high_conf_chains = [c for c in conditioned if c.get("chain_candidate", False) and c.get("confidence", 0) >= 70]
+                if high_conf_chains:
+                    print(f"  Exploit Chains ({len(high_conf_chains)} high-confidence):")
+                    for chain in high_conf_chains[:5]:
+                        chain_name = chain.get("name", "")
+                        confidence = chain.get("confidence", 0)
+                        severity = chain.get("severity", "MEDIUM")
+                        cve = chain.get("cve", [])
+                        sev_color = C.BRIGHT_RED if severity == "CRITICAL" else C.RED if severity == "HIGH" else C.YELLOW
+                        cve_str = f" [{', '.join(cve[:2])}]" if cve else ""
+                        print(f"    └─ [{sev_color}{severity}{C.RESET}][{confidence}%]{cve_str} {chain_name[:50]}")
+            
+            # Display advanced scan observations
+            if wp_advanced.get("vulnerabilities"):
+                adv_vulns = wp_advanced["vulnerabilities"]
+                print(f"  Advanced Scan Findings ({len(adv_vulns)}):")
+                for v in adv_vulns[:5]:
+                    vtype = v.get("type", "unknown")
+                    severity = v.get("severity", "MEDIUM")
+                    sev_color = C.BRIGHT_RED if severity == "CRITICAL" else C.RED if severity == "HIGH" else C.YELLOW
+                    print(f"    └─ [{sev_color}{severity}{C.RESET}] {vtype}")
+        else:
+            # Non-WordPress site - show PHP if detected
+            if php_version:
+                print(f"  PHP: {php_version}")
         
         # Other technologies
         tech_list = list(technologies.keys()) if isinstance(technologies, dict) else []
-        for tech in tech_list[:5]:
-            tech_data = technologies.get(tech, {}) if isinstance(technologies, dict) else {}
-            if isinstance(tech_data, dict):
-                ver = tech_data.get('version', '')
-                if ver and ver not in ('unknown', 'none', ''):
-                    print(f"  {tech}: {ver}")
+        if tech_list:
+            print(f"  Technologies ({len(tech_list)}):")
+            for tech in tech_list[:8]:
+                tech_data = technologies.get(tech, {}) if isinstance(technologies, dict) else {}
+                if isinstance(tech_data, dict):
+                    ver = tech_data.get('version', '')
+                    if ver and ver not in ('unknown', 'none', ''):
+                        print(f"    └─ {tech}: {ver}")
+                    elif 'php' not in tech.lower() and 'wordpress' not in tech.lower():
+                        print(f"    └─ {tech}")
                 elif 'php' not in tech.lower() and 'wordpress' not in tech.lower():
-                    print(f"  {tech}")
-            elif 'php' not in tech.lower() and 'wordpress' not in tech.lower():
-                print(f"  {tech}")
+                    print(f"    └─ {tech}")
         
         print()
         print("─" * 64)
@@ -6853,7 +7986,6 @@ def parse_args():
     parser.add_argument("--skip-scan", action="store_true", help="Skip scanning")
     parser.add_argument("--skip-wp", action="store_true", help="Skip WordPress scanning")
     parser.add_argument("--skip-toolkit", action="store_true", help="Skip external Kali toolkit phase")
-    parser.add_argument("--wps-token", default="", help="WPScan API token")
     parser.add_argument("--urls-file", help="File with manual URLs")
     parser.add_argument("--subdomains-file", help="File with manual subdomains")
     parser.add_argument("--auth-file", help="JSON file with role-based login credentials")
@@ -6916,7 +8048,7 @@ def parse_args():
 
 
 def load_targets(filepath: str) -> tuple[list, int]:
-    """Load domains from file, preserve schemes (http://, https://)"""
+    """Load domains from file, preserve schemes (http://, https://) - strip paths"""
     if not os.path.exists(filepath):
         return [], 0
     
@@ -6929,10 +8061,25 @@ def load_targets(filepath: str) -> tuple[list, int]:
                 line = line.strip()
                 if not line or line.startswith("#"):
                     continue
-                # Remove trailing slashes but preserve scheme
-                line = line.rstrip('/').strip()
-                if line:
+                # Strip path from URL - only keep scheme + domain
+                from urllib.parse import urlparse
+                parsed = urlparse(line.lower())
+                if parsed.scheme and parsed.netloc:
+                    # URL with scheme: extract just scheme://netloc
+                    clean_url = f"{parsed.scheme}://{parsed.netloc}"
+                    targets.append(clean_url)
+                elif '.' in line and '/' not in line:
+                    # Plain domain without scheme
                     targets.append(line.lower())
+                elif '.' in line and '/' in line:
+                    # Domain with path but no scheme - extract domain part
+                    domain_part = line.split('/')[0].lower()
+                    targets.append(domain_part)
+                else:
+                    # Fallback: just strip trailing slashes
+                    line = line.rstrip('/').strip()
+                    if line:
+                        targets.append(line.lower())
     except Exception as e:
         logging.error(f"Error reading targets file: {e}")
         return [], 0
@@ -6974,17 +8121,34 @@ def process_single_target(domain: str, output_dir: str, options: dict, args, bat
     """Process one target (for batch mode)"""
     try:
         setup_logging(output_dir, options.get("verbose", False))
+        
+        # Read all targets from targets.txt to build allowed_domains list
+        allowed_domains = []
+        targets_file = getattr(args, 'file', 'targets.txt')
+        if os.path.exists(targets_file):
+            with open(targets_file, 'r') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        # Extract domain from URL (strip scheme and path)
+                        from urllib.parse import urlparse
+                        parsed = urlparse(line.lower())
+                        if parsed.scheme and parsed.netloc:
+                            allowed_domains.append(parsed.netloc)
+                        elif '.' in line:
+                            allowed_domains.append(line.lower().split('/')[0])
+        
         agent = ReconAgent(
             target=domain,
             output_dir=output_dir,
             options=options,
-            wps_token=args.wps_token,
             urls_file=getattr(args, 'urls_file', ''),
             subdomains_file=getattr(args, 'subdomains_file', ''),
             auth_file=getattr(args, 'auth_file', ''),
             force_recon=getattr(args, 'force_recon', False),
             batch_display=batch_display,
-            api_status=check_api_keys()
+            api_status=check_api_keys(),
+            allowed_domains=allowed_domains
         )
         agent.run()
 
@@ -7089,7 +8253,11 @@ def run_batch(targets_file: str, options: dict, args):
 
                     if not domain_output:
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        domain_safe = domain.replace(".", "_")
+                        # Sanitize domain: extract hostname and replace special chars
+                        from urllib.parse import urlparse
+                        parsed = urlparse(domain)
+                        hostname = parsed.netloc if parsed.netloc else domain
+                        domain_safe = hostname.replace(".", "_").replace(":", "_").replace("/", "_")
                         domain_output = os.path.join(base_output, f"{domain_safe}_{timestamp}")
                     
                     future = executor.submit(

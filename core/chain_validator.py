@@ -336,14 +336,72 @@ class ChainValidator:
                 issues.append(f"Step {step_num}: Missing action")
             
             # Check step has target
-            if not step.get("target") and not step.get("endpoint"):
+            target = step.get("target") or step.get("endpoint") or ""
+            if not target:
                 issues.append(f"Step {step_num}: Missing target/endpoint")
+            else:
+                # STRICT URL VALIDATION: Validate URL format before execution
+                url_validation = self._validate_step_url(target, step_num)
+                if url_validation:
+                    issues.append(url_validation)
             
             # Check step has expected outcome
             if not step.get("success_indicator"):
                 issues.append(f"Step {step_num}: Missing success indicator")
+            
+            # Check step has payload if action requires it
+            action = step.get("action", "")
+            if action in ["payload_injection", "code_execution", "file_upload", "exploit"]:
+                if not step.get("payload"):
+                    issues.append(f"Step {step_num}: Missing payload for action '{action}'")
         
         return len(issues) == 0, issues
+
+    def _validate_step_url(self, url: str, step_num: int) -> Optional[str]:
+        """
+        STRICT URL VALIDATION: Validate URL format for chain steps.
+        Returns error message if invalid, None if valid.
+        """
+        from urllib.parse import urlparse
+        
+        if not url or not isinstance(url, str):
+            return f"Step {step_num}: Empty or invalid URL"
+        
+        url = url.strip()
+        
+        # Check for valid URL structure
+        try:
+            parsed = urlparse(url)
+        except Exception as e:
+            return f"Step {step_num}: URL parse error: {e}"
+        
+        # Must have scheme
+        if not parsed.scheme:
+            return f"Step {step_num}: URL missing scheme (http:// or https://): {url[:80]}"
+        
+        if parsed.scheme not in ['http', 'https']:
+            return f"Step {step_num}: Invalid URL scheme '{parsed.scheme}': {url[:80]}"
+        
+        # Must have netloc (domain)
+        if not parsed.netloc:
+            return f"Step {step_num}: URL missing domain: {url[:80]}"
+        
+        # Check for invalid characters in hostname
+        hostname = parsed.hostname or ''
+        if not hostname:
+            return f"Step {step_num}: URL has no valid hostname: {url[:80]}"
+        
+        # Check for obviously malformed hostnames
+        invalid_chars = ['<', '>', '"', "'", ' ']
+        if any(c in hostname for c in invalid_chars):
+            return f"Step {step_num}: Hostname contains invalid characters: {hostname}"
+        
+        # Check for localhost/internal addresses (usually not exploitable remotely)
+        internal_patterns = ['localhost', '127.0.0.1', '0.0.0.0', '::1']
+        if hostname in internal_patterns:
+            return f"Step {step_num}: URL points to localhost/internal address (not exploitable): {url[:80]}"
+        
+        return None  # Valid URL
     
     def _validate_chain_logic(self, chain: Dict[str, Any]) -> Tuple[bool, List[str]]:
         """Validate chain logic and flow."""
@@ -375,7 +433,47 @@ class ChainValidator:
                 if dep not in step_names[:i]:
                     issues.append(f"Step '{step.get('name')}' depends on unknown step '{dep}'")
         
+        # ─── PRIORITY 8: SIMILAR ENDPOINT LIMIT ─────────────────────────────────────
+        # Prevent chains with >10 similar endpoints to avoid redundant scanning
+        similar_endpoint_count = self._count_similar_endpoints_in_chain(chain)
+        if similar_endpoint_count > 10:
+            issues.append(f"Chain has {similar_endpoint_count} similar endpoints (max 10 allowed)")
+        
         return len(issues) == 0, issues
+
+    def _count_similar_endpoints_in_chain(self, chain: Dict[str, Any]) -> int:
+        """
+        Count similar endpoints in a chain.
+        Groups endpoints by base path and returns the max count.
+        
+        PRIORITY 8: If >10 endpoints target similar paths, chain is likely redundant.
+        """
+        from urllib.parse import urlparse
+        from collections import Counter
+        
+        endpoints = []
+        steps = chain.get("steps", [])
+        
+        for step in steps:
+            target = step.get("target", "")
+            if target:
+                try:
+                    parsed = urlparse(target)
+                    # Normalize to host + base path
+                    path = parsed.path.rstrip('/').split('?')[0]
+                    path_parts = path.strip('/').split('/')
+                    base_path = '/' + '/'.join(path_parts[:2]) if path_parts[0] else '/'
+                    endpoint_key = f"{parsed.netloc}{base_path}"
+                    endpoints.append(endpoint_key)
+                except Exception:
+                    endpoints.append(target)
+        
+        if not endpoints:
+            return 0
+        
+        # Count occurrences of each endpoint pattern
+        counts = Counter(endpoints)
+        return max(counts.values()) if counts else 0
     
     def _estimate_success_rate(self, chain: Dict[str, Any], context: Dict[str, Any], 
                               prereq_results: Dict[str, bool]) -> float:

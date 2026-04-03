@@ -60,8 +60,15 @@ class WAFBypassEngine:
     3. Apply targeted bypass techniques
     4. Rotate through bypass modes on failure
     5. Add evasion headers on every request
+    
+    FIX: Added circuit breaker to prevent infinite retry loops.
+    Maximum bypass attempts capped at 50 total, with early exit if success rate < 5%.
     """
 
+    # Maximum bypass attempts before giving up (circuit breaker)
+    MAX_BYPASS_ATTEMPTS = 50
+    MIN_SUCCESS_RATE = 0.05  # 5% minimum success rate to continue
+    
     # WAF detection patterns
     WAF_SIGNATURES = {
         WAFType.CLOUDFLARE: [
@@ -482,3 +489,61 @@ class WAFBypassEngine:
         CONSTRAINT: If 403/406 > 10 times in a row → escalate
         """
         return self.consecutive_blocks > 10 and self.current_bypass_mode != BypassMode.SLOW
+
+    def should_abort_bypass(self) -> Tuple[bool, str]:
+        """
+        Circuit breaker: Determine if we should abort bypass attempts entirely.
+        
+        Returns: (should_abort, reason)
+        
+        FIX: Prevents infinite retry loops by checking:
+        1. Total attempts exceeded MAX_BYPASS_ATTEMPTS
+        2. Success rate below MIN_SUCCESS_RATE
+        3. Consecutive blocks exceed 100 (hard limit)
+        """
+        total_attempts = len(self.bypass_attempts)
+        
+        # Check 1: Total attempts exceeded
+        if total_attempts >= self.MAX_BYPASS_ATTEMPTS:
+            return True, f"Max bypass attempts reached ({self.MAX_BYPASS_ATTEMPTS})"
+        
+        # Check 2: Success rate too low (only check after minimum attempts)
+        if total_attempts >= 20:
+            success_rate = sum(1 for a in self.bypass_attempts if not a.blocked) / total_attempts
+            if success_rate < self.MIN_SUCCESS_RATE:
+                return True, f"Success rate too low ({success_rate:.1%} < {self.MIN_SUCCESS_RATE:.1%})"
+        
+        # Check 3: Hard limit on consecutive blocks
+        if self.consecutive_blocks >= 100:
+            return True, f"Too many consecutive blocks ({self.consecutive_blocks})"
+        
+        return False, ""
+
+    def get_waf_analysis_summary(self) -> Dict[str, Any]:
+        """
+        Get comprehensive WAF analysis summary for state storage.
+        
+        Returns dict with:
+        - waf_type: Detected WAF type
+        - bypass_mode: Current bypass mode
+        - total_attempts: Total bypass attempts
+        - success_rate: Overall success rate
+        - consecutive_blocks: Current consecutive block count
+        - should_continue: Whether bypass attempts should continue
+        - abort_reason: Reason for abort if should_continue is False
+        """
+        should_abort, abort_reason = self.should_abort_bypass()
+        total_attempts = len(self.bypass_attempts)
+        success_rate = sum(1 for a in self.bypass_attempts if not a.blocked) / total_attempts if total_attempts > 0 else 0.0
+        
+        return {
+            "waf_type": self.waf_type.value if self.waf_type != WAFType.UNKNOWN else None,
+            "bypass_mode": self.current_bypass_mode.value,
+            "total_attempts": total_attempts,
+            "success_rate": round(success_rate, 4),
+            "consecutive_blocks": self.consecutive_blocks,
+            "should_continue": not should_abort,
+            "abort_reason": abort_reason,
+            "max_attempts": self.MAX_BYPASS_ATTEMPTS,
+            "min_success_rate": self.MIN_SUCCESS_RATE
+        }

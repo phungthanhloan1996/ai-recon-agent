@@ -1,6 +1,7 @@
 """
 modules/live_hosts.py - Live Host Detection Engine
 Detects live hosts using HTTP probing with technology detection
+Includes intelligent host filtering (dedup, sub-path, dev/test detection)
 """
 
 import json
@@ -11,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from core.state_manager import StateManager
 from core.http_engine import HTTPClient
+from core.host_filter import HostFilter
 
 logger = logging.getLogger("recon.live_hosts")
 
@@ -49,8 +51,17 @@ class LiveHostEngine:
             "bootstrap": ["bootstrap"]
         }
 
-    def detect_live_hosts(self, targets: List[str]) -> List[Dict[str, Any]]:
-        """Detect live hosts from target list"""
+    def detect_live_hosts(self, targets: List[str], skip_dev_test: bool = True) -> List[Dict[str, Any]]:
+        """
+        Detect live hosts from target list with intelligent filtering.
+        
+        Args:
+            targets: List of target URLs/domains
+            skip_dev_test: If True, filter out dev/test environments
+        
+        Returns:
+            Filtered list of live hosts (production only if skip_dev_test=True)
+        """
         logger.info(f"[LIVE] Probing {len(targets)} targets...")
         
         live_hosts = []
@@ -112,6 +123,18 @@ class LiveHostEngine:
 
         # Remove duplicates and sort
         unique_hosts = self._deduplicate_hosts(live_hosts)
+        
+        # 🔥 NEW: Apply intelligent host filtering (dedup, sub-paths, dev/test)
+        if skip_dev_test:
+            host_filter = HostFilter(skip_dev_test=True)
+            filtered_hosts = host_filter.filter_hosts(unique_hosts)
+            
+            stats = host_filter.get_stats()
+            logger.info(f"[LIVE] Host filter applied: {stats['total']} → {stats['passed']} "
+                       f"(duplicates: {stats['duplicates']}, sub_paths: {stats['sub_paths']}, "
+                       f"dev/test: {stats['dev_test']})")
+            
+            unique_hosts = filtered_hosts
 
         # Save results
         self._save_results(unique_hosts)

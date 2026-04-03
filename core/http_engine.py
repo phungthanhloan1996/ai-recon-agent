@@ -17,6 +17,8 @@ import urllib3
 from urllib.parse import urlparse
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+from core.scan_optimizer import get_optimizer
+
 logger = logging.getLogger("recon.http_engine")
 
 
@@ -30,19 +32,20 @@ class HTTPClient:
     - Proxy support
     """
 
-    def __init__(self, session_manager=None, timeout: int = None, max_retries: int = 3):
+    def __init__(self, session_manager=None, timeout: int = None, max_retries: int = 1):
         self.session = requests.Session()
         self.base_timeout = timeout or config.HTTP_TIMEOUT
 
-        # Adaptive timeout profiles
+        # AGGRESSIVE timeout profiles - ULTRA fast fail-fast
+        # FIXED: Ensure all timeout values are proper int/float types
         self.timeouts = {
-            "fast": self.base_timeout,
-            "normal": int(self.base_timeout * 1.5),
-            "slow": int(self.base_timeout * 3),
-            "exploit": int(self.base_timeout * 5),
-            "connect": 15  # Connection timeout (was 7, now 15)
+            "fast": float(max(2, int(self.base_timeout) - 3)),   # 5s (ultra-aggressive)
+            "normal": float(max(3, int(int(self.base_timeout) * 0.8))),  # 8s (aggressive)
+            "slow": float(max(5, int(int(self.base_timeout) * 1.5))),  # 15s (was 30s)
+            "exploit": float(max(8, int(int(self.base_timeout) * 2))),  # 20s (was 50s)
+            "connect": float(3)  # Connection timeout (ultra-aggressive)
         }
-        self.max_retries = max_retries
+        self.max_retries = max_retries  # AGGRESSIVE: only 1 retry
         self.session_manager = session_manager
         self.last_request_time = 0
         self.min_delay = config.HTTP_MIN_DELAY
@@ -101,9 +104,17 @@ class HTTPClient:
             logger.warning(f"[HTTP] Skipping invalid URL: {msg}")
             raise ValueError(f"Invalid URL: {msg}")
         
-        # Check cache for unreachable ports - fail fast
+        # Check if host is blacklisted by optimizer - fail fast
         parsed = urlparse(url)
         host = parsed.hostname or parsed.netloc or ""
+        
+        optimizer = get_optimizer()
+        if optimizer.is_host_blacklisted(host):
+            error = ConnectionError(f"Skipping blacklisted host: {host}")
+            logger.debug(f"[HTTP] {error}")
+            raise error
+        
+        # Check cache for unreachable ports - fail fast
         if host in self._dead_hosts:
             error = ConnectionError(f"Skipping dead host: {host}")
             logger.debug(f"[HTTP] {error}")
@@ -114,8 +125,15 @@ class HTTPClient:
             logger.debug(f"[HTTP] Skipping unreachable {url}: {error}")
             raise error
         
+        # Get optimized timeout from optimizer based on host history
+        optimizer = get_optimizer()
+        host = parsed.hostname or ""
+        optimized_timeout = optimizer.get_optimized_timeout(host, "connection")
+        
+        # Use the smaller of optimized timeout and mode-based timeout
         timeout_mode = kwargs.pop("timeout_mode", "normal")
-        timeout_value = self.timeouts.get(timeout_mode, self.base_timeout)
+        mode_timeout = self.timeouts.get(timeout_mode, self.base_timeout)
+        timeout_value = min(optimized_timeout, mode_timeout)
 
         kwargs.setdefault('timeout', timeout_value)
         kwargs.setdefault('allow_redirects', True)
@@ -210,23 +228,28 @@ class HTTPClient:
     def _record_dead_host_error(self, host: str, hard: bool = False):
         """Track consecutive failures and blacklist host after threshold.
         
-        FIX #4: Early host blacklist - blacklist after N consecutive failures (default 8)
+        OPTIMIZATION: Uses ScanOptimizer for intelligent blacklisting:
+        - DNS errors: blacklist after 1 failure
+        - Timeouts: blacklist after 2 failures  
+        - Other failures: blacklist after 3 failures
         """
         if not host:
             return
         
-        # Get configurable threshold (default 8 failures before blacklist)
-        failure_threshold = getattr(config, 'HTTP_CONSECUTIVE_FAILURES_BLACKLIST', 8)
+        optimizer = get_optimizer()
         
+        # Use optimizer for intelligent failure tracking
         if hard:
-            self._dead_host_errors[host] = failure_threshold  # Immediately blacklist on DNS/hard failure
+            optimizer.record_host_failure(host, "DNS resolution failed")
         else:
-            self._dead_host_errors[host] = self._dead_host_errors.get(host, 0) + 1
+            optimizer.record_host_failure(host, "connection error")
         
-        # Blacklist if threshold reached
-        if self._dead_host_errors[host] >= failure_threshold and host not in self._dead_hosts:
+        # Sync with local blacklist if optimizer blacklisted
+        if optimizer.is_host_blacklisted(host) and host not in self._dead_hosts:
             self._dead_hosts.add(host)
-            logger.warning(f"[HTTP] Blacklisting host {host} after {self._dead_host_errors[host]} consecutive failures (threshold: {failure_threshold})")
+            status = optimizer.get_host_status(host)
+            logger.warning(f"[HTTP] Blacklisting host {host} after {status.failure_count} failures "
+                          f"(DNS: {status.dns_error}, Timeouts: {status.connection_timeout})")
 
     def _clear_dead_host_error(self, host: str):
         if not host:
@@ -258,14 +281,15 @@ class HTTPClient:
         if response.status_code == 429:
             self.error_count += 1
             retry_after = response.headers.get("Retry-After")
-            sleep_for = min(self.max_delay, self.min_delay * (1 + self.error_count))
+            # Exponential backoff with factor 2.0
+            sleep_for = min(self.max_delay, self.min_delay * (2.0 ** self.error_count))
             if retry_after:
                 try:
                     sleep_for = max(sleep_for, float(retry_after))
                 except ValueError:
                     pass
             self.min_delay = min(self.max_delay, max(self.min_delay, sleep_for))
-            logger.warning(f"[HTTP] 429 received for {url}; increasing min_delay to {self.min_delay:.2f}s")
+            logger.warning(f"[HTTP] 429 received for {url}; increasing min_delay to {self.min_delay:.2f}s (attempt {self.error_count})")
             time.sleep(sleep_for)
         elif self.error_count:
             self.error_count = 0
@@ -351,6 +375,20 @@ class HTTPClient:
             'http': proxy_url,
             'https': proxy_url
         }
+        logger.info(f"[HTTP] Proxy set to: {proxy_url}")
+
+    def enable_tor(self):
+        """Enable Tor proxy for requests."""
+        if config.TOR_ENABLED:
+            self.set_proxy(config.TOR_PROXY_URL)
+            logger.info("[HTTP] Tor proxy enabled")
+        else:
+            logger.warning("[HTTP] Tor is not enabled in config")
+
+    def disable_tor(self):
+        """Disable Tor proxy and use direct connection."""
+        self.session.proxies = {}
+        logger.info("[HTTP] Tor proxy disabled, using direct connection")
 
     def close(self):
         """Close the session"""

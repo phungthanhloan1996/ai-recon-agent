@@ -14,15 +14,17 @@ logger = logging.getLogger("recon.naabu")
 
 
 class NaabuRunner:
-    """Run naabu for fast port discovery"""
+    """Run naabu for fast port discovery - AGGRESSIVELY OPTIMIZED"""
 
     def __init__(self, output_dir: str, fast: bool = True):
         self.output_dir = output_dir
         self.fast = fast
-        self.common_ports = [
-            80, 443, 8080, 8443, 3306, 5432, 6379, 27017, 5000, 8000,
-            9000, 8888, 4443, 9443, 22, 21, 23, 25, 53, 110, 143, 445, 3389
-        ]
+        # AGGRESSIVE OPTIMIZATION: Only essential web ports
+        self.web_ports = [80, 443, 8080, 8443]
+        # Minimal common ports for quick scanning
+        self.common_ports = [21, 22, 25, 53, 80, 110, 143, 443, 3306, 3389, 5432, 8080, 8443]
+        # Maximum ports to scan (limit to avoid timeouts)
+        self.max_ports = 13
 
     def run(self, target: str, timeout: int = 120, max_retries: int = 2) -> Dict[str, Any]:
         """Run naabu on target host"""
@@ -53,27 +55,31 @@ class NaabuRunner:
         return result
 
     def _execute_naabu(self, target: str, timeout: int) -> str:
-        """Execute naabu command"""
+        """Execute naabu command - AGGRESSIVELY OPTIMIZED"""
         try:
             if self.fast:
-                # Fast scan (top ports)
+                # AGGRESSIVE OPTIMIZATION: Only top 100 ports (was 1000)
                 cmd = [
                     "naabu",
                     "-host", target,
-                    "-top-ports", "1000",
-                    "-rate", "5000",
+                    "-top-ports", "100",
+                    "-rate", "3000",  # Reduced rate for stability
                     "-json",
-                    "-verbose"
+                    "-verbose",
+                    "-timeout", "3",  # Fast per-port timeout
+                    "-retries", "1"   # Only 1 retry
                 ]
             else:
-                # Full scan
+                # Full scan (slower)
                 cmd = [
                     "naabu",
                     "-host", target,
                     "-p", "-",  # All ports
                     "-rate", "1000",
                     "-json",
-                    "-verbose"
+                    "-verbose",
+                    "-timeout", "3",
+                    "-retries", "1"
                 ]
             
             result = subprocess.run(

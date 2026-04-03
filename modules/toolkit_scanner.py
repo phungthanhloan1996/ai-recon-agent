@@ -15,6 +15,9 @@ from urllib.parse import urlparse
 from core.executor import run_command, tool_available
 from core.state_manager import StateManager
 from core.http_engine import HTTPClient
+from core.scan_deduplicator import ScanDeduplicator
+from core.scan_optimizer import get_optimizer
+from core.resource_manager import get_result_cache, get_concurrency_manager, get_nuclei_pool
 from integrations.whatweb_runner import WhatwebRunner
 from integrations.naabu_runner import NaabuRunner
 from integrations.dirbusting_runner import DirBustingRunner
@@ -31,6 +34,22 @@ class ToolkitScanner:
         self.aggressive = aggressive
         self.budget = (self.state.get("scan_metadata", {}) or {}).get("budget", {})
         self.results_file = os.path.join(output_dir, "toolkit_findings.json")
+        
+        # Initialize deduplicator to prevent redundant scanning
+        self.deduplicator = ScanDeduplicator(output_dir, ttl_hours=24)
+        
+        # FIX #4 & #5: Initialize result cache for nmap and wappalyzer (TTL=1 hour)
+        self.result_cache = get_result_cache(default_ttl=3600)
+        
+        # Resource Management: Initialize global concurrency manager
+        # Controls max concurrent heavy operations across all tools
+        toolkit_workers = int(self.budget.get("toolkit_parallel_tools", 4))
+        self.concurrency = get_concurrency_manager(max_concurrent=20)
+        
+        # Resource Management: Initialize Nuclei worker pool for vulnerability scanning
+        # Uses adaptive timeouts and worker limits to prevent resource exhaustion
+        nuclei_workers = int(self.budget.get("nuclei_workers", 3))
+        self.nuclei_pool = get_nuclei_pool(max_workers=nuclei_workers, default_timeout=300)
         
         # Initialize advanced scanners
         self.whatweb_runner = WhatwebRunner(output_dir, verbose=False)
@@ -152,20 +171,66 @@ class ToolkitScanner:
         self.state.update_scan_metadata(toolkit_metrics=self.toolkit_metrics.copy())
 
     def _select_high_value_hosts(self, live_hosts: List[Dict[str, Any]]) -> List[str]:
+        """Select high-value hosts for scanning, with deduplication, static file filtering, and optimizer blacklist check"""
         scored: List[tuple[int, str]] = []
+        optimizer = get_optimizer()
+        
+        # Static file extensions to skip
+        static_extensions = {'.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.svg', '.map'}
+        
+        # WordPress static paths to skip (but allow PHP files)
+        wp_static_paths = ['/wp-content/uploads/', '/wp-includes/', '/wp-content/cache/']
+        
         for h in live_hosts:
             u = h.get("url", "")
             if not u:
                 continue
-            # Skip URLs với file extension
-            from urllib.parse import urlparse as _up
-            _path = _up(u).path
-            if any(k in u for k in ('wp-json', 'oembed', 'embed', 'feed', 'xmlrpc')):
+            
+            parsed = urlparse(u)
+            path = parsed.path.lower()
+            url_lower = u.lower()
+            
+            # Skip already scanned hosts (deduplication)
+            hostname = parsed.hostname or parsed.netloc
+            
+            # Check optimizer blacklist first
+            if optimizer.is_host_blacklisted(hostname):
+                logger.debug(f"[TOOLKIT] Skipping blacklisted host: {hostname}")
                 continue
-            if len(_path.split('/')) > 4:
+            
+            if self.deduplicator.is_host_scanned(hostname):
+                logger.debug(f"[TOOLKIT] Skipping already scanned host: {hostname}")
                 continue
-            if '.' in _path.split('/')[-1]:
+            
+            # Skip static file extensions
+            if any(path.endswith(ext) for ext in static_extensions):
+                logger.debug(f"[TOOLKIT] Skipping static file: {u}")
                 continue
+            
+            # Skip WordPress static paths (but allow PHP files in uploads)
+            skip_wp_static = False
+            for wp_path in wp_static_paths:
+                if wp_path in url_lower:
+                    # Allow PHP files in uploads (potential shells)
+                    if '/wp-content/uploads/' in url_lower and path.endswith('.php'):
+                        continue
+                    skip_wp_static = True
+                    break
+            if skip_wp_static:
+                logger.debug(f"[TOOLKIT] Skipping WordPress static path: {u}")
+                continue
+            
+            # Skip deeply nested paths
+            if len(path.split('/')) > 5:
+                continue
+            
+            # Skip API-only endpoints that are better handled by API scanner
+            if any(k in url_lower for k in ('wp-json', 'oembed', 'embed', 'feed', 'xmlrpc')):
+                # But don't skip if it has other high-value indicators
+                if not any(k in url_lower for k in ("admin", "login", "upload")):
+                    continue
+            
+            # Calculate score
             s = 0
             st = int(h.get("status_code", 0) or 0)
             if st == 200:
@@ -174,14 +239,27 @@ class ToolkitScanner:
                 s += 20
             elif 400 <= st < 500:
                 s += 15
-            low = u.lower()
-            if any(k in low for k in ("admin", "login", "wp-admin", "api", "graphql")):
+            
+            if any(k in url_lower for k in ("admin", "login", "wp-admin", "api", "graphql")):
                 s += 25
-            if any(k in low for k in ("staging", "dev", "test", "beta")):
+            if any(k in url_lower for k in ("staging", "dev", "test", "beta")):
                 s += 12
+            
+            # Bonus for having parameters
+            if parsed.query:
+                s += 10
+            
+            # Bonus for executable file types
+            if any(path.endswith(ext) for ext in ('.php', '.asp', '.aspx', '.jsp', '.cgi')):
+                s += 8
+            
             scored.append((s, u))
+        
         scored.sort(key=lambda x: x[0], reverse=True)
-        return [u for _, u in scored]
+        selected = [u for _, u in scored]
+        
+        logger.info(f"[TOOLKIT] Selected {len(selected)}/{len(live_hosts)} high-value hosts for scanning")
+        return selected
 
     def _run_host_tools(
         self,
@@ -220,28 +298,28 @@ class ToolkitScanner:
         out: List[Dict[str, Any]] = []
         jobs: List[tuple[str, Callable]] = []
         
-        # Whatweb - advanced technology detection with CVE matching (increased timeout)
-        jobs.append(("whatweb", lambda: self._scan_whatweb(url, progress_cb, timeout=120)))
+        # Whatweb - advanced technology detection with CVE matching (optimized timeout)
+        jobs.append(("whatweb", lambda: self._scan_whatweb(url, progress_cb, timeout=60)))
         
         # Wappalyzer - comprehensive tech fingerprinting
         jobs.append(("wappalyzer", lambda: self._scan_wappalyzer(url, progress_cb)))
         
-        # WAF detection
+        # WAF detection (optimized timeout)
         if tool_available("wafw00f"):
-            jobs.append(("wafw00f", lambda: self._scan_wafw00f(url, progress_cb, timeout=120)))
+            jobs.append(("wafw00f", lambda: self._scan_wafw00f(url, progress_cb, timeout=60)))
         
-        # Nikto - web server vulnerability scanner
+        # Nikto - web server vulnerability scanner (optimized timeout)
         if tool_available("nikto"):
-            jobs.append(("nikto", lambda: self._scan_nikto(url, progress_cb, timeout=180)))
+            jobs.append(("nikto", lambda: self._scan_nikto(url, progress_cb, timeout=120)))
         
-        # Naabu - fast port scanning (if naabu is available)
+        # Naabu - fast port scanning (if naabu is available, optimized timeout)
         if explicit_port is not None and tool_available("nmap"):
-            jobs.append(("nmap", lambda: self._scan_nmap(host, explicit_port, progress_cb, timeout=180)))
+            jobs.append(("nmap", lambda: self._scan_nmap(host, explicit_port, progress_cb, timeout=90)))
         elif tool_available("naabu"):
-            jobs.append(("naabu", lambda: self._scan_naabu(host, progress_cb, timeout=180)))
+            jobs.append(("naabu", lambda: self._scan_naabu(host, progress_cb, timeout=90)))
         elif tool_available("nmap"):
-            # Fallback to nmap with increased timeout
-            jobs.append(("nmap", lambda: self._scan_nmap(host, None, progress_cb, timeout=180)))
+            # Fallback to nmap with optimized timeout
+            jobs.append(("nmap", lambda: self._scan_nmap(host, None, progress_cb, timeout=90)))
         
         workers = int(self.budget.get("toolkit_parallel_tools", 4))
         with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -310,8 +388,14 @@ class ToolkitScanner:
         progress_cb: Optional[Callable[[str, str, str], None]] = None,
         timeout: int = 60
     ) -> Optional[Dict[str, Any]]:
-        """Run whatweb scanner"""
+        """Run whatweb scanner with concurrency control"""
         self._notify_progress(progress_cb, "whatweb", "running", "whatweb: detecting technologies...")
+        
+        # Resource Management: Acquire concurrency slot for heavy operation
+        operation_id = f"whatweb_{hash(url)}"
+        if not self.concurrency.acquire(operation_id, timeout=300):
+            logger.warning(f"[TOOLKIT] Could not acquire concurrency slot for whatweb on {url}")
+            return {"tool": "whatweb", "url": url, "severity": "INFO", "success": False, "error": "Concurrency limit reached"}
         
         try:
             result = self.whatweb_runner.run(url, timeout=timeout)
@@ -364,6 +448,9 @@ class ToolkitScanner:
                 "success": False,
                 "error": str(e)
             }
+        finally:
+            # Resource Management: Always release concurrency slot
+            self.concurrency.release(operation_id)
         
         return None
 
@@ -372,8 +459,23 @@ class ToolkitScanner:
         url: str,
         progress_cb: Optional[Callable[[str, str, str], None]] = None
     ) -> Optional[Dict[str, Any]]:
-        """Run wappalyzer scanner"""
+        """Run wappalyzer scanner with caching and concurrency control"""
+        
+        # FIX #5: Check cache first
+        cache_key = f"wappalyzer:{url}"
+        cached_result = self.result_cache.get(cache_key)
+        if cached_result is not None:
+            logger.info(f"[WAPPALYZER] Using cached result for {url}")
+            self._notify_progress(progress_cb, "wappalyzer", "cached", f"wappalyzer: using cached result")
+            return cached_result
+        
         self._notify_progress(progress_cb, "wappalyzer", "running", "wappalyzer: fingerprinting stack...")
+        
+        # Resource Management: Acquire concurrency slot for heavy operation
+        operation_id = f"wappalyzer_{hash(url)}"
+        if not self.concurrency.acquire(operation_id, timeout=300):
+            logger.warning(f"[TOOLKIT] Could not acquire concurrency slot for wappalyzer on {url}")
+            return {"tool": "wappalyzer", "url": url, "severity": "INFO", "success": False, "error": "Concurrency limit reached"}
         
         try:
             result = self.wappalyzer_runner.run(url, timeout=60)
@@ -389,14 +491,24 @@ class ToolkitScanner:
                     "data": result,
                     "url": url,
                 })
-                return {
+                
+                response = {
                     "tool": "wappalyzer",
                     "url": url,
                     "severity": "INFO",
                     "data": result
                 }
+                
+                # FIX #5: Cache successful results
+                self.result_cache.set(cache_key, response, ttl=3600)
+                logger.debug(f"[CACHE] Cached wappalyzer result for {url}")
+                
+                return response
         except Exception as e:
             logger.error(f"Wappalyzer error: {e}")
+        finally:
+            # Resource Management: Always release concurrency slot
+            self.concurrency.release(operation_id)
         
         return None
 
@@ -404,18 +516,24 @@ class ToolkitScanner:
         self,
         url: str,
         progress_cb: Optional[Callable[[str, str, str], None]] = None,
-        timeout: int = 90
+        timeout: int = 60
     ) -> Optional[Dict[str, Any]]:
-        """Run WAF detection"""
+        """Run WAF detection - FIXED: removed --nocolor flag (not supported in newer versions)"""
         self._notify_progress(progress_cb, "wafw00f", "running", "wafw00f: detecting web application firewall...")
         
         try:
-            ret, stdout, _ = run_command(["wafw00f", "-a", url], timeout=timeout)
-            self._notify_progress(progress_cb, "wafw00f", "done" if ret == 0 else "failed", "wafw00f: detection complete")
+            # FIXED: Removed --nocolor flag - not supported in newer wafw00f versions
+            # FIXED: Reduced timeout to 60s (was 90s)
+            ret, stdout, stderr = run_command(
+                ["wafw00f", "-a", url], 
+                timeout=timeout
+            )
             
+            # FIXED: Handle various exit codes gracefully
             if ret == 0 and stdout:
                 severity = "LOW" if "No WAF detected" in stdout else "INFO"
-                logger.info(f"[WAFW00F] WAF Detection: {'Found' if severity == 'INFO' else 'Not Found'}")
+                logger.info(f"[WAFW00F] WAF Detection: {'Found' if severity == 'INFO' else 'Not Found'} for {url}")
+                self._notify_progress(progress_cb, "wafw00f", "done", f"wafw00f: {'WAF detected' if severity == 'INFO' else 'no WAF'}")
                 return {
                     "tool": "wafw00f",
                     "url": url,
@@ -423,17 +541,42 @@ class ToolkitScanner:
                     "output": stdout[:2000],
                     "success": True
                 }
-            else:
-                logger.warning(f"[WAFW00F] Scan incomplete for {url} (return code: {ret})")
+            elif ret == -2 or (stderr and "Traceback" in stderr):
+                # FIXED: Handle Python crashes gracefully
+                logger.warning(f"[WAFW00F] Tool crashed for {url} (exit code: {ret})")
+                self._notify_progress(progress_cb, "wafw00f", "crashed", "wafw00f: tool crashed")
                 return {
                     "tool": "wafw00f",
                     "url": url,
                     "severity": "LOW",
-                    "output": stdout[:1000] if stdout else _[:1000] if _ else "",
+                    "output": f"[TOOL CRASH] wafw00f exited with code {ret}. stderr: {stderr[:500] if stderr else 'N/A'}",
+                    "success": False,
+                    "error": f"wafw00f crashed (exit code: {ret})"
+                }
+            else:
+                logger.warning(f"[WAFW00F] Scan incomplete for {url} (return code: {ret})")
+                self._notify_progress(progress_cb, "wafw00f", "failed", f"wafw00f: exit code {ret}")
+                return {
+                    "tool": "wafw00f",
+                    "url": url,
+                    "severity": "LOW",
+                    "output": (stdout or "")[:1000] + (stderr or "")[:500],
                     "success": False
                 }
+        except subprocess.TimeoutExpired:
+            logger.warning(f"[WAFW00F] Timeout for {url}")
+            self._notify_progress(progress_cb, "wafw00f", "timeout", "wafw00f: timed out")
+            return {
+                "tool": "wafw00f",
+                "url": url,
+                "severity": "LOW",
+                "output": "[TIMEOUT] wafw00f exceeded time limit",
+                "success": False,
+                "error": "Timeout"
+            }
         except Exception as e:
-            logger.error(f"WAF detection error: {e}")
+            logger.error(f"[WAFW00F] Error for {url}: {e}")
+            self._notify_progress(progress_cb, "wafw00f", "error", f"wafw00f: {str(e)[:50]}")
             return {
                 "tool": "wafw00f",
                 "url": url,
@@ -441,40 +584,82 @@ class ToolkitScanner:
                 "success": False,
                 "error": str(e)
             }
-        
-        return None
 
     def _scan_nikto(
         self,
         url: str,
         progress_cb: Optional[Callable[[str, str, str], None]] = None,
-        timeout: int = 180
+        timeout: int = 300
     ) -> Optional[Dict[str, Any]]:
-        """Run nikto vulnerability scanner"""
+        """Run nikto vulnerability scanner - FIXED with better error handling"""
         self._notify_progress(progress_cb, "nikto", "running", "nikto: probing web server misconfigurations...")
         
         try:
-            # Prepare output file path
-            output_file = os.path.join(self.output_dir, f"nikto_{url.replace(':', '_').replace('/', '_')}.json")
+            # FIXED: Prepare output file path with sanitized name
+            safe_url = url.replace(':', '_').replace('/', '_').replace('.', '_')[:50]
+            output_file = os.path.join(self.output_dir, f"nikto_{safe_url}.json")
             
-            ret, stdout, _ = run_command(
-                ["nikto", "-host", url, "-maxtime", "2m", "-Format", "json", "-o", output_file],
-                timeout=180
+            # FIXED: Use -maxtime 3m and -timeout 30 for slow hosts
+            # FIXED: Added -no404 to reduce noise and speed up scanning
+            ret, stdout, stderr = run_command(
+                ["nikto", "-host", url, "-maxtime", "3m", "-timeout", "30", "-Format", "json", "-o", output_file, "-no404"],
+                timeout=timeout
             )
-            self._notify_progress(progress_cb, "nikto", "done" if ret == 0 else "failed", "nikto: scan finished")
             
+            # FIXED: Handle various exit codes gracefully
             if ret == 0 and os.path.exists(output_file):
                 logger.info(f"[NIKTO] Scan completed on {url}, saved to {output_file}")
+                self._notify_progress(progress_cb, "nikto", "done", f"nikto: scan finished, saved to {output_file}")
                 return {
                     "tool": "nikto",
                     "url": url,
                     "severity": "MEDIUM",
-                    "output_file": output_file
+                    "output_file": output_file,
+                    "success": True
                 }
+            elif ret == 1 or (stderr and "error" in stderr.lower()):
+                # FIXED: Handle nikto errors gracefully (exit code 1)
+                logger.warning(f"[NIKTO] Scan failed for {url} (exit code: {ret})")
+                self._notify_progress(progress_cb, "nikto", "failed", f"nikto: exit code {ret}")
+                return {
+                    "tool": "nikto",
+                    "url": url,
+                    "severity": "LOW",
+                    "output": f"[ERROR] nikto exited with code {ret}. stderr: {stderr[:500] if stderr else 'N/A'}",
+                    "success": False,
+                    "error": f"nikto failed (exit code: {ret})"
+                }
+            else:
+                logger.warning(f"[NIKTO] Scan incomplete for {url} (return code: {ret})")
+                self._notify_progress(progress_cb, "nikto", "failed", f"nikto: exit code {ret}")
+                return {
+                    "tool": "nikto",
+                    "url": url,
+                    "severity": "LOW",
+                    "output": (stdout or "")[:1000] + (stderr or "")[:500],
+                    "success": False
+                }
+        except subprocess.TimeoutExpired:
+            logger.warning(f"[NIKTO] Timeout for {url}")
+            self._notify_progress(progress_cb, "nikto", "timeout", "nikto: timed out")
+            return {
+                "tool": "nikto",
+                "url": url,
+                "severity": "LOW",
+                "output": "[TIMEOUT] nikto exceeded time limit",
+                "success": False,
+                "error": "Timeout"
+            }
         except Exception as e:
-            logger.error(f"Nikto error: {e}")
-        
-        return None
+            logger.error(f"[NIKTO] Error for {url}: {e}")
+            self._notify_progress(progress_cb, "nikto", "error", f"nikto: {str(e)[:50]}")
+            return {
+                "tool": "nikto",
+                "url": url,
+                "severity": "LOW",
+                "success": False,
+                "error": str(e)
+            }
 
     def _scan_naabu(
         self,
@@ -482,8 +667,14 @@ class ToolkitScanner:
         progress_cb: Optional[Callable[[str, str, str], None]] = None,
         timeout: int = 120
     ) -> Optional[Dict[str, Any]]:
-        """Run naabu for fast port scanning"""
+        """Run naabu for fast port scanning with concurrency control"""
         self._notify_progress(progress_cb, "naabu", "running", f"naabu: scanning common ports on {host}...")
+        
+        # Resource Management: Acquire concurrency slot for heavy operation
+        operation_id = f"naabu_{hash(host)}"
+        if not self.concurrency.acquire(operation_id, timeout=300):
+            logger.warning(f"[TOOLKIT] Could not acquire concurrency slot for naabu on {host}")
+            return {"tool": "naabu", "host": host, "severity": "INFO", "success": False, "error": "Concurrency limit reached"}
         
         try:
             result = self.naabu_runner.run(host, timeout=timeout)
@@ -525,6 +716,9 @@ class ToolkitScanner:
                 "success": False,
                 "error": str(e)
             }
+        finally:
+            # Resource Management: Always release concurrency slot
+            self.concurrency.release(operation_id)
         
         return None
 
@@ -535,9 +729,24 @@ class ToolkitScanner:
         progress_cb: Optional[Callable[[str, str, str], None]] = None,
         timeout: int = 120
     ) -> Optional[Dict[str, Any]]:
-        """Run nmap for port scanning (fallback) - optimized"""
+        """Run nmap for port scanning (fallback) - optimized with caching (FIX #4)"""
         port_hint = str(explicit_port) if explicit_port is not None else "top-50"
+        
+        # FIX #4: Check cache first
+        cache_key = f"nmap:{host}:{explicit_port}"
+        cached_result = self.result_cache.get(cache_key)
+        if cached_result is not None:
+            logger.info(f"[NMAP] Using cached result for {host} (ports: {cached_result.get('ports_found', 0)} found)")
+            self._notify_progress(progress_cb, "nmap", "cached", f"nmap: using cached result for {host}")
+            return cached_result
+        
         self._notify_progress(progress_cb, "nmap", "running", f"nmap: scanning ports {port_hint} on {host}...")
+        
+        # Resource Management: Acquire concurrency slot for heavy operation
+        operation_id = f"nmap_{hash(host)}_{explicit_port}"
+        if not self.concurrency.acquire(operation_id, timeout=300):
+            logger.warning(f"[TOOLKIT] Could not acquire concurrency slot for nmap on {host}")
+            return {"tool": "nmap", "host": host, "severity": "INFO", "output": "[CONCURRENCY LIMIT]", "success": False, "error": "Concurrency limit reached"}
         
         try:
             # Optimized: fewer ports, faster timing
@@ -556,6 +765,8 @@ class ToolkitScanner:
             ret, stdout, stderr = run_command(cmd, timeout=timeout)
             parsed_ports = self._parse_nmap_ports(stdout or "")
             self._notify_progress(progress_cb, "nmap", "done" if ret == 0 else "failed", f"nmap: found {len(parsed_ports)} open ports")
+            
+            result = None
             if ret == 0 and stdout:
                 open_ports = len(parsed_ports)
                 logger.info(f"[NMAP] Port scan completed on {host}: {open_ports} ports open")
@@ -569,7 +780,7 @@ class ToolkitScanner:
                     },
                     "host": host,
                 })
-                return {
+                result = {
                     "tool": "nmap",
                     "host": host,
                     "severity": "INFO",
@@ -595,7 +806,7 @@ class ToolkitScanner:
                     },
                     "host": host,
                 })
-                return {
+                result = {
                     "tool": "nmap",
                     "host": host,
                     "severity": "INFO",
@@ -609,13 +820,20 @@ class ToolkitScanner:
                 }
             else:
                 logger.warning(f"[NMAP] Failed for {host}")
-                return {
+                result = {
                     "tool": "nmap",
                     "host": host,
                     "severity": "INFO",
                     "output": stderr[:500] if stderr else "[NO OUTPUT]",
                     "success": False
                 }
+            
+            # FIX #4: Cache successful results
+            if result and result.get("success"):
+                self.result_cache.set(cache_key, result, ttl=3600)
+                logger.debug(f"[CACHE] Cached nmap result for {host}")
+            
+            return result
         except subprocess.TimeoutExpired:
             logger.warning(f"[NMAP] Timeout on {host}")
             return {
@@ -634,6 +852,9 @@ class ToolkitScanner:
                 "success": False,
                 "error": str(e)
             }
+        finally:
+            # Resource Management: Always release concurrency slot
+            self.concurrency.release(operation_id)
         
         return None
 
@@ -660,8 +881,14 @@ class ToolkitScanner:
         url: str,
         progress_cb: Optional[Callable[[str, str, str], None]] = None
     ) -> Optional[Dict[str, Any]]:
-        """Run directory brute-forcing"""
+        """Run directory brute-forcing with concurrency control"""
         self._notify_progress(progress_cb, "dirbusting", "running", "dirbusting: testing common paths...")
+        
+        # Resource Management: Acquire concurrency slot for heavy operation
+        operation_id = f"dirbusting_{hash(url)}"
+        if not self.concurrency.acquire(operation_id, timeout=300):
+            logger.warning(f"[TOOLKIT] Could not acquire concurrency slot for dirbusting on {url}")
+            return {"tool": "dirbusting", "url": url, "severity": "LOW", "success": False, "error": "Concurrency limit reached"}
         
         try:
             result = self.dirbusting_runner.run(url, timeout=180)
@@ -690,6 +917,9 @@ class ToolkitScanner:
                     }
         except Exception as e:
             logger.error(f"Dirbusting error: {e}")
+        finally:
+            # Resource Management: Always release concurrency slot
+            self.concurrency.release(operation_id)
         
         return None
 

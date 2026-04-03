@@ -144,6 +144,10 @@ class ScanState:
     data_exfiltration_methods: List[Dict] = field(default_factory=list)  # Ways to exfil data
     command_execution_history: List[Dict] = field(default_factory=list)  # Commands executed on target
     
+    # WAF Blocking
+    waf_blocked: bool = False
+    waf_block_count: int = 0
+
     # Meta
     current_phase: str = "init"
     errors: List[str] = field(default_factory=list)

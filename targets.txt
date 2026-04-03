@@ -1,4 +1,1 @@
-https://theky.vn/
-https://elo.edu.vn/
-https://dolphin-vc.com/
-https://vepg.vn/
+http://vulnwp.local:8000/

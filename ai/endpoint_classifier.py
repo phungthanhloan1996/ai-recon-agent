@@ -246,6 +246,17 @@ Provide classification in JSON format with endpoint_type, technologies, attack_s
     def _determine_categories(self, url: str, path: str, params: List[str], context: str) -> List[str]:
         categories = []
 
+        # ─── PRIORITY 1: WordPress oEmbed DETECTION ──────────────────────────────
+        # oEmbed endpoints are low-value and cause excessive scanning
+        # They typically only have 'url' or 'format' parameters
+        if self._is_wordpress_oembed(url, path, params):
+            return [{
+                'category': 'oembed_endpoint',
+                'risk_level': 'INFO',
+                'skip_scanning': True,
+                'reason': 'WordPress oEmbed endpoint - low exploitation value'
+            }]
+
         # STRICT RULE: admin/auth ONLY for wp-admin or specific endpoints
         # NOT for files with parameters that happen to have "ver=" 
         if '/wp-admin' in path:
@@ -356,5 +367,53 @@ Provide classification in JSON format with endpoint_type, technologies, attack_s
         for pattern in static_patterns:
             if pattern in path:
                 return True
+        
+        return False
+
+    def _is_wordpress_oembed(self, url: str, path: str, params: List[str]) -> bool:
+        """
+        Detect WordPress oEmbed endpoints that should be deprioritized.
+        
+        oEmbed endpoints are low-value for exploitation:
+        - Path contains /oembed/ or /wp-json/oembed/
+        - Only has 'url' or 'format' parameters (not injection-prone)
+        - Used for embedding content, not security-critical
+        
+        Returns:
+            True if this is a WordPress oEmbed endpoint that should be skipped
+        """
+        # Check for oEmbed path patterns
+        oembed_patterns = [
+            '/oembed/',
+            '/wp-json/oembed/',
+            '/wp-oembed',
+            'oembed.php',
+            '/embed/',  # Common WordPress embed path
+        ]
+        
+        is_oembed_path = any(pattern in path for pattern in oembed_patterns)
+        if not is_oembed_path:
+            return False
+        
+        # Check if parameters are only low-risk ones (url, format, maxwidth, maxheight)
+        low_risk_params = {'url', 'format', 'maxwidth', 'maxheight', 'discover', 'json', 'xml'}
+        
+        # Normalize params to lowercase for comparison
+        param_names = set()
+        for p in params:
+            if isinstance(p, str):
+                param_names.add(p.lower().split('=')[0])
+            elif isinstance(p, dict):
+                param_names.add(str(p.get('name', '')).lower())
+        
+        # If all parameters are low-risk, this is a low-value oEmbed endpoint
+        if param_names and param_names.issubset(low_risk_params):
+            logger.debug(f"[CLASSIFIER] Detected low-value oEmbed endpoint: {url[:100]}")
+            return True
+        
+        # If no parameters at all, still low-value
+        if not param_names:
+            logger.debug(f"[CLASSIFIER] Detected oEmbed endpoint (no params): {url[:100]}")
+            return True
         
         return False

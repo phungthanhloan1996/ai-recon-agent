@@ -9,6 +9,7 @@ from urllib.parse import urlparse, parse_qs
 from core.state_manager import StateManager
 from core.endpoint_analyzer import EndpointAnalyzer
 from core.cve_matcher import get_hints_for_endpoint
+from core.scan_optimizer import get_optimizer
 
 logger = logging.getLogger("recon.endpoint_probe")
 
@@ -33,12 +34,38 @@ def run_endpoint_probe(
     """
     Validate prioritized endpoints with a bounded, low-rate request pass.
     This is intentionally capped and is not a stress-testing or flooding routine.
+    
+    OPTIMIZATION: Uses ScanOptimizer for host prioritization:
+    - Priority 1 (high): Live hosts with web content
+    - Priority 3 (low): Dead/unresponsive hosts (limited probing)
     """
-    selected: List[Dict[str, Any]] = []
+    optimizer = get_optimizer()
+    
+    # Group endpoints by host for prioritization
+    host_endpoints: Dict[str, List[Dict[str, Any]]] = {}
     for endpoint in endpoints:
         normalized = _normalize_target(endpoint)
         if normalized:
-            selected.append(normalized)
+            url = normalized["url"]
+            parsed = urlparse(url)
+            hostname = parsed.hostname or ""
+            if hostname not in host_endpoints:
+                host_endpoints[hostname] = []
+            host_endpoints[hostname].append(normalized)
+    
+    # Prioritize hosts
+    selected: List[Dict[str, Any]] = []
+    for hostname, eps in sorted(host_endpoints.items(), 
+                                 key=lambda x: optimizer.assign_host_priority(x[0])):
+        for ep in eps:
+            # Skip blacklisted hosts
+            if optimizer.is_host_blacklisted(hostname):
+                logger.debug(f"[PROBE] Skipping blacklisted host: {hostname}")
+                continue
+            
+            selected.append(ep)
+            if len(selected) >= max_endpoints:
+                break
         if len(selected) >= max_endpoints:
             break
 

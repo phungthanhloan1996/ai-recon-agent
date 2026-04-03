@@ -109,7 +109,7 @@ class JSEndpointHunter:
         """
         try:
             # Download JS content
-            response = self.http_client.get(js_url, timeout='normal')
+            response = self.http_client.get(js_url, timeout=30)
             if response.status_code != 200:
                 return {'js_file': js_url, 'endpoints': [], 'parameters': [], 'interesting_routes': []}
             

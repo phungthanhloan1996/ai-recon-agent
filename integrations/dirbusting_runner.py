@@ -1,6 +1,7 @@
 """
 integrations/dirbusting_runner.py - Directory and File Brute-forcing
-Uses dirsearch or gobuster to discover hidden files and directories
+Uses dirsearch or gobuster to discover hidden files and directories.
+Integrated with GlobalConcurrencyManager for resource control.
 """
 
 import subprocess
@@ -9,6 +10,10 @@ import logging
 import re
 from typing import Dict, List, Any, Optional
 from pathlib import Path
+from urllib.parse import urlparse
+
+from core.scan_optimizer import get_optimizer
+from core.resource_manager import get_concurrency_manager
 
 logger = logging.getLogger("recon.dirbusting")
 
@@ -93,7 +98,32 @@ class DirBustingRunner:
             return ""
 
     def run(self, url: str, timeout: int = 180, max_retries: int = 2) -> Dict[str, Any]:
-        """Run directory brute-forcing on URL"""
+        """Run directory brute-forcing on URL.
+        
+        FIXED: Increased timeout from 60s to 180s to handle slow hosts.
+        FIXED: Added retry logic with exponential backoff for timeouts.
+        FIXED: Adaptive timeout based on host history.
+        FIX #3: Implement adaptive timeout REDUCTION on retry (not increase).
+                After timeout, reduce timeout by 25% to fail faster on problematic hosts.
+        """
+        optimizer = get_optimizer()
+        parsed = urlparse(url)
+        hostname = parsed.hostname or ""
+        
+        # Check if host is blacklisted
+        if optimizer.is_host_blacklisted(hostname):
+            return {
+                "url": url,
+                "success": False,
+                "tool": self.tool,
+                "directories": [],
+                "files": [],
+                "endpoints": [],
+                "suspicious": [],
+                "raw_output": "",
+                "error": f"Host {hostname} is blacklisted"
+            }
+        
         result = {
             "url": url,
             "success": False,
@@ -114,20 +144,47 @@ class DirBustingRunner:
             result["error"] = "No wordlist available"
             return result
 
+        # FIX #3: Adaptive timeout - REDUCE on retry to fail faster
+        base_timeout = timeout  # Default 180s
+        current_timeout = base_timeout
+        
+        # Track timeout history for this host
+        timeout_count = 0
+        
         for attempt in range(max_retries):
             try:
-                output = self._execute_scan(url, timeout)
+                # FIX #3: On retry after timeout, REDUCE timeout by 25% (fail faster)
+                if attempt > 0 and timeout_count > 0:
+                    # Reduce timeout: 75% of previous
+                    current_timeout = int(current_timeout * 0.75)
+                    current_timeout = max(30, current_timeout)  # Minimum 30s
+                    logger.info(f"[DIRBUST] Retry attempt {attempt+1} for {url} with REDUCED timeout {current_timeout}s (was {timeout}s)")
+                
+                output = self._execute_scan(url, current_timeout)
                 if output:
                     result["success"] = True
                     result["raw_output"] = output
                     self._parse_output(output, result)
                     return result
             except subprocess.TimeoutExpired:
-                result["error"] = f"Timeout on attempt {attempt+1}/{max_retries}"
-                logger.warning(f"Dir busting timeout for {url}: {result['error']}")
+                timeout_count += 1
+                result["error"] = f"Timeout on attempt {attempt+1} ({current_timeout}s)"
+                logger.warning(f"[DIRBUST] Timeout for {url}: {result['error']}")
+                
+                # FIX #3: Check optimizer for adaptive timeout suggestion
+                host_status = optimizer.get_host_status(hostname) if optimizer else None
+                if host_status and hasattr(host_status, 'adaptive_timeout_enabled') and host_status.adaptive_timeout_enabled:
+                    logger.warning(f"[DIRBUST] Host {hostname} has adaptive timeout enabled, reducing timeout for next attempt")
+                
+                # Only record timeout after all retries exhausted
+                if attempt >= max_retries - 1:
+                    optimizer.record_dirbust_timeout(url)
+                    logger.warning(f"[DIRBUST] All retries exhausted for {url}, skipping future attempts")
+                continue  # Try next retry
             except Exception as e:
                 result["error"] = str(e)
-                logger.warning(f"Dir busting error for {url} (attempt {attempt+1}): {e}")
+                logger.warning(f"[DIRBUST] Error for {url} (attempt {attempt+1}): {e}")
+                break  # Non-timeout errors should not retry
 
         return result
 

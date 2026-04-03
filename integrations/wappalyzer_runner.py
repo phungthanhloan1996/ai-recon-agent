@@ -154,25 +154,98 @@ class WappalyzerRunner:
                 result["confidence_scores"][tech_name] = confidence
 
     def _parse_with_fallback(self, url: str, result: Dict[str, Any]):
-        """Fallback pattern-based technology detection"""
-        try:
-            import urllib.request
-            import socket
-            
-            socket.setdefaulttimeout(3)
-            with urllib.request.urlopen(url, timeout=3) as response:
-                headers = response.headers
+        """Fallback pattern-based technology detection - FIXED with rate limit handling"""
+        import urllib.request
+        import ssl
+        import socket
+        import time
+        import random
+        
+        # FIXED: Create SSL context that ignores certificate verification
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        # FIXED: Use SSL context that ignores certificate errors
+        opener = urllib.request.build_opener(
+            urllib.request.HTTPSHandler(context=ssl_context)
+        )
+        
+        # FIXED: Add random delay to avoid rate limiting
+        time.sleep(random.uniform(0.5, 2.0))
+        
+        # FIXED: Rotate user agents to avoid 403/429
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0',
+        ]
+        
+        headers = {
+            'User-Agent': random.choice(user_agents),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+        }
+        
+        # FIXED: Add request headers to opener
+        for key, value in headers.items():
+            opener.addheaders = [(key, value)]
+        
+        socket.setdefaulttimeout(5)
+        
+        max_retries = 2
+        for attempt in range(max_retries):
+            try:
+                response = opener.open(url, timeout=5)
+                resp_headers = response.headers
                 content = response.read().decode('utf-8', errors='ignore')[:50000]
-            
-            # Detect from headers
-            self._detect_from_headers(headers, result)
-            
-            # Detect from content
-            self._detect_from_content(content, result)
-        except Exception as e:
-            logger.debug(f"Fallback detection error: {e}")
-        finally:
-            socket.setdefaulttimeout(None)
+                
+                # Detect from headers
+                self._detect_from_headers(resp_headers, result)
+                
+                # Detect from content
+                self._detect_from_content(content, result)
+                return  # Success, exit retry loop
+                
+            except urllib.error.HTTPError as e:
+                if e.code in [403, 429]:
+                    wait_time = (attempt + 1) * 3 + random.uniform(0, 2)
+                    logger.debug(f"[WAPPALYZER] Rate limited ({e.code}), waiting {wait_time:.1f}s before retry")
+                    if attempt < max_retries - 1:
+                        time.sleep(wait_time)
+                        continue
+                    logger.debug(f"[WAPPALYZER] Rate limited after {max_retries} attempts, using minimal detection")
+                else:
+                    logger.debug(f"[WAPPALYZER] HTTP error {e.code}: {e}")
+                break
+            except urllib.error.URLError as e:
+                error_str = str(e)
+                if "CERTIFICATE_VERIFY_FAILED" in error_str or "SSL" in error_str:
+                    logger.debug(f"[WAPPALYZER] SSL cert error for {url}, using HTTP fallback")
+                    http_url = url.replace('https://', 'http://', 1)
+                    try:
+                        response = urllib.request.urlopen(http_url, timeout=5)
+                        resp_headers = response.headers
+                        content = response.read().decode('utf-8', errors='ignore')[:50000]
+                        self._detect_from_headers(resp_headers, result)
+                        self._detect_from_content(content, result)
+                        return
+                    except Exception as http_error:
+                        logger.debug(f"[WAPPALYZER] HTTP fallback also failed: {http_error}")
+                elif "Connection refused" in error_str or "Max retries exceeded" in error_str:
+                    logger.debug(f"[WAPPALYZER] Connection failed for {url}")
+                else:
+                    logger.debug(f"[WAPPALYZER] Fallback detection error: {e}")
+                break
+            except Exception as e:
+                logger.debug(f"[WAPPALYZER] Unexpected error: {e}")
+                break
+        
+        socket.setdefaulttimeout(None)
 
     def _detect_from_headers(self, headers: Dict[str, str], result: Dict[str, Any]):
         """Detect technologies from HTTP headers"""

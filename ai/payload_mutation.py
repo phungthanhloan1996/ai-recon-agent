@@ -7,7 +7,7 @@ import re
 import logging
 import base64
 import urllib.parse
-from typing import List
+from typing import List, Dict 
 
 logger = logging.getLogger("recon.payload_mutation")
 
@@ -46,10 +46,32 @@ class PayloadMutator:
     - Syntax mutations
     - Delimiter changes
     - Obfuscation techniques
+    
+    Includes deduplication and mutation budget controls to prevent
+    excessive scanning of similar endpoints.
     """
+
+    # ─── MUTATION BUDGET CONFIGURATION ──────────────────────────────────────────
+    # Limits mutations per endpoint type to prevent Groq 429 errors
+    MAX_MUTATIONS_PER_ENDPOINT = {
+        'oembed': 3,           # oEmbed endpoints - minimal mutations
+        'wp_json': 5,          # WordPress JSON API - limited
+        'generic_api': 8,      # Generic APIs - moderate
+        'default': 15,         # Default for high-value endpoints
+    }
+    
+    # Endpoint type patterns for budget classification
+    ENDPOINT_PATTERNS = {
+        'oembed': ['/oembed/', '/wp-json/oembed/', '/embed/', 'oembed.php'],
+        'wp_json': ['/wp-json/', '/wp-api/'],
+        'generic_api': ['/api/', '/rest/', '/graphql'],
+    }
 
     def __init__(self, groq_client=None):
         self.groq = groq_client
+        # Mutation tracking for deduplication
+        self._mutation_cache = {}  # canonical_payload -> set of mutations
+        self._endpoint_mutation_count = {}  # endpoint_type -> count
         self.encodings = [
             self._base64_encode,
             self._url_encode,
@@ -534,3 +556,184 @@ Return JSON with list of mutated payloads ready for injection."""
         # Replace 'union' with 'uni\x6fn'
         variations.append(payload.replace('union', 'uni\x6fn'))
         return variations
+
+    # ─── MUTATION BUDGET AND DEDUPLICATION METHODS ──────────────────────────────
+
+    def _classify_endpoint_type(self, url: str) -> str:
+        """Classify endpoint type for mutation budgeting."""
+        url_lower = url.lower()
+        for endpoint_type, patterns in self.ENDPOINT_PATTERNS.items():
+            if any(pattern in url_lower for pattern in patterns):
+                return endpoint_type
+        return 'default'
+
+    def _canonicalize_payload(self, payload: str) -> str:
+        """
+        Create a canonical form of payload for deduplication.
+        Normalizes encoding and whitespace variations.
+        """
+        # URL decode
+        canonical = payload
+        try:
+            canonical = urllib.parse.unquote(canonical)
+        except Exception:
+            pass
+        
+        # Normalize whitespace
+        canonical = re.sub(r'\s+', ' ', canonical).strip()
+        
+        # Normalize case for comparison
+        canonical = canonical.lower()
+        
+        # Remove common obfuscation patterns for comparison
+        canonical = canonical.replace('/**/', ' ')
+        canonical = canonical.replace('  ', ' ')
+        
+        return canonical
+
+    def _is_duplicate_mutation(self, payload: str) -> bool:
+        """Check if this mutation is a duplicate of an existing one."""
+        canonical = self._canonicalize_payload(payload)
+        
+        if canonical in self._mutation_cache:
+            return True
+        
+        # Also check for near-duplicates (90%+ similarity)
+        for existing in self._mutation_cache:
+            if len(canonical) > 5 and len(existing) > 5:
+                # Simple similarity check
+                common = sum(1 for a, b in zip(canonical, existing) if a == b)
+                max_len = max(len(canonical), len(existing))
+                if max_len > 0 and common / max_len > 0.9:
+                    return True
+        
+        return False
+
+    def _track_mutation(self, payload: str):
+        """Track a mutation for deduplication."""
+        canonical = self._canonicalize_payload(payload)
+        self._mutation_cache.add(canonical)
+
+    def _exceeded_mutation_budget(self, endpoint_type: str) -> bool:
+        """Check if mutation budget exceeded for endpoint type."""
+        current_count = self._endpoint_mutation_count.get(endpoint_type, 0)
+        max_allowed = self.MAX_MUTATIONS_PER_ENDPOINT.get(endpoint_type, self.MAX_MUTATIONS_PER_ENDPOINT['default'])
+        return current_count >= max_allowed
+
+    def _increment_mutation_count(self, endpoint_type: str, count: int = 1):
+        """Increment mutation count for endpoint type."""
+        self._endpoint_mutation_count[endpoint_type] = \
+            self._endpoint_mutation_count.get(endpoint_type, 0) + count
+
+    def mutate_payloads_for_endpoint(self, payloads: List[str], endpoint_url: str, 
+                                      endpoint_reliability: float = 1.0) -> List[str]:
+        """
+        Generate mutations with budget control for specific endpoint.
+        
+        FIX #6: Now respects endpoint reliability - reduces or skips mutations
+        for endpoints that have timeout history or low reliability scores.
+        
+        This is the main entry point for endpoint-aware mutation.
+        It respects mutation budgets based on endpoint type and
+        performs deduplication to avoid redundant scanning.
+        
+        Args:
+            payloads: Original payloads to mutate
+            endpoint_url: Target endpoint URL for budget classification
+            endpoint_reliability: Reliability score (0.0-1.0) based on timeout history.
+                                1.0 = no issues, 0.0 = consistently timing out
+            
+        Returns:
+            List of mutated payloads within budget limits
+        """
+        # FIX #6: Check endpoint reliability before generating mutations
+        if endpoint_reliability < 0.3:
+            logger.debug(f"[MUTATION] Skipping mutations for unreliable endpoint: {endpoint_url[:80]} "
+                        f"(reliability: {endpoint_reliability:.2f})")
+            return []  # Skip mutations for very unreliable endpoints
+        
+        endpoint_type = self._classify_endpoint_type(endpoint_url)
+        
+        # Check if budget exceeded for this endpoint type
+        if self._exceeded_mutation_budget(endpoint_type):
+            logger.debug(f"[MUTATION] Budget exceeded for {endpoint_type} endpoint: {endpoint_url[:80]}")
+            return []  # Return empty - no more mutations allowed
+        
+        # FIX #6: Reduce mutation count based on reliability
+        max_mutations = self.MAX_MUTATIONS_PER_ENDPOINT.get(
+            endpoint_type, 
+            self.MAX_MUTATIONS_PER_ENDPOINT['default']
+        )
+        
+        # Scale down mutations for less reliable endpoints
+        if endpoint_reliability < 1.0:
+            adjusted_max = max(1, int(max_mutations * endpoint_reliability))
+            logger.debug(f"[MUTATION] Adjusting mutation budget for {endpoint_url[:80]}: "
+                        f"{max_mutations} -> {adjusted_max} (reliability: {endpoint_reliability:.2f})")
+            max_mutations = adjusted_max
+        
+        # Generate mutations
+        mutated = []
+        for payload in payloads:
+            # Skip if this payload type is already well-covered
+            canonical = self._canonicalize_payload(payload)
+            if canonical in self._mutation_cache:
+                continue
+                
+            # Apply mutations
+            new_mutations = []
+            new_mutations.extend(self._apply_encodings(payload))
+            new_mutations.extend(self._apply_mutations(payload))
+            new_mutations.extend(self._apply_waf_bypass(payload))
+            
+            # Filter duplicates and add to results
+            for m in new_mutations:
+                if not self._is_duplicate_mutation(m):
+                    mutated.append(m)
+                    self._track_mutation(m)
+            
+            # Check budget after each payload
+            if len(mutated) >= max_mutations:
+                break
+        
+        # Remove duplicates and originals
+        mutated = list(set(mutated))
+        mutated = [p for p in mutated if p not in payloads]
+        
+        # Apply strict budget limit
+        if len(mutated) > max_mutations:
+            # Prioritize most different mutations
+            mutated = mutated[:max_mutations]
+        
+        # Update mutation count
+        self._increment_mutation_count(endpoint_type, len(mutated))
+        
+        logger.info(f"[MUTATION] Generated {len(mutated)} mutations for {endpoint_type} endpoint "
+                   f"(budget: {max_mutations}, used: {self._endpoint_mutation_count.get(endpoint_type, 0)}, "
+                   f"reliability: {endpoint_reliability:.2f})")
+        
+        return mutated
+
+    def reset_budget(self, endpoint_type: str = None):
+        """
+        Reset mutation budget for endpoint type or all types.
+        Useful for starting fresh scanning sessions.
+        """
+        if endpoint_type:
+            self._endpoint_mutation_count[endpoint_type] = 0
+        else:
+            self._endpoint_mutation_count.clear()
+            self._mutation_cache.clear()
+
+    def get_budget_status(self) -> Dict[str, Dict[str, int]]:
+        """Get current mutation budget status for all endpoint types."""
+        status = {}
+        for endpoint_type, max_allowed in self.MAX_MUTATIONS_PER_ENDPOINT.items():
+            used = self._endpoint_mutation_count.get(endpoint_type, 0)
+            status[endpoint_type] = {
+                'used': used,
+                'max': max_allowed,
+                'remaining': max(0, max_allowed - used),
+                'exhausted': used >= max_allowed
+            }
+        return status

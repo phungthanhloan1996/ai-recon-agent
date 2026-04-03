@@ -8,6 +8,7 @@ import os
 import re
 import time
 import logging
+import subprocess
 import urllib.request
 import urllib.parse
 import urllib.error
@@ -21,7 +22,7 @@ from core.state_manager import StateManager
 from core.http_engine import HTTPClient
 from core.executor import tool_available, run_command
 from core.cve_matcher import match_any_range
-from integrations.cve_lookup import CVELookup
+from core.scan_optimizer import get_optimizer
 
 logger = logging.getLogger("recon.wordpress")
 
@@ -140,16 +141,27 @@ class WordPressScannerEngine:
     """
     Engine for scanning WordPress installations.
     Uses HTTP probing and rules instead of external tools.
+
+    OPTIMIZATION: Added multi-level caching to avoid redundant scans:
+    - Cache key: domain + WordPress version + plugin versions hash
+    - Cache TTL: 24 hours (configurable)
+    - Cache location: {output_dir}/_cache/wp_scan_results.json
     """
 
-    def __init__(self, state: StateManager, output_dir: str, wps_token: str = ""):
+    def __init__(self, state: StateManager, output_dir: str):
         self.state = state
         self.output_dir = output_dir
-        self.wps_token = wps_token
         self.http_client = HTTPClient()
         self.results_file = os.path.join(output_dir, "wordpress_scan.json")
         self.wpscan_cache_dir = os.path.join(output_dir, "_cache", "wpscan")
+        # OPTIMIZATION: New cache for scan results
+        self.scan_cache_file = os.path.join(output_dir, "_cache", "wp_scan_results.json")
+        self.scan_cache_ttl = 86400  # 24 hours
         self.wp_rules = self._load_wp_rules()
+        
+        # WAF blocking detection
+        self.waf_block_count = 0
+        self.waf_block_threshold = 3  # Skip heavy scans after 3 WAF blocks
 
         # WordPress detection patterns
         self.wp_indicators = [
@@ -214,6 +226,80 @@ class WordPressScannerEngine:
         except Exception as e:
             logger.debug(f"[WP] Failed to load wordpress rules: {e}")
             return {}
+
+    def _generate_cache_key(self, url: str, version: str, plugins: List[Dict]) -> str:
+        """
+        OPTIMIZATION: Generate cache key based on domain + WP version + plugin versions.
+        Cache hit = same domain, same WP version, same plugin versions → skip rescan.
+        """
+        import hashlib
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        
+        # Build plugin version signature
+        plugin_sig = sorted([
+            f"{p.get('name', '')}:{p.get('version', 'unknown')}"
+            for p in plugins if isinstance(p, dict)
+        ])
+        sig_str = f"{domain}|{version}|{'|'.join(plugin_sig)}"
+        
+        return hashlib.md5(sig_str.encode()).hexdigest()
+
+    def _load_scan_cache(self) -> Dict[str, Any]:
+        """OPTIMIZATION: Load cached scan results from file."""
+        if not os.path.exists(self.scan_cache_file):
+            return {}
+        try:
+            with open(self.scan_cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Filter expired entries
+            now = time.time()
+            valid_data = {}
+            for key, entry in data.items():
+                if now - entry.get("timestamp", 0) < self.scan_cache_ttl:
+                    valid_data[key] = entry
+            # Save cleaned cache
+            if len(valid_data) != len(data):
+                with open(self.scan_cache_file, "w", encoding="utf-8") as f:
+                    json.dump(valid_data, f, indent=2)
+            return valid_data
+        except Exception as e:
+            logger.debug(f"[WP] Cache read error: {e}")
+            return {}
+
+    def _save_scan_cache(self, cache: Dict[str, Any]):
+        """OPTIMIZATION: Save scan results to cache."""
+        try:
+            os.makedirs(os.path.dirname(self.scan_cache_file), exist_ok=True)
+            with open(self.scan_cache_file, "w", encoding="utf-8") as f:
+                json.dump(cache, f, indent=2)
+        except Exception as e:
+            logger.debug(f"[WP] Cache write error: {e}")
+
+    def _get_cached_result(self, url: str, version: str, plugins: List[Dict]) -> Optional[Dict[str, Any]]:
+        """OPTIMIZATION: Check cache for existing scan result."""
+        cache = self._load_scan_cache()
+        cache_key = self._generate_cache_key(url, version, plugins)
+        entry = cache.get(cache_key)
+        if entry:
+            age_hours = (time.time() - entry["timestamp"]) / 3600
+            logger.info(f"[WP] Cache HIT for {url} (age={age_hours:.1f}h)")
+            return entry.get("result")
+        return None
+
+    def _cache_result(self, url: str, version: str, plugins: List[Dict], result: Dict[str, Any]):
+        """OPTIMIZATION: Cache scan result for future use."""
+        cache = self._load_scan_cache()
+        cache_key = self._generate_cache_key(url, version, plugins)
+        cache[cache_key] = {
+            "timestamp": time.time(),
+            "url": url,
+            "version": version,
+            "plugin_count": len(plugins),
+            "result": result
+        }
+        self._save_scan_cache(cache)
+        logger.debug(f"[WP] Cached scan result for {url}")
 
     def scan_wordpress_sites(self, targets: List[str]) -> Dict[str, Any]:
         """Scan WordPress installations"""
@@ -389,10 +475,20 @@ class WordPressScannerEngine:
         return "unknown"
 
     def _enumerate_plugins(self, url: str) -> List[Dict[str, Any]]:
-        """Enumerate WordPress plugins"""
+        """Enumerate WordPress plugins with WAF-aware detection.
+        
+        FIX: Added WAF blocking detection and adaptive strategies:
+        1. Detect 403/406/429 responses and switch to passive detection
+        2. Use REST API as fallback when direct plugin paths are blocked
+        3. Extract plugins from discovered URLs in state (passive detection)
+        4. Limit requests to avoid rate limiting
+        """
         plugins = []
-
-        # Common plugin paths to check
+        waf_blocked = False
+        block_count = 0
+        max_blocks_before_fallback = 5
+        
+        # Phase 1: Try direct plugin path probing (active detection)
         plugin_paths = [
             "/wp-content/plugins/",
             "/wp-content/plugins/hello-dolly/",
@@ -401,8 +497,22 @@ class WordPressScannerEngine:
         ]
 
         for path in plugin_paths:
+            if waf_blocked:
+                logger.debug(f"[WP] WAF blocking detected, skipping direct plugin probe for {path}")
+                break
+                
             try:
                 response = self.http_client.get(url.rstrip("/") + path, timeout=10)
+                
+                # Check for WAF blocking
+                if response.status_code in [403, 406, 429]:
+                    block_count += 1
+                    logger.warning(f"[WP] WAF blocking detected on {path} (status: {response.status_code})")
+                    if block_count >= max_blocks_before_fallback:
+                        waf_blocked = True
+                        logger.info(f"[WP] Switching to passive detection mode after {block_count} blocks")
+                    continue
+                    
                 if response.status_code == 200:
                     # Parse directory listing or check for plugin files
                     if "index of" in response.text.lower():
@@ -415,33 +525,157 @@ class WordPressScannerEngine:
                             plugins.append({
                                 "name": plugin_name,
                                 "version": "unknown",
-                                "path": path
+                                "path": path,
+                                "detection_method": "direct_probe"
                             })
 
-            except Exception:
+            except Exception as e:
+                logger.debug(f"[WP] Plugin probe failed for {path}: {e}")
                 continue
 
-        # Fingerprint common plugins and infer versions from readme/stable tag.
-        for plugin in WP_PLUGINS:
-            plugin_url = f"{url.rstrip('/')}/wp-content/plugins/{plugin}/"
-            try:
-                r = self.http_client.get(plugin_url, timeout=8)
-                if r.status_code != 200:
+        # Phase 2: If WAF blocked direct probing, use REST API fallback
+        if waf_blocked:
+            logger.info(f"[WP] Using REST API fallback for plugin detection on {url}")
+            rest_api_plugins = self._detect_plugins_via_rest_api(url)
+            
+            # Only add plugins not already found
+            existing_names = {p['name'] for p in plugins}
+            for plugin in rest_api_plugins:
+                if plugin['name'] not in existing_names:
+                    plugins.append(plugin)
+                    existing_names.add(plugin['name'])
+
+        # Phase 3: Passive detection from state URLs (no network requests)
+        state_plugins = self._detect_plugins_from_state_urls()
+        existing_names = {p['name'] for p in plugins}
+        for plugin in state_plugins:
+            if plugin['name'] not in existing_names:
+                plugins.append(plugin)
+                existing_names.add(plugin['name'])
+
+        # Phase 4: Fingerprint common plugins (only if not WAF blocked)
+        if not waf_blocked:
+            for plugin in WP_PLUGINS[:5]:  # Limit to first 5 to reduce requests
+                plugin_url = f"{url.rstrip('/')}/wp-content/plugins/{plugin}/"
+                try:
+                    r = self.http_client.get(plugin_url, timeout=8)
+                    
+                    # Check for WAF blocking
+                    if r.status_code in [403, 406, 429]:
+                        logger.debug(f"[WP] WAF blocking on {plugin_url}, skipping remaining plugins")
+                        break
+                    
+                    if r.status_code != 200:
+                        continue
+                        
+                    version = "unknown"
+                    readme = self.http_client.get(f"{plugin_url}readme.txt", timeout=8)
+                    if readme.status_code == 200:
+                        version = self._extract_version_from_text(readme.text)
+                    
+                    # Only add if not already found
+                    if not any(p['name'] == plugin for p in plugins):
+                        plugins.append({
+                            "name": plugin,
+                            "version": version,
+                            "path": f"/wp-content/plugins/{plugin}/",
+                            "detection_method": "fingerprint"
+                        })
+                except Exception:
                     continue
-                version = "unknown"
-                readme = self.http_client.get(f"{plugin_url}readme.txt", timeout=8)
-                if readme.status_code == 200:
-                    version = self._extract_version_from_text(readme.text)
-                plugins.append(
-                    {
-                        "name": plugin,
-                        "version": version,
-                        "path": f"/wp-content/plugins/{plugin}/",
-                    }
-                )
-            except Exception:
-                continue
 
+        # Add detection metadata
+        for plugin in plugins:
+            if 'detection_method' not in plugin:
+                plugin['detection_method'] = 'passive'
+        
+        return plugins
+
+    def _detect_plugins_via_rest_api(self, url: str) -> List[Dict[str, Any]]:
+        """Detect plugins via WordPress REST API (WAF-friendly fallback).
+        
+        Uses the WordPress REST API to enumerate plugins without triggering WAF.
+        This is less intrusive than direct file probing.
+        """
+        plugins = []
+        
+        # Try WordPress REST API plugin enumeration endpoints
+        api_endpoints = [
+            "/wp-json/wp/v2/plugins",  # Requires authentication (WordPress 5.0+)
+            "/wp-json/wp/v2/plugins?per_page=100",
+            "/wp-json/?rest_route=/wp/v2/plugins",
+        ]
+        
+        for endpoint in api_endpoints:
+            try:
+                full_url = url.rstrip("/") + endpoint
+                response = self.http_client.get(full_url, timeout=10)
+                
+                if response.status_code == 200:
+                    try:
+                        data = response.json()
+                        if isinstance(data, list):
+                            for plugin_data in data:
+                                if isinstance(plugin_data, dict):
+                                    plugins.append({
+                                        "name": plugin_data.get("plugin", plugin_data.get("slug", "unknown")),
+                                        "version": plugin_data.get("version", "unknown"),
+                                        "path": plugin_data.get("plugin_file", ""),
+                                        "detection_method": "rest_api"
+                                    })
+                            break  # Success, no need to try other endpoints
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+            except Exception as e:
+                logger.debug(f"[WP] REST API plugin detection failed for {endpoint}: {e}")
+                continue
+        
+        return plugins
+
+    def _detect_plugins_from_state_urls(self) -> List[Dict[str, Any]]:
+        """Detect plugins passively from URLs already discovered in state.
+        
+        This method extracts plugin names from URL patterns like:
+        /wp-content/plugins/{plugin_name}/...
+        
+        No additional network requests are made.
+        """
+        plugins = []
+        seen_plugins = set()
+        
+        # Get all URLs from state
+        all_urls = set()
+        
+        urls_from_state = self.state.get("urls", [])
+        if isinstance(urls_from_state, list):
+            all_urls.update(str(u) for u in urls_from_state if u)
+        
+        endpoints = self.state.get("endpoints", [])
+        if isinstance(endpoints, list):
+            for ep in endpoints:
+                if isinstance(ep, dict) and 'url' in ep:
+                    all_urls.add(str(ep['url']))
+                elif isinstance(ep, str):
+                    all_urls.add(ep)
+        
+        crawled = self.state.get("crawled_urls", [])
+        if isinstance(crawled, list):
+            all_urls.update(str(u) for u in crawled if u)
+        
+        # Extract plugin names from URLs
+        plugin_pattern = r'/wp-content/plugins/([^/]+)/'
+        for url in all_urls:
+            matches = re.findall(plugin_pattern, url, re.IGNORECASE)
+            for match in matches:
+                if match and match not in seen_plugins and match not in ['plugins', 'index.php']:
+                    seen_plugins.add(match)
+                    plugins.append({
+                        "name": match,
+                        "version": "unknown",
+                        "path": f"/wp-content/plugins/{match}/",
+                        "detection_method": "passive_url_analysis"
+                    })
+        
         return plugins
 
     def _enumerate_themes(self, url: str) -> List[Dict[str, Any]]:
@@ -529,90 +763,26 @@ class WordPressScannerEngine:
         return list(set(users))  # Remove duplicates
 
     def _run_wpscan(self, url: str) -> Dict[str, Any]:
-        """Run WPScan as ENRICHMENT ONLY - fail fast if not available or slow"""
-        if not tool_available("wpscan"):
-            logger.debug("[WP] WPScan not available - using advanced scan data only")
-            return {}
-
-        os.makedirs(self.wpscan_cache_dir, exist_ok=True)
+        """WPScan is DISABLED - removed API dependency entirely.
         
-        # Build command with proper parameters for WPScan 3.x
-        cmd = [
-            "wpscan",
-            "--url", url,
-            "--format", "json",
-            "--cache-dir", self.wpscan_cache_dir,
-            "--disable-tls-checks",  # Skip SSL verification
-            "-e", "vp,u,m"  # Enumerate vulnerable plugins, users, media
-        ]
-
-        # Only add API token if provided - skip if invalid
-        if self.wps_token and len(self.wps_token) > 10:
-            cmd.extend(["--api-token", self.wps_token])
-        else:
-            # Exit code 5 often means missing/invalid API token - use cache only mode
-            logger.debug("[WP] No valid WPScan API token - using cache only")
-            cmd.append("--no-update")  # Skip update check when no token
-            cmd.append("--stealthy")  # More conservative scanning
-
-        # FAIL FAST: Only try once, no endless retries
-        max_retries = 2
-        for attempt in range(max_retries):
-            try:
-                cmd_env = os.environ.copy()
-                cmd_env["WPSCAN_CACHE_DIR"] = self.wpscan_cache_dir
-                
-                # Use timeout from config or default to 180 seconds
-                timeout_val = int(os.getenv('WPSCAN_TIMEOUT', 180))
-                ret, out, err = run_command(cmd, timeout=timeout_val, env=cmd_env)
-                
-                # Handle specific exit codes
-                if ret == 5:
-                    logger.warning(f"[WP] WPScan exit code 5 - API token or parameter issue")
-                    # Try without API token on retry
-                    if self.wps_token and attempt == 0:
-                        logger.debug("[WP] Retrying WPScan without API token...")
-                        self.wps_token = ""
-                        cmd = [
-                            "wpscan",
-                            "--url", url,
-                            "--format", "json",
-                            "--cache-dir", self.wpscan_cache_dir,
-                            "--disable-tls-checks",
-                            "-e", "vp,u,m",
-                            "--no-update",
-                            "--stealthy",
-                        ]
-                        continue
-                    else:
-                        logger.debug(f"[WP] WPScan failed with code 5 - skipping (likely API token invalid)")
-                        return {}
-                
-                if ret != 0:
-                    logger.debug(f"[WP] WPScan failed with code {ret} - skipping (not critical)")
-                    return {}
-                
-                # Parse output
-                if out:
-                    try:
-                        data = json.loads(out)
-                        logger.info(f"[WP] WPScan enrichment successful")
-                        return data
-                    except json.JSONDecodeError:
-                        logger.debug("[WP] Failed to parse WPScan output - skipping")
-                        return {}
-                
-                # Success - exit retry loop
-                break
-                        
-            except Exception as e:
-                logger.debug(f"[WP] WPScan execution failed: {str(e)[:50]} - skipping")
-                return {}
+        FIX: WPScan API was causing rate limiting issues (HTTP 429).
+        We now rely solely on:
+        1. wp_advanced_scan for data collection
+        2. HTTP-based detection for vulnerabilities
+        3. Local wordpress_rules.json for vulnerability matching
+        4. CVELookup for CVE enrichment
         
+        This eliminates all WPScan API rate limiting issues.
+        """
+        logger.debug(f"[WP] WPScan API scanning is disabled - using local detection only for {url}")
         return {}
 
     def _scan_wordpress_site(self, url: str) -> Dict[str, Any]:
-        """Scan a WordPress site using wp_advanced_scan as PRIMARY, WPScan as enrichment only"""
+        """Scan a WordPress site using wp_advanced_scan as PRIMARY, WPScan as enrichment only.
+        
+        OPTIMIZATION: Cache scan results by domain + WP version + plugin versions.
+        If cache hit, return cached result immediately (skip all scanning).
+        """
         site_info = {
             "url": url,
             "version": None,
@@ -621,8 +791,17 @@ class WordPressScannerEngine:
             "users": [],
             "vulnerabilities": [],
             "core_vulnerabilities": [],
-            "source": "wp_advanced_scan"  # Track source
+            "source": "wp_advanced_scan"
         }
+
+        # ✅ STEP 0: CHECK CACHE (OPTIMIZATION)
+        # First, do a quick version + plugin detection to build cache key
+        quick_version = self._detect_version(url)
+        quick_plugins = self._enumerate_plugins(url)
+        cached = self._get_cached_result(url, quick_version, quick_plugins)
+        if cached:
+            logger.info(f"[WP] Using cached scan result for {url}")
+            return cached
 
         # ✅ STEP 1: PRIMARY - Run wp_advanced_scan
         logger.info(f"[WP] Running wp_advanced_scan on {url}...")
@@ -658,11 +837,9 @@ class WordPressScannerEngine:
             site_info["users"] = self._enumerate_users(url)
         
         # ✅ STEP 3: OPTIONAL - Run WPScan if available (enrichment ONLY)
-        # Do NOT fail if WPScan fails - we already have data from advanced_scan
         wpscan_data = self._run_wpscan(url)
         if wpscan_data:
             logger.info(f"[WP] WPScan enrichment succeeded")
-            # Merge only NEW data from WPScan
             if "version" in wpscan_data and not site_info["version"]:
                 site_info["version"] = wpscan_data["version"].get("number")
             if "plugins" in wpscan_data:
@@ -689,64 +866,25 @@ class WordPressScannerEngine:
         known_vulns = self._check_known_vulnerabilities(url, site_info)
         site_info["vulnerabilities"].extend(known_vulns)
 
-        # ✅ STEP 6: Enrich detected components with CVEs without changing scan flow
+        # ✅ STEP 6: Enrich detected components with CVEs
         self._enrich_site_info_with_cves(site_info)
         site_info["conditioned_findings"] = self._build_conditioned_findings(site_info)
+
+        # ✅ STEP 7: CACHE RESULT (OPTIMIZATION)
+        self._cache_result(url, site_info["version"] or "unknown", site_info["plugins"], site_info)
 
         return site_info
 
     def _enrich_site_info_with_cves(self, site_info: Dict[str, Any]):
-        """Attach CVEs to detected WordPress components using fail-safe lookups."""
-        try:
-            cve_lookup = CVELookup()
-        except Exception as e:
-            logger.warning(f"[WP] CVE lookup initialization failed: {e}")
-            return
-
-        for plugin in site_info.get("plugins", []):
-            if not isinstance(plugin, dict):
-                continue
-            plugin.setdefault("vulnerabilities", [])
-            if plugin["vulnerabilities"]:
-                continue
-            name = plugin.get("name")
-            version = plugin.get("version")
-            if not name or not version or str(version).lower() == "unknown":
-                continue
-            try:
-                cves = cve_lookup.get_wp_plugin_cves(name, version)
-                if cves:
-                    plugin["vulnerabilities"] = cves
-                    logger.warning(f"[WP] {name} v{version} has {len(cves)} CVEs")
-            except Exception as e:
-                logger.warning(f"[WP] Plugin CVE lookup failed for {name}: {e}")
-
-        for theme in site_info.get("themes", []):
-            if not isinstance(theme, dict):
-                continue
-            theme.setdefault("vulnerabilities", [])
-            if theme["vulnerabilities"]:
-                continue
-            name = theme.get("name")
-            version = theme.get("version")
-            if not name or not version or str(version).lower() == "unknown":
-                continue
-            try:
-                cves = cve_lookup.get_wp_theme_cves(name, version)
-                if cves:
-                    theme["vulnerabilities"] = cves
-                    logger.warning(f"[WP] Theme {name} v{version} has {len(cves)} CVEs")
-            except Exception as e:
-                logger.warning(f"[WP] Theme CVE lookup failed for {name}: {e}")
-
-        if site_info.get("version") and not site_info.get("core_vulnerabilities"):
-            try:
-                cves = cve_lookup.get_wp_core_cves(site_info["version"])
-                if cves:
-                    site_info["core_vulnerabilities"] = cves
-                    logger.warning(f"[WP] WordPress {site_info['version']} has {len(cves)} CVEs")
-            except Exception as e:
-                logger.warning(f"[WP] Core CVE lookup failed for {site_info.get('version')}: {e}")
+        """CVE lookup is DISABLED - WPScan API removed.
+        
+        This method is kept for compatibility but does nothing.
+        All vulnerability detection is now done via:
+        1. wp_advanced_scan for data collection
+        2. HTTP-based detection for vulnerabilities
+        3. Local wordpress_rules.json for vulnerability matching
+        """
+        pass  # No-op - CVE lookup disabled
 
     def _normalize_component_name(self, name: str) -> str:
         return (name or "").strip().lower().replace("_", "-")

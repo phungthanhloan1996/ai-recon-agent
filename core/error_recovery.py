@@ -1,14 +1,104 @@
 """
 core/error_recovery.py - Self-Reflection and Error Recovery System
 Analyzes failures and adapts strategy automatically
+
+Enhanced with error location tracking - shows which tool failed, where (file:line:function)
 """
 
 import logging
+import traceback
+import sys
 from typing import Dict, List, Optional, Any, Tuple
 from collections import defaultdict
 import json
 
 logger = logging.getLogger("recon.error_recovery")
+
+
+class ErrorLocation:
+    """Stores detailed error location information"""
+    
+    def __init__(self, filename: str, lineno: int, function: str, code_context: str = ""):
+        self.filename = filename
+        self.lineno = lineno
+        self.function = function
+        self.code_context = code_context
+    
+    def __str__(self) -> str:
+        return f"{self.filename}:{self.lineno} in {self.function}()"
+    
+    def to_dict(self) -> Dict:
+        return {
+            'filename': self.filename,
+            'lineno': self.lineno,
+            'function': self.function,
+            'code_context': self.code_context
+        }
+
+
+def get_error_location(exc_info=None) -> ErrorLocation:
+    """
+    Extract detailed error location from current exception or provided exc_info.
+    Returns the innermost frame where the error occurred.
+    """
+    if exc_info is None:
+        exc_info = sys.exc_info()
+    
+    if not exc_info or not exc_info[2]:
+        return ErrorLocation("unknown", 0, "unknown", "")
+    
+    tb = exc_info[2]
+    
+    # Walk to the deepest frame
+    deepest_frame = None
+    while tb is not None:
+        deepest_frame = tb.tb_frame
+        tb = tb.tb_next
+    
+    if deepest_frame is None:
+        return ErrorLocation("unknown", 0, "unknown", "")
+    
+    filename = deepest_frame.f_code.co_filename
+    lineno = deepest_frame.tb_lineno if hasattr(deepest_frame, 'tb_lineno') else deepest_frame.f_lineno
+    function = deepest_frame.f_code.co_name
+    
+    # Try to get code context
+    code_context = ""
+    try:
+        import linecache
+        line = linecache.getline(filename, lineno).strip()
+        if line:
+            code_context = line[:80]  # Limit length
+    except:
+        pass
+    
+    return ErrorLocation(filename, lineno, function, code_context)
+
+
+def get_full_traceback(exc_info=None) -> List[Dict]:
+    """
+    Get full traceback as a list of frames with location info.
+    """
+    if exc_info is None:
+        exc_info = sys.exc_info()
+    
+    if not exc_info or not exc_info[2]:
+        return []
+    
+    frames = []
+    tb = exc_info[2]
+    while tb is not None:
+        frame = tb.tb_frame
+        frames.append({
+            'filename': frame.f_code.co_filename,
+            'lineno': tb.tb_lineno,
+            'function': frame.f_code.co_name,
+            'locals': {k: repr(v)[:50] for k, v in frame.f_locals.items() 
+                      if not k.startswith('__') and not callable(v)}
+        })
+        tb = tb.tb_next
+    
+    return list(reversed(frames))  # Oldest first
 
 
 class ErrorRecovery:
@@ -65,23 +155,45 @@ class ErrorRecovery:
         self.retry_state = {}  # phase -> retry info
         self.successful_approaches = defaultdict(list)  # phase -> working approaches
 
-    def log_error(self, phase: str, tool: str, error: str, context: Dict = None) -> None:
+    def log_error(self, phase: str, tool: str, error: str, context: Dict = None, 
+                  exc_info=None, location: ErrorLocation = None) -> None:
         """
-        Log an error with context
+        Log an error with context and location information.
+        
+        Args:
+            phase: The phase where the error occurred
+            tool: The tool/module that failed
+            error: The error message
+            context: Additional context dictionary
+            exc_info: Exception info from sys.exc_info() for traceback analysis
+            location: Pre-computed ErrorLocation (if not provided, will extract from exc_info)
         """
+        # Extract location from exception if available
+        if location is None and exc_info is not None:
+            location = get_error_location(exc_info)
+        elif location is None:
+            location = get_error_location()
+        
+        # Get full traceback frames
+        frames = get_full_traceback(exc_info) if exc_info else []
+        
         error_entry = {
             'phase': phase,
             'tool': tool,
             'error': error,
             'error_type': self._categorize_error(error),
             'context': context or {},
+            'location': location.to_dict() if location else None,
+            'traceback': frames,
             'timestamp': logger.handlers[0].formatter.default_time_format if logger.handlers else None
         }
         
         self.error_history[phase].append(error_entry)
         self.error_count[phase] += 1
         
-        logger.warning(f"[{phase}] {tool}: {error[:50]}")
+        # Log with location info
+        location_str = str(location) if location else ""
+        logger.warning(f"[{phase}] {tool}: {error[:50]} @ {location_str}")
 
     def log_success(self, phase: str, tool: str, approach: str = "") -> None:
         """
@@ -267,6 +379,157 @@ class ErrorRecovery:
             del self.phase_strategies[phase]
         
         logger.info(f"Reset error tracking for {phase}")
+
+    def get_error_summary(self) -> Dict[str, Any]:
+        """
+        Get a summary of all errors with locations.
+        Returns a structured dict for display or reporting.
+        """
+        summary = {
+            'total_errors': sum(self.error_count.values()),
+            'phases': {}
+        }
+        
+        for phase, errors in self.error_history.items():
+            phase_errors = []
+            for err in errors:
+                error_info = {
+                    'tool': err.get('tool', 'unknown'),
+                    'error': err.get('error', '')[:100],
+                    'error_type': err.get('error_type', 'unknown'),
+                    'location': err.get('location'),
+                    'timestamp': err.get('timestamp')
+                }
+                phase_errors.append(error_info)
+            summary['phases'][phase] = {
+                'count': len(phase_errors),
+                'errors': phase_errors
+            }
+        
+        return summary
+
+    def print_error_report(self, use_colors: bool = True) -> None:
+        """
+        Print a formatted error report to stdout.
+        Shows which tool failed, where (file:line:function), and the error message.
+        """
+        # ANSI color codes
+        RED = '\033[91m' if use_colors else ''
+        YELLOW = '\033[93m' if use_colors else ''
+        CYAN = '\033[96m' if use_colors else ''
+        GREEN = '\033[92m' if use_colors else ''
+        BOLD = '\033[1m' if use_colors else ''
+        DIM = '\033[2m' if use_colors else ''
+        RESET = '\033[0m' if use_colors else ''
+        
+        total_errors = sum(self.error_count.values())
+        
+        if total_errors == 0:
+            print(f"\n{GREEN}{BOLD}✅ No errors encountered during scan{RESET}")
+            return
+        
+        print(f"\n{RED}{BOLD}{'═' * 70}")
+        print(f"  🚨 ERROR REPORT - {total_errors} error(s) detected")
+        print(f"{'═' * 70}{RESET}")
+        
+        for phase, errors in sorted(self.error_history.items()):
+            if not errors:
+                continue
+            
+            print(f"\n{YELLOW}{BOLD}┌─ Phase: {phase.upper()} ({len(errors)} error(s)){RESET}")
+            print(f"{YELLOW}│{'─' * 66}{RESET}")
+            
+            for i, err in enumerate(errors, 1):
+                tool = err.get('tool', 'unknown')
+                error_msg = err.get('error', '')[:80]
+                error_type = err.get('error_type', 'unknown')
+                location = err.get('location')
+                timestamp = err.get('timestamp', '')
+                
+                # Error #N
+                print(f"{YELLOW}│{RESET}  {RED}#{i}{RESET}")
+                
+                # Tool name
+                print(f"{YELLOW}│{RESET}    {BOLD}Tool:{RESET} {CYAN}{tool}{RESET}")
+                
+                # Error message
+                print(f"{YELLOW}│{RESET}    {BOLD}Error:{RESET} {RED}{error_msg}{RESET}")
+                
+                # Error type
+                print(f"{YELLOW}│{RESET}    {BOLD}Type:{RESET} {YELLOW}{error_type}{RESET}")
+                
+                # Location info
+                if location:
+                    filename = location.get('filename', 'unknown')
+                    # Make filename relative if possible
+                    if 'ai-recon-agent' in filename:
+                        idx = filename.find('ai-recon-agent')
+                        filename = filename[idx:]
+                    lineno = location.get('lineno', '?')
+                    function = location.get('function', '?')
+                    code_context = location.get('code_context', '')
+                    
+                    print(f"{YELLOW}│{RESET}    {BOLD}Location:{RESET}")
+                    print(f"{YELLOW}│{RESET}      📍 {GREEN}{filename}:{lineno}{RESET} in {CYAN}{function}(){RESET}")
+                    if code_context:
+                        print(f"{YELLOW}│{RESET}      {DIM}> {code_context}{RESET}")
+                
+                # Separator between errors
+                if i < len(errors):
+                    print(f"{YELLOW}│{RESET}")
+            
+            print(f"{YELLOW}└{'─' * 66}{RESET}")
+        
+        # Print summary
+        print(f"\n{RED}{BOLD}{'═' * 70}")
+        print(f"  Summary: {total_errors} total errors across {len(self.error_history)} phases")
+        print(f"{'═' * 70}{RESET}")
+        
+        # Most common error types
+        error_types = defaultdict(int)
+        for phase_errors in self.error_history.values():
+            for err in phase_errors:
+                error_types[err.get('error_type', 'unknown')] += 1
+        
+        if error_types:
+            print(f"\n{BOLD}Most common error types:{RESET}")
+            for etype, count in sorted(error_types.items(), key=lambda x: -x[1]):
+                print(f"  {YELLOW}{etype}{RESET}: {count} occurrence(s)")
+
+    def get_errors_for_display(self) -> List[Dict]:
+        """
+        Get recent errors formatted for display in the dashboard.
+        Returns list of dicts with: tool, phase, error, location_str
+        """
+        display_errors = []
+        
+        for phase, errors in self.error_history.items():
+            for err in errors:
+                tool = err.get('tool', 'unknown')
+                error_msg = err.get('error', '')[:40]
+                location = err.get('location')
+                
+                if location:
+                    filename = location.get('filename', 'unknown')
+                    if 'ai-recon-agent' in filename:
+                        idx = filename.find('ai-recon-agent')
+                        filename = filename[idx + len('ai-recon-agent/'):]  # Remove prefix
+                    lineno = location.get('lineno', '?')
+                    function = location.get('function', '?')
+                    location_str = f"{filename}:{lineno}::{function}"
+                else:
+                    location_str = "unknown"
+                
+                display_errors.append({
+                    'phase': phase,
+                    'tool': tool,
+                    'error': error_msg,
+                    'location': location_str,
+                    'error_type': err.get('error_type', 'unknown')
+                })
+        
+        # Return most recent errors first (up to 10)
+        return list(reversed(display_errors[-10:]))
 
 
 class ConditionalPlaybook:

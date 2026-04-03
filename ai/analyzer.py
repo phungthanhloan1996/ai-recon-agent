@@ -453,6 +453,7 @@ class AIAnalyzer:
         Framework: Penetration tester mindset
         - Prioritize endpoints leading to RCE, admin access, data breach
         - Score reflects exploitation chain potential, not generic risk
+        - REDUCES score for endpoints with repeated failures (PRIORITY 6)
         """
         score = 0.0
         url = endpoint.get('url', '').lower()
@@ -460,6 +461,12 @@ class AIAnalyzer:
         params = endpoint.get('parameters', [])
         hints = endpoint.get('vulnerability_hints', [])
         status = endpoint.get('status_code', 0)
+        
+        # ─── PRIORITY 6: FAILURE PENALTY ──────────────────────────────────────────
+        # Reduce score for endpoints with repeated scanning failures
+        failure_penalty = self._calculate_failure_penalty(url, ep_type)
+        if failure_penalty > 0:
+            logger.debug(f"[ANALYZER] Applying failure penalty {failure_penalty:.2f} for {url[:80]}")
         
         # ─── CRITICAL EXPLOITATION VECTORS (0.8-1.0) ─────────────────────────────────
         
@@ -569,7 +576,107 @@ class AIAnalyzer:
         if any(x in url for x in ['debug', 'test', 'dev']):
             score += 0.08
         
+        # Apply failure penalty
+        score = max(0.0, score - failure_penalty)
+        
         return min(score, 1.0)
+
+    def _calculate_failure_penalty(self, url: str, ep_type: str) -> float:
+        """
+        Calculate score penalty based on repeated scanning failures.
+        
+        PRIORITY 6: If same endpoint/category fails > N times, reduce score permanently.
+        This prevents wasting time on endpoints that consistently return false positives
+        or cannot be exploited.
+        
+        Args:
+            url: Endpoint URL
+            ep_type: Endpoint type
+            
+        Returns:
+            Penalty value (0.0 to 0.5) to subtract from score
+        """
+        penalty = 0.0
+        
+        # Get failure history from state
+        failure_history = self.state.get("scan_failure_history", {}) or {}
+        repeated_failures = self.state.get("repeated_endpoint_failures", {}) or {}
+        
+        # Check URL-based failures
+        url_key = self._normalize_url_for_tracking(url)
+        url_failures = failure_history.get(url_key, 0)
+        
+        # Check endpoint type failures
+        type_failures = repeated_failures.get(ep_type, 0)
+        
+        # Threshold for penalty activation
+        FAILURE_THRESHOLD = 5  # After 5 failures, start penalizing
+        
+        if url_failures >= FAILURE_THRESHOLD:
+            # Progressive penalty: more failures = higher penalty
+            excess_failures = url_failures - FAILURE_THRESHOLD
+            penalty = min(0.3 + (excess_failures * 0.05), 0.5)  # Max 0.5 penalty
+            logger.debug(f"[ANALYZER] URL {url[:60]} has {url_failures} failures, penalty: {penalty:.2f}")
+        
+        if type_failures >= FAILURE_THRESHOLD:
+            excess_failures = type_failures - FAILURE_THRESHOLD
+            type_penalty = min(0.2 + (excess_failures * 0.03), 0.4)
+            penalty = max(penalty, type_penalty)
+            logger.debug(f"[ANALYZER] Endpoint type '{ep_type}' has {type_failures} failures, penalty: {type_penalty:.2f}")
+        
+        # Special case: nuclei returned same error code (e.g., 2) multiple times
+        nuclei_failures = repeated_failures.get("nuclei_error_2", 0)
+        if nuclei_failures >= 3:
+            penalty = max(penalty, 0.3)
+            logger.debug(f"[ANALYZER] Nuclei error pattern detected ({nuclei_failures} times), penalty: 0.3")
+        
+        return penalty
+
+    def _normalize_url_for_tracking(self, url: str) -> str:
+        """
+        Normalize URL for failure tracking.
+        Groups similar URLs together for aggregate failure counting.
+        """
+        parsed = urlparse(url.lower())
+        path = parsed.path or "/"
+        
+        # Normalize path - remove trailing slashes and query params for grouping
+        path = path.rstrip('/')
+        
+        # Create a normalized key: host + path (without query)
+        return f"{parsed.netloc}{path}"
+
+    def record_endpoint_failure(self, url: str, ep_type: str = None, error_code: int = None):
+        """
+        Record a scanning failure for an endpoint.
+        Call this when a scan attempt fails or returns consistent error.
+        
+        Args:
+            url: Endpoint URL that failed
+            ep_type: Endpoint type (e.g., 'api', 'admin', 'upload')
+            error_code: Error code from scanner (e.g., nuclei exit code)
+        """
+        # Update URL failure count
+        failure_history = self.state.get("scan_failure_history", {}) or {}
+        url_key = self._normalize_url_for_tracking(url)
+        failure_history[url_key] = failure_history.get(url_key, 0) + 1
+        self.state.set("scan_failure_history", failure_history)
+        
+        # Update endpoint type failure count
+        repeated_failures = self.state.get("repeated_endpoint_failures", {}) or {}
+        if ep_type:
+            repeated_failures[ep_type] = repeated_failures.get(ep_type, 0) + 1
+        
+        # Track specific error codes (e.g., nuclei code 2)
+        if error_code is not None:
+            error_key = f"nuclei_error_{error_code}"
+            repeated_failures[error_key] = repeated_failures.get(error_key, 0) + 1
+        
+        self.state.set("repeated_endpoint_failures", repeated_failures)
+        
+        total_failures = failure_history.get(url_key, 0)
+        if total_failures >= 5:
+            logger.warning(f"[ANALYZER] Endpoint {url[:80]} has {total_failures} failures - deprioritizing")
 
     def _collect_report_data(self) -> Dict:
         """Collect all scan data for report"""

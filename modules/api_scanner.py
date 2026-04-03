@@ -224,23 +224,357 @@ class APIScannerRunner:
             result["raw_endpoints"].extend(found_endpoints)
 
     def _test_endpoints(self, base_url: str, result: Dict[str, Any]):
-        """Test discovered endpoints for vulnerabilities"""
+        """Test discovered endpoints for vulnerabilities with parameter fuzzing.
+        
+        FIX: Added comprehensive parameter fuzzing for REST API endpoints:
+        1. Test common query parameters for IDOR, SQLi, XSS
+        2. Test HTTP methods (GET, POST, PUT, DELETE, PATCH)
+        3. Test authentication bypass techniques
+        4. Test rate limiting and abuse potential
+        """
         vulnerabilities = []
         
         # Test for common API vulnerabilities
         for endpoint in result.get("rest_endpoints", []):
             full_url = urljoin(base_url, endpoint)
+            
+            # Basic endpoint tests
             vuln = self._test_rest_endpoint(full_url)
             if vuln:
                 vulnerabilities.extend(vuln)
+            
+            # NEW: Parameter fuzzing
+            param_vulns = self._fuzz_api_parameters(full_url, endpoint)
+            if param_vulns:
+                vulnerabilities.extend(param_vulns)
+            
+            # NEW: HTTP method fuzzing
+            method_vulns = self._fuzz_http_methods(full_url, endpoint)
+            if method_vulns:
+                vulnerabilities.extend(method_vulns)
         
         for endpoint in result.get("graphql_endpoints", []):
             full_url = urljoin(base_url, endpoint)
             vuln = self._test_graphql_endpoint(full_url)
             if vuln:
                 vulnerabilities.extend(vuln)
+            
+            # NEW: GraphQL specific fuzzing
+            graphql_vulns = self._fuzz_graphql_endpoint(full_url)
+            if graphql_vulns:
+                vulnerabilities.extend(graphql_vulns)
         
         result["vulnerabilities"] = vulnerabilities
+
+    def _fuzz_api_parameters(self, base_url: str, endpoint: str) -> List[Dict[str, Any]]:
+        """Fuzz API endpoints with common parameter patterns.
+        
+        Tests for:
+        - IDOR (Insecure Direct Object Reference)
+        - SQL Injection via parameters
+        - XSS via parameters
+        - Command injection via parameters
+        - Path traversal via parameters
+        """
+        vulnerabilities = []
+        
+        # Common parameter names to fuzz
+        fuzz_params = [
+            # IDOR parameters
+            ("id", ["1", "2", "999999", "-1", "0", "admin"]),
+            ("user_id", ["1", "2", "999999"]),
+            ("account_id", ["1", "2", "999999"]),
+            ("order_id", ["1", "2", "999999"]),
+            ("item_id", ["1", "2", "999999"]),
+            
+            # SQLi parameters
+            ("search", ["' OR '1'='1", "1' OR '1'='1' --", "1; DROP TABLE users--"]),
+            ("q", ["' OR '1'='1", "1' OR '1'='1' --"]),
+            ("query", ["' OR '1'='1", "<script>alert(1)</script>"]),
+            ("filter", ["{'$ne': ''}", "1' OR '1'='1"]),
+            
+            # Path traversal
+            ("file", ["../../../etc/passwd", "..%2F..%2F..%2Fetc%2Fpasswd"]),
+            ("path", ["../../../etc/passwd", "../../../../../../etc/passwd"]),
+            ("dir", ["../../../etc/passwd"]),
+            
+            # Command injection
+            ("cmd", ["; ls -la", "| whoami", "$(whoami)"]),
+            ("exec", ["; id", "| cat /etc/passwd"]),
+            
+            # XSS parameters
+            ("name", ["<script>alert(1)</script>", "<img src=x onerror=alert(1)>"]),
+            ("title", ["<script>alert(1)</script>"]),
+            ("content", ["<img src=x onerror=alert(1)>"]),
+            ("callback", ["alert(1)", "document.cookie"]),
+        ]
+        
+        # Test each parameter
+        for param_name, test_values in fuzz_params:
+            for test_value in test_values:
+                try:
+                    import urllib.request
+                    import urllib.error
+                    import socket
+                    
+                    # Build test URL
+                    encoded_value = urllib.parse.quote(test_value, safe='')
+                    test_url = f"{base_url}?{param_name}={encoded_value}"
+                    
+                    req = urllib.request.Request(test_url)
+                    req.add_header('User-Agent', 'Mozilla/5.0')
+                    
+                    socket.setdefaulttimeout(3)
+                    response = urllib.request.urlopen(req, timeout=3)
+                    response_body = response.read().decode('utf-8', errors='ignore')
+                    status_code = response.status
+                    
+                    # Analyze response for vulnerabilities
+                    vuln = self._analyze_fuzz_response(
+                        param_name, test_value, status_code, response_body, base_url, endpoint
+                    )
+                    if vuln:
+                        vulnerabilities.append(vuln)
+                        # Only need one successful detection per parameter type
+                        break
+                        
+                except urllib.error.HTTPError as e:
+                    # Check if error reveals information
+                    if e.code in [400, 422, 500]:
+                        try:
+                            error_body = e.read().decode('utf-8', errors='ignore')
+                            # SQL error indicators
+                            if any(pattern in error_body.lower() for pattern in ['sql', 'syntax', 'query', 'database']):
+                                vulnerabilities.append({
+                                    "type": "API Error Information Disclosure",
+                                    "severity": "MEDIUM",
+                                    "url": base_url,
+                                    "parameter": param_name,
+                                    "payload": test_value,
+                                    "description": f"API returns detailed error messages that may reveal database structure",
+                                    "evidence": error_body[:200]
+                                })
+                        except:
+                            pass
+                except (socket.timeout, Exception):
+                    pass
+                finally:
+                    socket.setdefaulttimeout(None)
+        
+        return vulnerabilities
+
+    def _analyze_fuzz_response(self, param: str, payload: str, status: int, body: str, base_url: str, endpoint: str) -> Optional[Dict[str, Any]]:
+        """Analyze response from fuzz test to detect vulnerabilities."""
+        
+        # SQL Injection detection
+        if any(pattern in payload.lower() for pattern in ["' or", "' and", "drop table", "union select"]):
+            # Check for different response length or content
+            if status == 200 and len(body) > 50:
+                # Check for SQL error messages
+                sql_indicators = ['sql', 'mysql', 'syntax', 'database', 'query', 'table', 'column']
+                if any(indicator in body.lower() for indicator in sql_indicators):
+                    return {
+                        "type": "API SQL Injection",
+                        "severity": "CRITICAL",
+                        "url": base_url,
+                        "parameter": param,
+                        "payload": payload,
+                        "description": f"Potential SQL injection via {param} parameter",
+                        "evidence": body[:200]
+                    }
+        
+        # XSS detection
+        if "<script>" in payload or "onerror=" in payload:
+            if payload in body:
+                return {
+                    "type": "API Cross-Site Scripting (XSS)",
+                    "severity": "HIGH",
+                    "url": base_url,
+                    "parameter": param,
+                    "payload": payload,
+                    "description": f"XSS payload reflected in API response via {param} parameter",
+                    "evidence": body[:200]
+                }
+        
+        # Path traversal detection
+        if "../" in payload or "..%2F" in payload.lower():
+            if "root:" in body or "/bin/bash" in body:
+                return {
+                    "type": "API Path Traversal",
+                    "severity": "CRITICAL",
+                    "url": base_url,
+                    "parameter": param,
+                    "payload": payload,
+                    "description": f"Path traversal allows reading system files via {param} parameter",
+                    "evidence": body[:200]
+                }
+        
+        # Command injection detection
+        if any(pattern in payload for pattern in [";", "|", "$("]):
+            if any(indicator in body.lower() for indicator in ["uid=", "gid=", "root:", "www-data"]):
+                return {
+                    "type": "API Command Injection",
+                    "severity": "CRITICAL",
+                    "url": base_url,
+                    "parameter": param,
+                    "payload": payload,
+                    "description": f"Command injection possible via {param} parameter",
+                    "evidence": body[:200]
+                }
+        
+        # IDOR detection - check if different IDs return different data
+        if param in ["id", "user_id", "account_id", "order_id", "item_id"]:
+            if status == 200 and len(body) > 50:
+                # Check if response contains user-like data
+                idor_indicators = ['"id":', '"name":', '"email":', '"user":', '"data":']
+                if any(indicator in body for indicator in idor_indicators):
+                    return {
+                        "type": "API Insecure Direct Object Reference (IDOR)",
+                        "severity": "HIGH",
+                        "url": base_url,
+                        "parameter": param,
+                        "payload": payload,
+                        "description": f"Direct object reference via {param} parameter may allow unauthorized access",
+                        "evidence": body[:200]
+                    }
+        
+        return None
+
+    def _fuzz_http_methods(self, base_url: str, endpoint: str) -> List[Dict[str, Any]]:
+        """Test API endpoints with different HTTP methods.
+        
+        Tests for:
+        - Method override vulnerabilities
+        - Missing method restrictions
+        - CORS preflight bypass
+        """
+        vulnerabilities = []
+        
+        methods_to_test = ["DELETE", "PUT", "PATCH", "OPTIONS", "HEAD"]
+        
+        for method in methods_to_test:
+            try:
+                import urllib.request
+                import urllib.error
+                import socket
+                
+                req = urllib.request.Request(base_url, method=method)
+                req.add_header('User-Agent', 'Mozilla/5.0')
+                
+                socket.setdefaulttimeout(3)
+                response = urllib.request.urlopen(req, timeout=3)
+                status_code = response.status
+                response_body = response.read().decode('utf-8', errors='ignore')
+                
+                # Check for dangerous methods that should be restricted
+                if method in ["DELETE", "PUT", "PATCH"] and status_code == 200:
+                    vulnerabilities.append({
+                        "type": "API Unsafe HTTP Method",
+                        "severity": "MEDIUM",
+                        "url": base_url,
+                        "method": method,
+                        "description": f"API endpoint accepts {method} method which may allow unauthorized modifications",
+                        "evidence": f"Status: {status_code}, Response length: {len(response_body)}"
+                    })
+                
+                # Check for CORS issues with OPTIONS
+                if method == "OPTIONS":
+                    allow_header = response.headers.get('Access-Control-Allow-Methods', '')
+                    if '*' in allow_header or 'DELETE' in allow_header or 'PUT' in allow_header:
+                        vulnerabilities.append({
+                            "type": "API CORS Misconfiguration",
+                            "severity": "MEDIUM",
+                            "url": base_url,
+                            "description": f"CORS allows dangerous methods: {allow_header}",
+                            "evidence": f"Access-Control-Allow-Methods: {allow_header}"
+                        })
+                        
+            except urllib.error.HTTPError as e:
+                # 405 Method Not Allowed is expected and safe
+                if e.code != 405:
+                    # Other errors might reveal information
+                    pass
+            except (socket.timeout, Exception):
+                pass
+            finally:
+                socket.setdefaulttimeout(None)
+        
+        return vulnerabilities
+
+    def _fuzz_graphql_endpoint(self, base_url: str) -> List[Dict[str, Any]]:
+        """Additional GraphQL-specific fuzzing tests.
+        
+        Tests for:
+        - Batch query abuse
+        - Deep query recursion
+        - Field suggestion leaks
+        """
+        vulnerabilities = []
+        
+        try:
+            import urllib.request
+            import urllib.error
+            import socket
+            import json
+            
+            # Test 1: Batch query abuse (send many queries at once)
+            batch_query = {
+                "query": [
+                    "{ __typename }",
+                    "{ __schema { types { name } } }",
+                    "{ __type(name: \"Query\") { fields { name } } }"
+                ]
+            }
+            
+            req = urllib.request.Request(
+                base_url,
+                data=json.dumps(batch_query).encode(),
+                headers={"Content-Type": "application/json"}
+            )
+            
+            socket.setdefaulttimeout(5)
+            response = urllib.request.urlopen(req, timeout=5)
+            if response.status == 200:
+                vulnerabilities.append({
+                    "type": "GraphQL Batch Query Abuse",
+                    "severity": "MEDIUM",
+                    "url": base_url,
+                    "description": "GraphQL endpoint accepts batch queries which may allow resource exhaustion",
+                    "evidence": "Batch query with multiple operations was accepted"
+                })
+            
+            # Test 2: Deep recursion query
+            deep_query = {
+                "query": "{ user { friends { friends { friends { friends { friends { name } } } } } } }"
+            }
+            
+            req = urllib.request.Request(
+                base_url,
+                data=json.dumps(deep_query).encode(),
+                headers={"Content-Type": "application/json"}
+            )
+            
+            start_time = time.time()
+            response = urllib.request.urlopen(req, timeout=10)
+            elapsed = time.time() - start_time
+            
+            if response.status == 200 and elapsed > 5:
+                vulnerabilities.append({
+                    "type": "GraphQL Deep Query Vulnerability",
+                    "severity": "MEDIUM",
+                    "url": base_url,
+                    "description": "GraphQL endpoint accepts deeply nested queries which may cause performance issues",
+                    "evidence": f"Deep query took {elapsed:.2f} seconds to process"
+                })
+                
+        except urllib.error.HTTPError:
+            pass
+        except (socket.timeout, Exception):
+            pass
+        finally:
+            socket.setdefaulttimeout(None)
+        
+        return vulnerabilities
 
     def _test_rest_endpoint(self, url: str) -> List[Dict[str, Any]]:
         """Test REST endpoint for vulnerabilities"""

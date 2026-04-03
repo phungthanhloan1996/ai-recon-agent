@@ -1,0 +1,137 @@
+# Scan Optimizer Configuration
+# AGGRESSIVELY OPTIMIZED settings to reduce scanning time and resource waste
+# Addresses: timeouts, rate limiting, unresponsive hosts
+
+# Timeout settings (in seconds) - AGGRESSIVE fail-fast
+timeouts:
+  connection: 3        # Ultra-fast connection timeout (was 5s)
+  read: 8              # Fast read timeout (was 10s)
+  dns: 2               # Ultra-fast DNS timeout (was 3s)
+  dirbust: 20          # Aggressive dirbust timeout (was 30s)
+  wpscan: 8            # Fast WPScan timeout (was 10s)
+  port_scan: 60        # Reduced port scan timeout (was 120s)
+  host_probe: 5        # Fast host liveness probe
+
+# Blacklist settings - AGGRESSIVE blacklisting for dead hosts
+blacklist:
+  # Number of failures before blacklisting
+  threshold: 2         # Ultra-aggressive (was 3)
+  # Immediate blacklist for DNS errors
+  dns_error_threshold: 1
+  # Quick blacklist for timeouts
+  timeout_threshold: 1 # Blacklist after just 1 timeout
+  # Blacklist expiration time (seconds)
+  expiration: 900      # 15 minutes (was 30 minutes)
+  # Skip target completely after N consecutive failures
+  skip_target_after_failures: 3
+
+# Port scanning settings - REDUCED port count for speed
+port_scanning:
+  # Cache duration for port scan results (seconds)
+  cache_ttl: 1800      # 30 minutes
+  # ONLY essential web ports (drastically reduced)
+  web_ports: [80, 443] # Only essential HTTP/HTTPS
+  # Minimal common ports for quick scanning
+  common_ports: [21, 22, 25, 53, 80, 110, 143, 443, 3306, 3389, 5432, 8080, 8443]
+  # Maximum ports to scan per host (limit to avoid timeouts)
+  max_ports_per_host: 13
+  # Skip port scanning entirely if host is known dead
+  skip_if_dead: true
+  # Fast mode: only scan top 100 ports instead of 1000
+  fast_mode: true
+
+# WPScan settings - LOCAL DATABASE MODE to avoid rate limiting
+wpscan:
+  # Maximum retries for rate limited plugins
+  max_retries: 1       # Ultra-aggressive (was 2)
+  # Backoff times (seconds) - minimal
+  backoff_times: [15]  # Only one short backoff
+  # Skip plugin after this many rate limits
+  skip_after_failures: 1 # Skip immediately on rate limit
+  # Use local database instead of API to avoid rate limiting
+  use_local_database: true
+  # Skip API token validation if no token
+  skip_api_validation: true
+  # Only scan for high-severity vulnerabilities
+  min_severity: "medium"
+  # Skip version detection if already known
+  skip_version_if_known: true
+  # Maximum plugins to enumerate (limit to avoid timeouts)
+  max_plugins: 20
+  # Maximum themes to enumerate
+  max_themes: 10
+
+# Directory brute-force settings
+dirbusting:
+  # No retries on timeout
+  max_retries: 0
+  # Timeout threshold (seconds)
+  timeout: 20          # Reduced from 30s
+  # Prioritized paths to check first (reduced list)
+  priority_paths:
+    - admin
+    - wp-admin
+    - login
+    - wp-login.php
+    - wp-content
+    - wp-includes
+    - xmlrpc.php
+    - robots.txt
+    - .htaccess
+    - api
+    - rest
+
+# Host prioritization - AGGRESSIVE prioritization
+prioritization:
+  # Priority levels (1=high, 2=medium, 3=low)
+  high_priority:
+    - Has live web content
+    - No previous failures
+    - Production environment
+  medium_priority:
+    - Responsive but no content
+    - 0 failures
+  low_priority:
+    - Unresponsive
+    - Any failures
+    - Blacklisted
+    - Dev/test environments
+  # Skip hosts with any failures immediately
+  skip_on_first_failure: false
+  # Maximum consecutive failures before skip
+  max_consecutive_failures: 2
+
+# Concurrency settings - OPTIMIZED for speed
+concurrency:
+  # Maximum concurrent host scans
+  max_concurrent_hosts: 3  # Reduced from 5 to avoid overwhelming
+  # Delay between host scans (seconds)
+  host_scan_delay: 0.2     # Reduced from 0.5s
+  # Maximum concurrent requests per host
+  max_concurrent_requests: 5  # Reduced from 10
+  # Global rate limit (requests per second)
+  global_rate_limit: 10
+
+# Target skip settings - NEW: Skip unresponsive targets entirely
+target_skip:
+  # Skip target if no response after N probes
+  skip_after_probes: 2
+  # Probe timeout (seconds)
+  probe_timeout: 3
+  # Skip entire domain if root is dead
+  skip_domain_if_root_dead: true
+  # Minimum success rate to continue scanning (0.0-1.0)
+  min_success_rate: 0.3
+
+# Cache settings - AGGRESSIVE caching
+cache:
+  # Enable aggressive caching
+  enabled: true
+  # Cache TTL for successful scans (seconds)
+  success_ttl: 3600      # 1 hour
+  # Cache TTL for failed scans (seconds)
+  failure_ttl: 1800      # 30 minutes
+  # Cache location
+  directory: "_cache"
+  # Cache hit rate target
+  target_hit_rate: 0.7

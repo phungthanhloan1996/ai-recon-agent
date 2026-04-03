@@ -17,8 +17,14 @@ class DalfoxRunner:
         self.output_dir = output_dir
         self.seen_urls = set()  # For deduplication
 
-    def run(self, url: str) -> Dict[str, Any]:
-        """Run dalfox on URL"""
+    def run(self, url: str, timeout: int = 30) -> Dict[str, Any]:
+        """
+        Run dalfox on URL with configurable timeout.
+        
+        Args:
+            url: Target URL to scan
+            timeout: Timeout in seconds (default: 30s per endpoint)
+        """
         from core.executor import tool_available
         if not tool_available("dalfox"):
             logger.warning("[DALFOX] dalfox not installed, skipping")
@@ -38,15 +44,15 @@ class DalfoxRunner:
         output_path = os.path.join(self.output_dir, f"dalfox_{safe_name}.json")
         
         try:
-            # BUG 8 FIX: Reduce timeout from 120s to 60s
+            # BUG 8 FIX: Use configurable timeout (default 30s)
             cmd = ["dalfox", "url", url, "--output", output_path]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
             if result.returncode == 0:
                 return {"success": True, "output": result.stdout, "url": url}
             else:
                 return {"success": False, "error": result.stderr}
         except subprocess.TimeoutExpired:
-            logger.warning(f"[DALFOX] Timeout after 60s on {url}")
+            logger.warning(f"[DALFOX] Timeout after {timeout}s on {url}")
             return {"success": False, "error": "timeout"}
         except Exception as e:
             logger.error(f"[DALFOX] Failed: {e}")
