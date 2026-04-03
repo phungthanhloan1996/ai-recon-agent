@@ -314,7 +314,7 @@ class ReportGenerator:
                 f"- **Endpoint:** {vuln.get('endpoint', '')}",
                 f"- **Type:** {vuln.get('type', '')}",
                 f"- **Severity:** {vuln.get('severity', 'MEDIUM')}",
-                f"- **Confidence:** {vuln.get('confidence', 0):.2f}",
+                f"- **Confidence:** {self._format_confidence(vuln.get('confidence', 0))}",
                 f"- **Manual Validation Required:** {manual_flag}",
                 ""
             ])
@@ -341,7 +341,7 @@ class ReportGenerator:
             lines.append("No high-potential findings requiring manual verification.")
             return lines
         severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-        high_potential.sort(key=lambda x: (severity_order.get(x["severity"], 2), -x["confidence"]))
+        high_potential.sort(key=lambda x: (severity_order.get(x["severity"], 2), -self._confidence_sort_value(x.get("confidence", 0))))
         lines.append(f"**Total High-Potential Findings:** {len(high_potential)}")
         lines.append("")
         for severity in ["CRITICAL", "HIGH", "MEDIUM"]:
@@ -351,7 +351,7 @@ class ReportGenerator:
             lines.append(f"### {severity} Severity ({len(items)} findings)")
             lines.append("")
             for idx, item in enumerate(items[:10], 1):
-                lines.extend([f"**{idx}. {item['name']}**", "", f"- **Source:** {item['source']}", f"- **Endpoint:** `{item['endpoint']}`", f"- **Type:** {item['type']}", f"- **Confidence:** {item['confidence']:.2f}", ""])
+                lines.extend([f"**{idx}. {item['name']}**", "", f"- **Source:** {item['source']}", f"- **Endpoint:** `{item['endpoint']}`", f"- **Type:** {item['type']}", f"- **Confidence:** {self._format_confidence(item.get('confidence', 0))}", ""])
                 evidence = item.get("evidence", "")
                 if evidence:
                     lines.extend(["**Evidence:**", "```text", evidence[:500], "```", ""])
@@ -750,3 +750,35 @@ class ReportGenerator:
             }
         except:
             return {"successful": 0, "failed": 0, "suggestions": []}
+
+    def _format_confidence(self, value) -> str:
+        """Safely format confidence value as percentage, handling both float and string types."""
+        try:
+            # If it's already a number (float/int), format as percentage
+            if isinstance(value, (int, float)):
+                return f"{value:.2%}" if value <= 1.0 else f"{value:.1f}%"
+            # If it's a string, try to convert to float first
+            elif isinstance(value, str):
+                # Handle percentage strings like "85%" or "0.85"
+                if value.endswith('%'):
+                    return value
+                num = float(value)
+                return f"{num:.2%}" if num <= 1.0 else f"{num:.1f}%"
+            else:
+                return str(value)
+        except (ValueError, TypeError):
+            return str(value)
+
+    def _confidence_sort_value(self, value) -> float:
+        """Normalize confidence into a numeric value safe for sorting."""
+        try:
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned.endswith('%'):
+                    return float(cleaned[:-1]) / 100.0
+                return float(cleaned)
+            if isinstance(value, (int, float)):
+                return float(value)
+        except (ValueError, TypeError):
+            pass
+        return 0.0

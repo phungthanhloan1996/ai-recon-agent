@@ -286,7 +286,57 @@ class HttpxRunner:
         
         logger.info(f"[HTTPX] Live hosts by status: {status_codes}")
         
+        # Save results to file if output_dir is set
+        if self.output_dir and results:
+            self._save_results(urls, results)
+            return self._load_saved_results()
+        
         return results
+
+    def _save_results(self, urls: List[str], results: List[Dict[str, Any]]):
+        """Save probe results to file in output directory"""
+        if not self.output_dir:
+            return
+        
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            
+            # Save as JSON for structured data
+            json_file = os.path.join(self.output_dir, "httpx_results.json")
+            data = {
+                "timestamp": __import__('time').time(),
+                "total_urls_checked": len(urls),
+                "live_hosts_count": len(results),
+                "results": results
+            }
+            with open(json_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.debug(f"[HTTPX] Saved {len(results)} results to {json_file}")
+            
+            # Also save live URLs as text file (one per line)
+            text_file = os.path.join(self.output_dir, "live_hosts.txt")
+            live_urls = [r.get("url", "") for r in results if r.get("url")]
+            with open(text_file, 'w') as f:
+                f.write('\n'.join(live_urls))
+            logger.debug(f"[HTTPX] Saved {len(live_urls)} live URLs to {text_file}")
+            
+        except Exception as e:
+            logger.error(f"[HTTPX] Failed to save results: {e}")
+
+    def _load_saved_results(self) -> List[Dict[str, Any]]:
+        """Read saved JSON results back from disk and return the parsed result list."""
+        if not self.output_dir:
+            return []
+
+        json_file = os.path.join(self.output_dir, "httpx_results.json")
+        try:
+            with open(json_file, 'r') as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data.get("results", [])
+        except Exception as e:
+            logger.error(f"[HTTPX] Failed to read saved JSON results: {e}")
+        return []
 
     def dns_verify(self, targets: List[str], timeout: int = 5,
                    threads: int = 100, rate_limit: int = 300) -> Dict[str, Dict[str, Any]]:

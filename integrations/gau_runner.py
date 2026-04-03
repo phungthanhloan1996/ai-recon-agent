@@ -95,7 +95,7 @@ class GAURunner:
                     f.write('\n'.join(sorted(urls)))
 
                 logger.info(f"[GAU] Discovered {len(urls)} archived URLs for {domain}")
-                return list(urls)[:max_urls]  # Limit results
+                return self._read_saved_urls(output_file)[:max_urls]
 
             else:
                 logger.error(f"[GAU] Failed: {result.stderr}")
@@ -106,6 +106,15 @@ class GAURunner:
             return []
         except Exception as e:
             logger.error(f"[GAU] Error: {e}")
+            return []
+
+    def _read_saved_urls(self, output_file: str) -> List[str]:
+        """Read GAU URL text output from disk."""
+        try:
+            with open(output_file, 'r') as f:
+                return [line.strip() for line in f if line.strip()]
+        except Exception as e:
+            logger.error(f"[GAU] Failed to read saved URL file: {e}")
             return []
 
     def fetch_with_filters(self, domain: str, include_patterns: List[str] = None,

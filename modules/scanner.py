@@ -23,6 +23,7 @@ from ai.payload_mutation import PayloadMutator
 from learning.learning_engine import LearningEngine
 from integrations.dalfox_runner import DalfoxRunner
 from integrations.nuclei_runner import NucleiRunner
+from integrations.sqlmap_runner import SQLMapRunner
 from core.executor import run_command, tool_available
 from core.resource_manager import get_nuclei_pool, get_concurrency_manager
 
@@ -47,6 +48,7 @@ class ScanningEngine:
         self.learning_engine = learning_engine
         self.dalfox_runner = DalfoxRunner(output_dir)
         self.nuclei_runner = NucleiRunner(output_dir)
+        self.sqlmap_runner = SQLMapRunner(output_dir)
 
         self.scan_results_file = os.path.join(output_dir, "scan_results.json")
 
@@ -1038,8 +1040,8 @@ class ScanningEngine:
         return contexts
 
     def _run_sqlmap(self, url: str, parameters: List[str]):
-        """Best-effort sqlmap execution for high-signal parameterized endpoints."""
-        if not tool_available("sqlmap"):
+        """Best-effort sqlmap execution for high-signal parameterized endpoints using SQLMapRunner."""
+        if not self.sqlmap_runner.is_sqlmap_available():
             return
         # FIX: Skip sqlmap on placeholder parameters like FUZZ
         if any(p == "FUZZ" for p in parameters):
@@ -1047,16 +1049,32 @@ class ScanningEngine:
             return
         marker = parameters[0] if parameters else "id"
         target = url if "?" in url else f"{url}?{marker}=1"
-        cmd = ["sqlmap", "-u", target, "--batch", "--level=2", "--risk=1", "--smart"]
-        ret, out, err = run_command(cmd, timeout=180)
-        if ret == 0 and out:
-            vuln = {"type": "sqli", "url": target, "tool": "sqlmap", "output": out[:2000]}
+        
+        # Use SQLMapRunner integration instead of manual implementation
+        result = self.sqlmap_runner.run_sqlmap_json(
+            url=target,
+            level=2,
+            risk=1,
+            timeout=180,
+            batch=True,
+            additional_args=["--smart"]
+        )
+        
+        if result.get("vulnerable"):
+            vuln = {
+                "type": "sqli",
+                "url": target,
+                "tool": "sqlmap",
+                "output": result.get("output", "")[:2000],
+                "findings": result.get("findings", []),
+                "dbms": result.get("dbms")
+            }
             current_vulns = self.state.get("vulnerabilities", [])
             current_vulns.append(vuln)
             self.state.update(vulnerabilities=current_vulns)
-            
-        elif ret not in (0, -1):
-            logger.debug(f"[SCANNING] sqlmap non-zero for {target}: {err[:120]}")
+            logger.warning(f"[SCANNING] SQLMap found SQLi on {target}")
+        elif result.get("error"):
+            logger.debug(f"[SCANNING] sqlmap error for {target}: {result['error'][:120]}")
 
     def _detect_xss_context(self, response_text: str) -> str:
         """Detect XSS context from response"""

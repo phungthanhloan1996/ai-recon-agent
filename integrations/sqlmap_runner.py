@@ -72,8 +72,8 @@ class SQLMapRunner:
         data: str = None,
         cookies: str = None,
         headers: Dict[str, str] = None,
-        level: int = 1,
-        risk: int = 1,
+        level: int = 3,
+        risk: int = 2,
         timeout: int = 300,
         tamper: str = None,
         techniques: str = "BEUSTQ",
@@ -128,14 +128,14 @@ class SQLMapRunner:
             cmd.extend(["--level", str(level)])
             cmd.extend(["--risk", str(risk)])
             cmd.extend(["--technique", techniques])
-            cmd.extend(["--timeout", str(min(timeout, 60))])  # SQLMap timeout per request
+            cmd.extend(["--timeout", str(min(timeout, 600))])# SQLMap timeout per request
             
             # Batch mode
             if batch:
                 cmd.append("--batch")
             
             # Don't follow redirects by default
-            cmd.append("--skip-urlencode")
+            #md.append("--skip-urlencode")
             
             # POST data
             if data:
@@ -165,11 +165,12 @@ class SQLMapRunner:
             
             # Add safe options
             cmd.extend(["--answers", "N"])  # Default to No for prompts
-            cmd.extend(["--crawl", "1"])  # Crawl 1 level deep
+            #md.extend(["--crawl", "1"])  # Crawl 1 level deep
             
             # Run SQLMap
             logger.info(f"[SQLMAP] Running: {' '.join(cmd[:10])}...")
-            
+            # Debug: log full command
+            logger.debug(f"[SQLMAP] Full command: {' '.join(cmd)}")
             process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -286,19 +287,12 @@ class SQLMapRunner:
     def run_sqlmap_json(self, url: str, **kwargs) -> Dict[str, Any]:
         """
         Run SQLMap and try to get JSON output.
-        
-        Args:
-            url: Target URL
-            **kwargs: Additional arguments for run_sqlmap
-            
-        Returns:
-            Parsed JSON results if available
         """
         # First run to detect vulnerability
         basic_result = self.run_sqlmap(url, **kwargs)
         
-        if not basic_result["vulnerable"]:
-            return basic_result
+        # ALWAYS try to parse JSON output, even if not vulnerable
+        # (sqlmap might have found something but parser missed it)
         
         # Try to get more detailed results from JSON output
         try:
@@ -306,50 +300,96 @@ class SQLMapRunner:
             parsed_url = urlparse(url)
             hostname = parsed_url.hostname or "unknown"
             
-            # Common output locations
+            # FIXED: Correct output directories
             output_dirs = [
                 os.path.expanduser(f"~/.local/share/sqlmap/output/{hostname}"),
                 os.path.expanduser(f"~/.sqlmap/output/{hostname}"),
                 f"/tmp/sqlmap/output/{hostname}",
             ]
             
-            for output_dir in output_dirs:
-                json_file = os.path.join(output_dir, "log")
-                if os.path.exists(json_file):
-                    try:
-                        with open(json_file, 'r') as f:
-                            for line in f:
-                                try:
-                                    json_data = json.loads(line)
-                                    if json_data.get("type") == "payload":
-                                        basic_result["findings"].append({
-                                            "type": "sql_injection",
-                                            "payload": json_data.get("value", ""),
-                                            "place": json_data.get("place", ""),
-                                            "parameter": json_data.get("parameter", ""),
-                                        })
-                                except json.JSONDecodeError:
-                                    continue
-                    except Exception:
-                        continue
-            
-            # Also check for JSON file in our output dir
+            # Also check our results dir
             if self.results_dir:
-                for f in os.listdir(self.results_dir):
-                    if f.endswith('.json'):
-                        json_path = os.path.join(self.results_dir, f)
-                        try:
-                            with open(json_path, 'r') as file:
-                                json_data = json.load(file)
-                                if isinstance(json_data, list):
-                                    for entry in json_data:
-                                        if entry.get("vulnerable"):
-                                            basic_result["findings"].append(entry)
-                        except Exception:
-                            continue
+                output_dirs.append(self.results_dir)
             
+            for output_dir in output_dirs:
+                if not os.path.exists(output_dir):
+                    continue
+                    
+                # FIXED: Look for all possible SQLMap output files
+                for root, dirs, files in os.walk(output_dir):
+                    for file in files:
+                        if file in ['log', 'output', 'target.json'] or file.endswith('.txt'):
+                            file_path = os.path.join(root, file)
+                            try:
+                                with open(file_path, 'r') as f:
+                                    content = f.read()
+                                    
+                                    # FIXED: Check for vulnerability indicators in raw output
+                                    if not basic_result["vulnerable"]:
+                                        if any(indicator in content.lower() for indicator in [
+                                            'injectable', 'vulnerable', 'parameter.*appears to be'
+                                        ]):
+                                            basic_result["vulnerable"] = True
+                                            logger.info(f"[SQLMAP] Found vulnerability in output file: {file_path}")
+                                    
+                                    # Try to parse as JSON
+                                    if file.endswith('.json'):
+                                        try:
+                                            json_data = json.loads(content)
+                                            if isinstance(json_data, dict):
+                                                if json_data.get("vulnerable"):
+                                                    basic_result["vulnerable"] = True
+                                                    basic_result["findings"].append(json_data)
+                                            elif isinstance(json_data, list):
+                                                for entry in json_data:
+                                                    if entry.get("vulnerable"):
+                                                        basic_result["vulnerable"] = True
+                                                        basic_result["findings"].append(entry)
+                                        except json.JSONDecodeError:
+                                            pass
+                                    
+                                    # Parse line by line for payloads
+                                    for line in content.split('\n'):
+                                        if 'payload' in line.lower() or 'parameter' in line.lower():
+                                            if 'injectable' in line.lower():
+                                                basic_result["vulnerable"] = True
+                                                basic_result["findings"].append({
+                                                    "type": "sql_injection",
+                                                    "evidence": line[:500],
+                                                    "severity": "CRITICAL"
+                                                })
+                                                
+                            except Exception as e:
+                                logger.debug(f"[SQLMAP] Failed to read {file_path}: {e}")
+                                continue
+                
+                # FIXED: Check for session directory (sqlmap stores detailed results here)
+                session_dir = os.path.join(output_dir, "session")
+                if os.path.exists(session_dir):
+                    for file in os.listdir(session_dir):
+                        if file.endswith('.txt'):
+                            file_path = os.path.join(session_dir, file)
+                            try:
+                                with open(file_path, 'r') as f:
+                                    content = f.read()
+                                    if 'injectable' in content.lower():
+                                        basic_result["vulnerable"] = True
+                                        logger.info(f"[SQLMAP] Found injection evidence in session: {file_path}")
+                            except Exception:
+                                pass
+                                
         except Exception as e:
             logger.debug(f"[SQLMAP] Failed to parse JSON output: {e}")
+        
+        # FIXED: Log final result for debugging
+        if basic_result["vulnerable"]:
+            logger.warning(f"[SQLMAP] ✅ SQL Injection CONFIRMED on {url}")
+            logger.warning(f"[SQLMAP] Findings: {len(basic_result['findings'])}")
+        else:
+            # Log a sample of output for debugging
+            output_sample = basic_result.get("output", "")[:500]
+            if output_sample:
+                logger.debug(f"[SQLMAP] Output sample: {output_sample}")
         
         return basic_result
     

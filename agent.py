@@ -366,21 +366,23 @@ class BatchDisplay:
         """Domain đã scan xong"""
         with self.lock:
             if domain in self.domains:
-                data = self.domains[domain]
-                stats = data.get('stats', {})
-                
-                self.total_vulns += stats.get('vulns', 0)
-                self.total_exploited += stats.get('exploited', 0)
-                self.total_endpoints += stats.get('eps', 0)
-                self.total_live += stats.get('live', 0)
-                self.total_wordpress += 1 if stats.get('wp') else 0
-                
                 del self.domains[domain]
             
+            # Lấy stats từ summary (được truyền từ agent.py)
             vulns = summary.get('vulns', 0)
             exploited = summary.get('exploited', 0)
+            eps = summary.get('eps', 0)
+            live = summary.get('live', 0)
+            wp = summary.get('wp', False)
             chains = summary.get('chains', 0)
             top_chain = summary.get('top_chain', '')
+            
+            # Cộng dồn vào tổng
+            self.total_vulns += vulns
+            self.total_exploited += exploited
+            self.total_endpoints += eps
+            self.total_live += live
+            self.total_wordpress += 1 if wp else 0
             self.completed.appendleft((domain, vulns, exploited, chains, top_chain, datetime.now().strftime("%H:%M:%S")))
             
             if vulns > 0:
@@ -1972,7 +1974,10 @@ class ReconAgent:
                     'vulns': self.stats['vulns'],
                     'chains': len(self.chains_data),
                     'exploited': self.stats['exploited'],
-                    'top_chain': top_chain
+                    'top_chain': top_chain,
+                    'eps': self.stats.get('eps', 0),
+                    'live': self.stats.get('live', 0),
+                    'wp': self.stats.get('wp', False),
                 })
             else:
                 self.display.stop()
@@ -4671,9 +4676,33 @@ class ReconAgent:
                 sqli_results.append(result)
                 
                 if result.get('vulnerabilities'):
-                    self.stats['vulns'] += len(result['vulnerabilities'])
+                    vuln_count = len(result['vulnerabilities'])
+                    self.stats['vulns'] += vuln_count
+                    
+                    # FIX 1: Store detected vulnerabilities in confirmed_vulnerabilities
+                    # so chain_planner can find them and generate SQLi chains
+                    current_vulns = self.state.get("confirmed_vulnerabilities", []) or []
+                    for v in result['vulnerabilities']:
+                        vuln_entry = {
+                            "type": "SQLI",
+                            "name": f"Boolean-based SQL Injection - {v.get('parameter', 'unknown')}",
+                            "endpoint": url,
+                            "url": url,
+                            "parameter": v.get('parameter', ''),
+                            "severity": "HIGH",
+                            "confidence": v.get('confidence', 'medium'),
+                            "description": f"Boolean-based SQLi detected on parameter '{v.get('parameter', 'unknown')}'",
+                            "details": v,
+                            "source": "boolean_sqli_detector"
+                        }
+                        # Avoid duplicates
+                        if not any(v2.get('endpoint') == url and v2.get('parameter') == v.get('parameter') for v2 in current_vulns):
+                            current_vulns.append(vuln_entry)
+                    
+                    self.state.update(confirmed_vulnerabilities=current_vulns)
+                    
                     if self.batch_display:
-                        self.batch_display._add_to_feed("🔍", "Boolean SQLi", url, f"{len(result['vulnerabilities'])} found")
+                        self.batch_display._add_to_feed("🔍", "Boolean SQLi", url, f"{vuln_count} found")
             
             self.state.update(boolean_sqli_findings=sqli_results)
             vuln_count = sum(len(r.get('vulnerabilities', [])) for r in sqli_results)
@@ -4718,10 +4747,34 @@ class ReconAgent:
                 xss_results.append(result)
                 
                 if result.get('vulnerabilities'):
-                    self.stats['vulns'] += len(result['vulnerabilities'])
+                    vuln_count = len(result['vulnerabilities'])
+                    self.stats['vulns'] += vuln_count
+                    
+                    # FIX 1: Store detected vulnerabilities in confirmed_vulnerabilities
+                    # so chain_planner can find them and generate XSS chains
+                    current_vulns = self.state.get("confirmed_vulnerabilities", []) or []
+                    for v in result['vulnerabilities']:
+                        vuln_entry = {
+                            "type": "XSS",
+                            "name": f"Cross-Site Scripting - {v.get('type', 'reflected')} - {v.get('parameter', 'unknown')}",
+                            "endpoint": url,
+                            "url": url,
+                            "parameter": v.get('parameter', ''),
+                            "severity": "HIGH" if v.get('confidence') == 'high' else "MEDIUM",
+                            "confidence": v.get('confidence', 'medium'),
+                            "description": f"{v.get('type', 'XSS')} vulnerability detected on parameter '{v.get('parameter', 'unknown')}'",
+                            "details": v,
+                            "source": "xss_detector"
+                        }
+                        # Avoid duplicates
+                        if not any(v2.get('endpoint') == url and v2.get('parameter') == v.get('parameter') and v2.get('type') == v.get('type') for v2 in current_vulns):
+                            current_vulns.append(vuln_entry)
+                    
+                    self.state.update(confirmed_vulnerabilities=current_vulns)
+                    
                     if self.batch_display:
                         types = set(v.get('type') for v in result['vulnerabilities'])
-                        self.batch_display._add_to_feed("✖️", "XSS", url, f"{len(result['vulnerabilities'])} ({', '.join(types)})")
+                        self.batch_display._add_to_feed("✖️", "XSS", url, f"{vuln_count} ({', '.join(types)})")
             
             self.state.update(xss_findings=xss_results)
             vuln_count = sum(len(r.get('vulnerabilities', [])) for r in xss_results)
@@ -5746,8 +5799,9 @@ class ReconAgent:
         exploit_results = self.state.get("exploit_results", [])
         successful_exploits = [r for r in exploit_results if r.get("success", False)]
         
+        # FIX 4: Only skip DDoS if exploits were successful (not the other way around)
         if successful_exploits:
-            self.logger.info("[DDoS] Skipping - exploits were successful")
+            self.logger.info("[DDoS] Skipping - exploits were already successful, no need for DDoS")
             self.phase_detail = "[DDoS] Skipped - exploits successful"
             self._update_display()
             return

@@ -75,7 +75,7 @@ class ReconEngine:
         # Initialize integrations
         self.subfinder = SubfinderRunner(output_dir)
         self.gau = GAURunner(output_dir)
-        self.wayback = WaybackRunner()
+        self.wayback = WaybackRunner(output_dir)
         self.httpx = HttpxRunner(output_dir)
         
         # Get allowed_domains from state (all targets from targets.txt)
@@ -389,18 +389,9 @@ class ReconEngine:
         gau_urls = self.gau.fetch_urls(self.target, max_urls=2000, timeout=gau_timeout)
         urls.update(gau_urls)
 
-        # waybackurls - FIXED: Reduced timeout from 120s to 60s
-        if tool_available("waybackurls"):
-            rc, stdout, _ = run_command(["waybackurls"], timeout=60, stdin_data=f"{self.target}\n")
-            if rc == 0 and stdout:
-                wb_urls = {
-                    u.strip()
-                    for u in stdout.splitlines()
-                    if u.strip().startswith(("http://", "https://"))
-                }
-                urls.update(wb_urls)
-            elif rc == -2:
-                logger.warning(f"[RECON] waybackurls timed out, continuing with other sources")
+        # Note: waybackurls CLI tool is redundant with self.wayback.fetch_urls()
+        # The WaybackRunner integration already fetches from Wayback Machine API
+        # No need to call the external waybackurls tool
 
         urls = set(self._filter_useful_urls(urls))
 

@@ -7,7 +7,8 @@ import requests
 import logging
 import os
 import sys
-from typing import List, Dict
+import json
+from typing import List, Dict, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
@@ -21,7 +22,14 @@ class WaybackRunner:
     Fetches historical URLs for comprehensive endpoint discovery.
     """
 
-    def __init__(self):
+    def __init__(self, output_dir: Optional[str] = None):
+        """
+        Initialize WaybackRunner.
+        
+        Args:
+            output_dir: Directory to save results. If None, results are only returned in memory.
+        """
+        self.output_dir = output_dir
         self.base_url = "https://web.archive.org/cdx/search/cdx"
         self.session = requests.Session()
         self.session.headers.update({
@@ -91,14 +99,71 @@ class WaybackRunner:
                     break
 
             logger.info(f"[WAYBACK] Discovered {len(urls)} unique URLs from Wayback Machine")
+            
+            # Save results to file if output_dir is set
+            if self.output_dir:
+                self._save_results(domain, list(urls))
+                return self._load_saved_urls(domain)[:max_urls]
+            
             return list(urls)
 
         except requests.exceptions.RequestException as e:
             logger.error(f"[WAYBACK] Request error: {e}")
+            if self.output_dir and urls:
+                self._save_results(domain, list(urls))
+                return self._load_saved_urls(domain)[:max_urls]
             return list(urls)
         except Exception as e:
             logger.error(f"[WAYBACK] Error: {e}")
+            # Still try to save partial results
+            if self.output_dir and urls:
+                self._save_results(domain, list(urls))
+                return self._load_saved_urls(domain)[:max_urls]
             return list(urls)
+
+    def _save_results(self, domain: str, urls: List[str]):
+        """Save fetched URLs to file in output directory"""
+        if not self.output_dir:
+            return
+        
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            
+            # Save as text file (one URL per line)
+            safe_domain = domain.replace('.', '_').replace('/', '_')
+            text_file = os.path.join(self.output_dir, f"wayback_{safe_domain}.txt")
+            with open(text_file, 'w') as f:
+                f.write('\n'.join(sorted(urls)))
+            logger.debug(f"[WAYBACK] Saved {len(urls)} URLs to {text_file}")
+            
+            # Also save as JSON for structured data
+            json_file = os.path.join(self.output_dir, f"wayback_{safe_domain}.json")
+            data = {
+                "domain": domain,
+                "timestamp": __import__('time').time(),
+                "url_count": len(urls),
+                "urls": sorted(urls)
+            }
+            with open(json_file, 'w') as f:
+                json.dump(data, f, indent=2)
+            logger.debug(f"[WAYBACK] Saved JSON to {json_file}")
+            
+        except Exception as e:
+            logger.error(f"[WAYBACK] Failed to save results: {e}")
+
+    def _load_saved_urls(self, domain: str) -> List[str]:
+        """Read saved Wayback URL text output from disk."""
+        if not self.output_dir:
+            return []
+
+        safe_domain = domain.replace('.', '_').replace('/', '_')
+        text_file = os.path.join(self.output_dir, f"wayback_{safe_domain}.txt")
+        try:
+            with open(text_file, 'r') as f:
+                return [line.strip() for line in f if line.strip()]
+        except Exception as e:
+            logger.error(f"[WAYBACK] Failed to read saved URL file: {e}")
+            return []
 
     def fetch_by_year(self, domain: str, year: int) -> List[str]:
         """Fetch URLs from a specific year"""

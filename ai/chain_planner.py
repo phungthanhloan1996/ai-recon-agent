@@ -642,6 +642,12 @@ Return ONLY valid JSON."""
         """
         Build full URL from base + path.
         Handles relative paths, ensures scheme is present.
+        
+        Args:
+            path: Relative or absolute URL path
+            
+        Returns:
+            Full URL with scheme, properly formatted
         """
         if not path:
             return self._get_base_url()
@@ -652,8 +658,49 @@ Return ONLY valid JSON."""
         
         # Combine base URL with path
         base = self._get_base_url()
+        # Strip leading slash from path to avoid double slashes
         path = path.lstrip('/')
+        # Ensure path doesn't start with # or ? (fragment/query)
+        if path.startswith(('#', '?')):
+            return base + path
         return f"{base}/{path}"
+
+    def normalize_endpoint(self, ep: Dict) -> Optional[str]:
+        """
+        Normalize endpoint object to a proper URL path.
+        
+        Handles various endpoint field names and formats:
+        - url, path, endpoint, uri
+        - Strips query strings and fragments if needed
+        - Ensures path starts with / for relative paths
+        
+        Args:
+            ep: Endpoint dictionary with url/path/endpoint field
+            
+        Returns:
+            Normalized URL path string, or None if invalid
+        """
+        if not isinstance(ep, dict):
+            return None
+        
+        # Try multiple field names for URL
+        url = ep.get('url') or ep.get('path') or ep.get('endpoint') or ep.get('uri', '')
+        
+        if not url or not url.strip():
+            return None
+        
+        # Strip whitespace
+        url = url.strip()
+        
+        # If it's already a full URL, return as-is
+        if url.startswith(('http://', 'https://')):
+            return url.rstrip('/')
+        
+        # Ensure relative paths start with /
+        if not url.startswith('/'):
+            url = '/' + url
+        
+        return url
 
     def plan_chains_from_graph(self, attack_graph) -> List[ExploitChain]:
         """Plan chains from attack graph analysis"""
@@ -1616,11 +1663,14 @@ Return ONLY valid JSON."""
         """
         chains = []
         endpoints = self.state.get("prioritized_endpoints", []) or []
+        base_url = self._get_base_url()
         
         # Collect all vulnerability hints from endpoints
         hint_inventory = {}  # hint -> [endpoints]
         for ep in endpoints:
-            hints = ep.get('vulnerability_hints', [])
+            if not isinstance(ep, dict):
+                continue
+            hints = ep.get('vulnerability_hints', []) or []
             for hint in hints:
                 if hint not in hint_inventory:
                     hint_inventory[hint] = []
@@ -1628,9 +1678,19 @@ Return ONLY valid JSON."""
         
         logger.info(f"[CHAIN] Found {len(hint_inventory)} unique vulnerability hints")
         
+        # Helper function to safely get URL from endpoint
+        def safe_get_url(ep, fallback=None):
+            url = ep.get('url') if isinstance(ep, dict) else None
+            if not url or not url.strip():
+                return fallback or base_url
+            if not url.startswith(('http://', 'https://')):
+                return self._build_full_url(url)
+            return url
+        
         # Pattern 1: File upload + executable directory → RCE
         if 'file_upload' in hint_inventory and any(h in hint_inventory for h in ['rce_via_upload', 'rce']):
             upload_ep = hint_inventory['file_upload'][0]
+            upload_url = safe_get_url(upload_ep)
             chains.append(self._build_pattern_chain(
                 name="File Upload to RCE",
                 description="Upload file to executable directory and achieve code execution",
@@ -1638,14 +1698,14 @@ Return ONLY valid JSON."""
                     ExploitStep(
                         name="Identify upload endpoint",
                         action="reconnaissance",
-                        target=upload_ep.get('url'),
+                        target=upload_url,
                         tool="browser",
                         success_indicator="Upload form found"
                     ),
                     ExploitStep(
                         name="Upload webshell",
                         action="file_upload",
-                        target=upload_ep.get('url'),
+                        target=upload_url,
                         tool="curl",
                         payload="webshell.php",
                         success_indicator="File uploaded successfully"
@@ -1653,7 +1713,7 @@ Return ONLY valid JSON."""
                     ExploitStep(
                         name="Execute uploaded file",
                         action="code_execution",
-                        target=upload_ep.get('url') + "/webshell.php",
+                        target=upload_url + "/webshell.php",
                         tool="curl",
                         success_indicator="Remote code execution achieved"
                     )
@@ -1664,6 +1724,7 @@ Return ONLY valid JSON."""
         # Pattern 2: LFI + Debug info → Information disclosure → RCE
         if 'lfi' in hint_inventory:
             lfi_eps = hint_inventory['lfi']
+            lfi_url = safe_get_url(lfi_eps[0])
             chains.append(self._build_pattern_chain(
                 name="Local File Inclusion to Information Disclosure",
                 description="Use LFI to read sensitive files and extract credentials",
@@ -1671,7 +1732,7 @@ Return ONLY valid JSON."""
                     ExploitStep(
                         name="Enumerate files via LFI",
                         action="local_file_inclusion",
-                        target=lfi_eps[0].get('url'),
+                        target=lfi_url,
                         tool="curl",
                         payload="../../../etc/passwd",
                         success_indicator="System files readable"
@@ -1679,7 +1740,7 @@ Return ONLY valid JSON."""
                     ExploitStep(
                         name="Extract configuration",
                         action="configuration_extraction",
-                        target=lfi_eps[0].get('url'),
+                        target=lfi_url,
                         tool="curl",
                         payload="../../../config/database.yml",
                         success_indicator="Database credentials obtained"
@@ -1698,6 +1759,7 @@ Return ONLY valid JSON."""
         # Pattern 3: SSRF → Internal network access
         if 'ssrf' in hint_inventory:
             ssrf_eps = hint_inventory['ssrf']
+            ssrf_url = safe_get_url(ssrf_eps[0])
             chains.append(self._build_pattern_chain(
                 name="SSRF to Internal Resource Access",
                 description="Use Server-Side Request Forgery to access internal services",
@@ -1705,14 +1767,14 @@ Return ONLY valid JSON."""
                     ExploitStep(
                         name="Identify SSRF parameter",
                         action="vulnerability_identification",
-                        target=ssrf_eps[0].get('url'),
+                        target=ssrf_url,
                         tool="burp",
                         success_indicator="SSRF parameter found"
                     ),
                     ExploitStep(
                         name="Probe internal services",
                         action="internal_reconnaissance",
-                        target=ssrf_eps[0].get('url'),
+                        target=ssrf_url,
                         tool="curl",
                         payload="http://localhost:8080/admin",
                         success_indicator="Internal service accessible"
@@ -1720,7 +1782,7 @@ Return ONLY valid JSON."""
                     ExploitStep(
                         name="Exploit internal service",
                         action="service_exploitation",
-                        target=ssrf_eps[0].get('url'),
+                        target=ssrf_url,
                         tool="custom_script",
                         success_indicator="Internal service compromised"
                     )
@@ -1732,6 +1794,7 @@ Return ONLY valid JSON."""
         if 'auth_bypass' in hint_inventory and 'admin' in [ep.get('endpoint_type', '') for ep in endpoints]:
             admin_eps = [ep for ep in endpoints if ep.get('endpoint_type', '') == 'admin']
             if admin_eps:
+                admin_url = safe_get_url(admin_eps[0])
                 chains.append(self._build_pattern_chain(
                     name="Authentication Bypass to Admin Access",
                     description="Bypass authentication and gain administrative access",
@@ -1739,7 +1802,7 @@ Return ONLY valid JSON."""
                         ExploitStep(
                             name="Test authentication bypass",
                             action="auth_test",
-                            target=admin_eps[0].get('url'),
+                            target=admin_url,
                             tool="curl",
                             payload="admin:admin",
                             success_indicator="Authentication bypassed"
@@ -1747,14 +1810,14 @@ Return ONLY valid JSON."""
                         ExploitStep(
                             name="Gain admin access",
                             action="privilege_escalation",
-                            target=admin_eps[0].get('url'),
+                            target=admin_url,
                             tool="browser",
                             success_indicator="Admin panel accessed"
                         ),
                         ExploitStep(
                             name="Exploit admin functionality",
                             action="admin_exploitation",
-                            target=admin_eps[0].get('url'),
+                            target=admin_url,
                             tool="curl",
                             success_indicator="System compromised"
                         )
@@ -1766,6 +1829,7 @@ Return ONLY valid JSON."""
         if 'user_enumeration' in hint_inventory:
             auth_eps = [ep for ep in endpoints if ep.get('endpoint_type', '') == 'auth']
             if auth_eps:
+                auth_url = safe_get_url(auth_eps[0])
                 chains.append(self._build_pattern_chain(
                     name="User Enumeration to Account Takeover",
                     description="Enumerate valid users and brute force credentials",
@@ -1773,21 +1837,21 @@ Return ONLY valid JSON."""
                         ExploitStep(
                             name="Enumerate users",
                             action="user_enumeration",
-                            target=auth_eps[0].get('url'),
+                            target=auth_url,
                             tool="custom_script",
                             success_indicator="Valid users identified"
                         ),
                         ExploitStep(
                             name="Brute force passwords",
                             action="brute_force",
-                            target=auth_eps[0].get('url'),
+                            target=auth_url,
                             tool="hydra",
                             success_indicator="Credentials obtained"
                         ),
                         ExploitStep(
                             name="Login with compromised account",
                             action="authentication",
-                            target=auth_eps[0].get('url'),
+                            target=auth_url,
                             tool="curl",
                             success_indicator="Account compromised"
                         )
@@ -1800,6 +1864,7 @@ Return ONLY valid JSON."""
         if injection_hints:
             hint = injection_hints[0]
             injection_eps = hint_inventory[hint]
+            injection_url = safe_get_url(injection_eps[0])
             chains.append(self._build_pattern_chain(
                 name=f"{hint.title()} Exploitation",
                 description=f"Exploit {hint} vulnerability for database access or command execution",
@@ -1807,14 +1872,14 @@ Return ONLY valid JSON."""
                     ExploitStep(
                         name="Test vulnerability",
                         action="vulnerability_test",
-                        target=injection_eps[0].get('url'),
+                        target=injection_url,
                         tool="sqlmap" if 'sql' in hint else "curl",
                         success_indicator="Vulnerability confirmed"
                     ),
                     ExploitStep(
                         name="Extract data or execute commands",
                         action="data_extraction",
-                        target=injection_eps[0].get('url'),
+                        target=injection_url,
                         tool="sqlmap" if 'sql' in hint else "curl",
                         success_indicator="Sensitive data obtained"
                     )
