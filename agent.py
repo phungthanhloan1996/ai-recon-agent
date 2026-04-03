@@ -33,12 +33,14 @@ logging.getLogger("urllib3").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3.connectionpool").setLevel(logging.CRITICAL)
 logging.getLogger("requests").setLevel(logging.CRITICAL)
 logging.getLogger("chardet").setLevel(logging.CRITICAL)
+logging.getLogger("charset_normalizer").setLevel(logging.CRITICAL)
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
 logging.getLogger("httpcore").setLevel(logging.CRITICAL)
 logging.getLogger("urllib").setLevel(logging.CRITICAL)
 logging.getLogger("urllib3.connectionpool").propagate = False
 logging.getLogger("requests").propagate = False
 logging.getLogger("urllib3").propagate = False
+logging.getLogger("charset_normalizer").propagate = False
 
 # ─── Core Components ─────────────────────────────────────────────────────────
 from core.state_manager import StateManager
@@ -5447,31 +5449,49 @@ class ReconAgent:
         self._update_display()
         
         try:
+            available_exploits = self.custom_exploit.list_exploits()
+            if not available_exploits:
+                self.logger.info("[CUSTOM] No registered custom exploits; skipping phase")
+                self.state.update(custom_exploit_findings=[])
+                self.last_action = "custom_exploit: skipped (no custom exploits loaded)"
+                self.phase_detail = "[CUSTOM] Skipped - no custom exploits loaded"
+                self._update_display()
+                self.phase_status = "done"
+                self._mark_phase_done("custom_exploits")
+                return
+
             vulnerabilities = self.state.get("vulnerabilities", [])
             custom_results = []
             
             for vuln in vulnerabilities[:5]:
                 self.phase_detail = f"[CUSTOM] Testing exploit for {vuln.get('type', 'unknown')[:30]}..."
                 self._update_display()
-                
-                result = self.custom_exploit.execute_exploit(
-                    vuln,
-                    progress_cb=self._progress_callback
-                )
-                custom_results.append(result)
-                
-                if result.get('exploit_success'):
-                    self.stats['exploited'] += 1
-                    if self.batch_display:
-                        self.batch_display._add_to_feed("💥", "Custom", vuln.get('type', 'exploit'), "Successful")
-                
-                if result.get('custom_payloads'):
-                    payloads = result['custom_payloads']
-                    if self.batch_display:
-                        self.batch_display._add_to_feed("📦", "Payload", vuln.get('type', 'exploit'), f"{len(payloads)} loaded")
+
+                target_url = vuln.get("url") or vuln.get("endpoint")
+                if not target_url:
+                    continue
+
+                for exploit_info in available_exploits:
+                    exploit_name = exploit_info.get("name")
+                    if not exploit_name:
+                        continue
+
+                    result = self.custom_exploit.execute_exploit(
+                        exploit_name,
+                        target_url,
+                        self.http_client,
+                        self.state,
+                        vulnerability=vuln,
+                    )
+                    custom_results.append(result)
+
+                    if result.get('status') == 'success' and (result.get('result') or {}).get('success'):
+                        self.stats['exploited'] += 1
+                        if self.batch_display:
+                            self.batch_display._add_to_feed("💥", "Custom", vuln.get('type', 'exploit'), "Successful")
             
             self.state.update(custom_exploit_findings=custom_results)
-            success_count = sum(1 for r in custom_results if r.get('exploit_success'))
+            success_count = sum(1 for r in custom_results if r.get('status') == 'success' and (r.get('result') or {}).get('success'))
             self.last_action = f"custom_exploit: {success_count} custom exploits succeeded"
             self.phase_detail = f"[CUSTOM] Complete - {success_count} successful custom exploitations"
             
@@ -6569,10 +6589,47 @@ Exploitability estimation:
                 })
         
         # Deduplicate by URL
+        try:
+            from core.host_filter import HostFilter
+            allowed_domains = self.state.get("allowed_domains", []) or []
+            host_filter = HostFilter(skip_dev_test=True, allowed_domains=allowed_domains)
+        except Exception:
+            host_filter = None
+
         seen = set()
         all_eps = []
+        live_hosts = self.state.get("live_hosts", []) or []
+        preferred_hosts = {}
+        try:
+            from urllib.parse import urlparse
+            for item in live_hosts:
+                live_url = item.get("url", "")
+                parsed_live = urlparse(live_url)
+                if parsed_live.hostname:
+                    preferred_hosts[(parsed_live.hostname.lower(), parsed_live.port or (443 if parsed_live.scheme == "https" else 80))] = {
+                        "scheme": parsed_live.scheme,
+                        "netloc": parsed_live.netloc,
+                    }
+        except Exception:
+            preferred_hosts = {}
+
         for ep in normalized:
             u = ep["url"]
+            if host_filter and host_filter.allowed_domains and not host_filter._is_in_allowed_domains(u):
+                continue
+
+            try:
+                from urllib.parse import urlparse, urlunparse
+                parsed = urlparse(u)
+                port = parsed.port or (443 if parsed.scheme == "https" else 80)
+                preferred_target = preferred_hosts.get(((parsed.hostname or "").lower(), port))
+                if preferred_target and (parsed.netloc != preferred_target["netloc"] or parsed.scheme != preferred_target["scheme"]):
+                    ep = dict(ep)
+                    ep["url"] = urlunparse(parsed._replace(scheme=preferred_target["scheme"], netloc=preferred_target["netloc"]))
+                    u = ep["url"]
+            except Exception:
+                pass
+
             if u not in seen:
                 seen.add(u)
                 all_eps.append(ep)

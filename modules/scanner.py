@@ -51,6 +51,7 @@ class ScanningEngine:
         self.sqlmap_runner = SQLMapRunner(output_dir)
 
         self.scan_results_file = os.path.join(output_dir, "scan_results.json")
+        self.manifest_file = os.path.join(output_dir, "scanner_manifest.json")
 
     def _is_valid_url(self, url: str) -> bool:
         """Kiểm tra URL hợp lệ trước khi gửi request"""
@@ -77,6 +78,9 @@ class ScanningEngine:
     def run(self, progress_cb=None):
         """Execute vulnerability scanning pipeline"""
         logger.info("[SCANNING] Starting AI-driven vulnerability scanning")
+        # Reset per-run tool dedup so a new scan iteration can rescan endpoints intentionally.
+        if hasattr(self.dalfox_runner, "seen_urls"):
+            self.dalfox_runner.seen_urls.clear()
 
         # ✅ FIX: fallback nhiều nguồn
         prioritized_endpoints = (
@@ -127,6 +131,7 @@ class ScanningEngine:
                     logger.error(f"[SCANNING] Failed to scan endpoint: {e}")
 
         logger.info("[SCANNING] Completed scanning - results streamed to file")
+        self._write_manifest()
 
     def process_endpoint_results(self, responses: List[Dict[str, Any]]):
         """Process and stream endpoint results to file"""
@@ -175,6 +180,38 @@ class ScanningEngine:
             all_vulns = deduped
             self.state.update(vulnerabilities=all_vulns)
             logger.debug(f"[SCANNING] Synced {len(confirmed)} vulnerabilities to vulnerabilities field")
+
+    def _write_manifest(self):
+        """Write a lightweight manifest of scanner artifacts for later phases and resume/debug."""
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            vulnerabilities = self.state.get("vulnerabilities", []) or []
+            artifact_entries = []
+            for vuln in vulnerabilities:
+                artifact_path = vuln.get("artifact_path")
+                raw_output_path = vuln.get("raw_output_path")
+                if artifact_path or raw_output_path:
+                    artifact_entries.append({
+                        "tool": vuln.get("tool", vuln.get("source", "unknown")),
+                        "url": vuln.get("url") or vuln.get("endpoint", ""),
+                        "type": vuln.get("type", ""),
+                        "artifact_path": artifact_path,
+                        "raw_output_path": raw_output_path,
+                    })
+
+            manifest = {
+                "phase": "scanner",
+                "scan_results_file": self.scan_results_file,
+                "counts": {
+                    "vulnerabilities": len(vulnerabilities),
+                    "confirmed_vulnerabilities": len(self.state.get("confirmed_vulnerabilities", []) or []),
+                },
+                "tool_artifacts": artifact_entries,
+            }
+            with open(self.manifest_file, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+        except Exception as e:
+            logger.warning(f"[SCANNING] Failed to write manifest: {e}")
 
     def scan_endpoint(self, endpoint: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Scan a single endpoint with AI-generated payloads"""
@@ -274,8 +311,6 @@ class ScanningEngine:
         if url not in scanned_endpoints:
             scanned_endpoints.append(url)
             self.state.update(scanned_endpoints=scanned_endpoints)
-        
-        return responses
 
         endpoint_score = self._estimate_endpoint_score(url, categories, parameters)
 
@@ -286,7 +321,14 @@ class ScanningEngine:
             if self._detect_xss_potential(endpoint):
                 dalfox_result = self.dalfox_runner.run(url)
                 if dalfox_result.get("success"):
-                    vuln = {"type": "xss", "url": url, "tool": "dalfox", "output": dalfox_result["output"]}
+                    vuln = {
+                        "type": "xss",
+                        "url": url,
+                        "tool": "dalfox",
+                        "output": dalfox_result.get("output", ""),
+                        "findings": dalfox_result.get("findings", []),
+                        "artifact_path": dalfox_result.get("artifact_path"),
+                    }
                     current_vulns = self.state.get("vulnerabilities", [])
                     current_vulns.append(vuln)
                     self.state.update(vulnerabilities=current_vulns)
@@ -315,7 +357,15 @@ class ScanningEngine:
                     try:
                         nuclei_result = scan['future'].result(timeout=300)
                         if nuclei_result.get("success"):
-                            vuln = {"type": "general", "url": url, "tool": "nuclei", "output": nuclei_result["output"]}
+                            vuln = {
+                                "type": "general",
+                                "url": url,
+                                "tool": "nuclei",
+                                "output": nuclei_result.get("output", ""),
+                                "findings": nuclei_result.get("findings", []),
+                                "severity": nuclei_result.get("severity", "INFO"),
+                                "artifact_path": nuclei_result.get("artifact_path"),
+                            }
                             current_vulns = self.state.get("vulnerabilities", [])
                             current_vulns.append(vuln)
                             self.state.update(vulnerabilities=current_vulns)
@@ -1067,7 +1117,9 @@ class ScanningEngine:
                 "tool": "sqlmap",
                 "output": result.get("output", "")[:2000],
                 "findings": result.get("findings", []),
-                "dbms": result.get("dbms")
+                "dbms": result.get("dbms"),
+                "artifact_path": result.get("artifact_path"),
+                "raw_output_path": result.get("raw_output_path"),
             }
             current_vulns = self.state.get("vulnerabilities", [])
             current_vulns.append(vuln)

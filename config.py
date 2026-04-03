@@ -45,6 +45,7 @@ SCAN_PAYLOAD_DELAY = float(os.getenv('SCAN_PAYLOAD_DELAY', '0.05'))
 OUTPUT_DIR = os.getenv('OUTPUT_DIR', 'results')
 LOG_LEVEL = os.getenv('LOG_LEVEL', 'INFO')
 SSL_VERIFY = os.getenv('SSL_VERIFY', 'false').lower() == 'true'
+LOCAL_HTTP_ONLY = os.getenv('LOCAL_HTTP_ONLY', 'true').lower() == 'true'
 
 # AI Models
 PRIMARY_AI_MODEL = 'llama-3.3-70b-versatile'  # or 'llama'
@@ -91,6 +92,10 @@ NUCLEI_RATE_LIMIT = int(os.getenv('NUCLEI_RATE_LIMIT', 5))
 NUCLEI_TEMPLATE_TIMEOUT = int(os.getenv('NUCLEI_TEMPLATE_TIMEOUT', 20))
 NUCLEI_RUN_TIMEOUT = int(os.getenv('NUCLEI_RUN_TIMEOUT', 300))
 NUCLEI_MAX_RETRIES = int(os.getenv('NUCLEI_MAX_RETRIES', 1))
+PARAM_MINER_TIMEOUT = int(os.getenv('PARAM_MINER_TIMEOUT', 8))
+PARAM_MINER_MAX_ENDPOINTS = int(os.getenv('PARAM_MINER_MAX_ENDPOINTS', 20))
+PARAM_MINER_MAX_CANDIDATES = int(os.getenv('PARAM_MINER_MAX_CANDIDATES', 24))
+PARAM_MINER_LOCAL_MAX_CANDIDATES = int(os.getenv('PARAM_MINER_LOCAL_MAX_CANDIDATES', 12))
 
 # URL Validation & Error Recovery
 MAX_URL_LENGTH = int(os.getenv('MAX_URL_LENGTH', 8192))

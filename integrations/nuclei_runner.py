@@ -7,6 +7,9 @@ Integrated with GlobalConcurrencyManager and NucleiWorkerPool from core.resource
 import subprocess
 import logging
 import time
+import json
+import os
+import re
 from typing import List, Dict, Any, Optional
 import config
 
@@ -21,6 +24,7 @@ class NucleiRunner:
 
     def __init__(self, output_dir: str):
         self.output_dir = output_dir
+        self.results_dir = os.path.join(output_dir, "nuclei_results") if output_dir else None
         self.max_retries = max(1, config.NUCLEI_MAX_RETRIES)
         
         # Adaptive timeout tracking per URL
@@ -38,6 +42,55 @@ class NucleiRunner:
             self._scan_lock = threading.Semaphore(self._max_concurrent_scans)
         except Exception:
             pass
+
+    def _get_output_path(self, url: str) -> str:
+        safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", url)[:180]
+        base_dir = self.results_dir or self.output_dir or "."
+        os.makedirs(base_dir, exist_ok=True)
+        return os.path.join(base_dir, f"nuclei_{safe_name}.jsonl")
+
+    def _load_findings(self, output_path: str) -> List[Dict[str, Any]]:
+        findings: List[Dict[str, Any]] = []
+        if not output_path or not os.path.exists(output_path):
+            return findings
+
+        try:
+            with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if isinstance(entry, dict):
+                            findings.append(entry)
+                    except json.JSONDecodeError:
+                        logger.debug(f"[NUCLEI] Failed to decode finding line: {line[:120]}")
+        except Exception as e:
+            logger.error(f"[NUCLEI] Failed to read findings file {output_path}: {e}")
+
+        return findings
+
+    def _read_artifact_text(self, output_path: str) -> str:
+        if not output_path or not os.path.exists(output_path):
+            return ""
+
+        try:
+            with open(output_path, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()
+        except Exception as e:
+            logger.error(f"[NUCLEI] Failed to read artifact text {output_path}: {e}")
+            return ""
+
+    def _highest_severity(self, findings: List[Dict[str, Any]]) -> str:
+        severity_rank = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
+        best = "info"
+        for finding in findings:
+            info = finding.get("info", {}) if isinstance(finding, dict) else {}
+            severity = str(info.get("severity", "info")).lower()
+            if severity_rank.get(severity, -1) > severity_rank.get(best, -1):
+                best = severity
+        return best.upper()
 
     def _get_adaptive_timeout(self, url: str) -> int:
         """
@@ -110,6 +163,7 @@ class NucleiRunner:
     def _run_scan(self, url: str, timeout: int) -> Dict[str, Any]:
         """Internal scan execution with retry logic"""
         start_time = time.time()
+        output_path = self._get_output_path(url)
         
         for attempt in range(self.max_retries):
             try:
@@ -126,7 +180,7 @@ class NucleiRunner:
                 cmd = [
                     "nuclei",
                     "-u", url,
-                    "-o", f"{self.output_dir}/nuclei_{url.replace('/', '_').replace(':', '')}.json",
+                    "-o", output_path,
                     "-json",
                     "-c", str(config.NUCLEI_CONCURRENCY),
                     "-timeout", str(min(config.NUCLEI_TEMPLATE_TIMEOUT, attempt_timeout // 10)),
@@ -149,10 +203,22 @@ class NucleiRunner:
                 
                 elapsed = time.time() - start_time
                 self._record_scan_time(url, elapsed, timed_out=False)
+                findings = self._load_findings(output_path)
+                artifact_text = self._read_artifact_text(output_path)
+                base_result = {
+                    "url": url,
+                    "artifact_path": output_path,
+                    "findings": findings,
+                    "output": artifact_text or result.stdout,
+                }
                 
-                if result.returncode == 0:
+                if result.returncode == 0 or findings:
                     logger.debug(f"[NUCLEI] Scan completed successfully for {url} in {elapsed:.1f}s")
-                    return {"success": True, "output": result.stdout, "url": url}
+                    base_result.update({
+                        "success": True,
+                        "severity": self._highest_severity(findings),
+                    })
+                    return base_result
                 elif result.returncode == 124:  # Timeout signal
                     logger.warning(f"[NUCLEI] Timeout on attempt {attempt + 1} for {url} ({elapsed:.1f}s)")
                     if attempt < self.max_retries - 1 and config.CRAWLER_RETRY_ON_TIMEOUT:
@@ -163,10 +229,12 @@ class NucleiRunner:
                     else:
                         self._record_scan_time(url, elapsed, timed_out=True)
                         logger.warning(f"[NUCLEI] Timeout after {self.max_retries} attempts for {url}")
-                        return {"success": False, "error": "Nuclei timeout after retries", "url": url}
+                        base_result.update({"success": False, "error": "Nuclei timeout after retries"})
+                        return base_result
                 else:
                     logger.debug(f"[NUCLEI] Nuclei returned code {result.returncode} for {url}")
-                    return {"success": False, "error": result.stderr, "url": url}
+                    base_result.update({"success": False, "error": result.stderr})
+                    return base_result
                     
             except subprocess.TimeoutExpired:
                 elapsed = time.time() - start_time
@@ -179,15 +247,36 @@ class NucleiRunner:
                     continue
                 else:
                     logger.error(f"[NUCLEI] Process exceeded {attempt_timeout}s timeout after {self.max_retries} attempts for {url}")
-                    return {"success": False, "error": "Nuclei process timeout", "url": url}
+                    return {
+                        "success": False,
+                        "error": "Nuclei process timeout",
+                        "url": url,
+                        "artifact_path": output_path,
+                        "findings": self._load_findings(output_path),
+                        "output": self._read_artifact_text(output_path),
+                    }
                     
             except Exception as e:
                 logger.error(f"[NUCLEI] Scan failed on attempt {attempt + 1} for {url}: {e}")
                 if attempt == self.max_retries - 1:
-                    return {"success": False, "error": str(e), "url": url}
+                    return {
+                        "success": False,
+                        "error": str(e),
+                        "url": url,
+                        "artifact_path": output_path,
+                        "findings": self._load_findings(output_path),
+                        "output": self._read_artifact_text(output_path),
+                    }
                 time.sleep(1 + attempt)
         
-        return {"success": False, "error": "Nuclei scan exhausted all retries", "url": url}
+        return {
+            "success": False,
+            "error": "Nuclei scan exhausted all retries",
+            "url": url,
+            "artifact_path": output_path,
+            "findings": self._load_findings(output_path),
+            "output": self._read_artifact_text(output_path),
+        }
 
     def run_batch(self, urls: List[str], max_concurrent: int = None) -> List[Dict[str, Any]]:
         """

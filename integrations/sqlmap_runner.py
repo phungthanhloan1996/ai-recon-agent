@@ -32,6 +32,33 @@ class SQLMapRunner:
         self.output_dir = output_dir
         self.sqlmap_path = sqlmap_path or self._find_sqlmap()
         self.results_dir = os.path.join(output_dir, "sqlmap_results") if output_dir else None
+
+    def _safe_target_name(self, url: str) -> str:
+        return re.sub(r"[^A-Za-z0-9._-]", "_", url)[:180]
+
+    def _get_runtime_artifact_paths(self, url: str) -> Dict[str, str]:
+        base_dir = self.results_dir or self.output_dir or "."
+        os.makedirs(base_dir, exist_ok=True)
+        safe_name = self._safe_target_name(url)
+        return {
+            "stdout": os.path.join(base_dir, f"{safe_name}.stdout.log"),
+            "stderr": os.path.join(base_dir, f"{safe_name}.stderr.log"),
+            "summary": os.path.join(base_dir, f"{safe_name}.summary.json"),
+        }
+
+    def _write_text_file(self, path: str, content: str):
+        try:
+            with open(path, "w", encoding="utf-8", errors="ignore") as f:
+                f.write(content or "")
+        except Exception as e:
+            logger.error(f"[SQLMAP] Failed to write artifact {path}: {e}")
+
+    def _write_summary_file(self, path: str, data: Dict[str, Any]):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, default=str)
+        except Exception as e:
+            logger.error(f"[SQLMAP] Failed to write summary artifact {path}: {e}")
     
     def _find_sqlmap(self) -> Optional[str]:
         """Find SQLMap in system PATH or common locations"""
@@ -120,6 +147,7 @@ class SQLMapRunner:
             return result
         
         try:
+            artifact_paths = self._get_runtime_artifact_paths(url)
             # Build command
             cmd = [self.sqlmap_path]
             
@@ -191,10 +219,16 @@ class SQLMapRunner:
             
             result["output"] = stdout
             result["error"] = stderr or result["error"]
+            result["artifact_path"] = artifact_paths["summary"]
+            result["raw_output_path"] = artifact_paths["stdout"]
+            result["stderr_path"] = artifact_paths["stderr"]
+            self._write_text_file(artifact_paths["stdout"], stdout)
+            self._write_text_file(artifact_paths["stderr"], stderr)
             
             # Parse output
             parsed = self._parse_sqlmap_output(stdout)
             result.update(parsed)
+            self._write_summary_file(artifact_paths["summary"], result)
             
             if result["vulnerable"]:
                 logger.warning(f"[SQLMAP] SQL Injection found on {url}")
@@ -290,6 +324,7 @@ class SQLMapRunner:
         """
         # First run to detect vulnerability
         basic_result = self.run_sqlmap(url, **kwargs)
+        parsed_artifact_paths: List[str] = []
         
         # ALWAYS try to parse JSON output, even if not vulnerable
         # (sqlmap might have found something but parser missed it)
@@ -323,6 +358,7 @@ class SQLMapRunner:
                             try:
                                 with open(file_path, 'r') as f:
                                     content = f.read()
+                                    parsed_artifact_paths.append(file_path)
                                     
                                     # FIXED: Check for vulnerability indicators in raw output
                                     if not basic_result["vulnerable"]:
@@ -372,6 +408,7 @@ class SQLMapRunner:
                             try:
                                 with open(file_path, 'r') as f:
                                     content = f.read()
+                                    parsed_artifact_paths.append(file_path)
                                     if 'injectable' in content.lower():
                                         basic_result["vulnerable"] = True
                                         logger.info(f"[SQLMAP] Found injection evidence in session: {file_path}")
@@ -390,6 +427,10 @@ class SQLMapRunner:
             output_sample = basic_result.get("output", "")[:500]
             if output_sample:
                 logger.debug(f"[SQLMAP] Output sample: {output_sample}")
+
+        basic_result["parsed_artifact_paths"] = parsed_artifact_paths
+        if basic_result.get("artifact_path"):
+            self._write_summary_file(basic_result["artifact_path"], basic_result)
         
         return basic_result
     

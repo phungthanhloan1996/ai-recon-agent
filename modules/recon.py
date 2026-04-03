@@ -14,9 +14,9 @@ import ipaddress
 from urllib.parse import urlparse
 from urllib.parse import urljoin, quote
 import urllib.request
-from typing import List, Set, Dict, Callable, Optional
+from typing import List, Set, Dict, Callable, Optional, Any
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
+# Thêm dòng này nếu chưa có
 import config
 from core.state_manager import StateManager
 from core.executor import check_tools, run_command, tool_available
@@ -56,6 +56,7 @@ class ReconEngine:
     def __init__(self, state: StateManager, output_dir: str):
         self.state = state
         self.output_dir = output_dir
+        self.manifest_file = os.path.join(output_dir, "recon_manifest.json")
 
         # FIX: ensure target exists
         self.target = state.get("target")
@@ -71,6 +72,8 @@ class ReconEngine:
         self.target_netloc = parsed_target.netloc or self.target_host
         self.target = self.target_host
         self.is_public_hostname = self._is_public_hostname(self.target_host)
+        if config.LOCAL_HTTP_ONLY and not self.is_public_hostname and "://" not in self.raw_target:
+            self.target_scheme = "http"
 
         # Initialize integrations
         self.subfinder = SubfinderRunner(output_dir)
@@ -184,6 +187,37 @@ class ReconEngine:
             self.state.update(urls=all_urls)
 
         logger.info(f"[RECON] Completed: {len(subdomains)} subdomains, {len(archived_urls)} archived URLs, {len(live_hosts)} live hosts")
+        self._write_manifest(subdomains, archived_urls, live_hosts)
+
+    def _write_manifest(self, subdomains: List[str], archived_urls: List[str], live_hosts: List[Dict[str, Any]]):
+        """Write a lightweight manifest of recon artifacts for later phases and resume/debug."""
+        try:
+            os.makedirs(self.output_dir, exist_ok=True)
+            safe_target = self.target.replace(".", "_").replace("/", "_")
+            manifest = {
+                "phase": "recon",
+                "target": self.target,
+                "artifacts": {
+                    "subdomains_txt": os.path.join(self.output_dir, "subdomains.txt"),
+                    "subdomains_scored_json": os.path.join(self.output_dir, "subdomains_scored.json"),
+                    "archived_urls_txt": os.path.join(self.output_dir, "archived_urls.txt"),
+                    "httpx_results_json": os.path.join(self.output_dir, "httpx_results.json"),
+                    "httpx_live_hosts_txt": os.path.join(self.output_dir, "live_hosts.txt"),
+                    "subfinder_output_txt": os.path.join(self.output_dir, f"subfinder_{safe_target}.txt"),
+                    "wayback_output_txt": os.path.join(self.output_dir, f"wayback_{safe_target}.txt"),
+                    "wayback_output_json": os.path.join(self.output_dir, f"wayback_{safe_target}.json"),
+                    "gau_output_txt": os.path.join(self.output_dir, f"gau_{safe_target}.txt"),
+                },
+                "counts": {
+                    "subdomains": len(subdomains or []),
+                    "archived_urls": len(archived_urls or []),
+                    "live_hosts": len(live_hosts or []),
+                }
+            }
+            with open(self.manifest_file, "w", encoding="utf-8") as f:
+                json.dump(manifest, f, indent=2)
+        except Exception as e:
+            logger.warning(f"[RECON] Failed to write manifest: {e}")
 
     def _fallback_to_archived_data(self, urls: List[str]) -> List[str]:
         """Khi crawler timeout, sử dụng dữ liệu đã crawl từ Wayback/GAU"""
@@ -197,19 +231,20 @@ class ReconEngine:
     def _build_direct_probe_candidates(self) -> List[str]:
         """Build direct probe URLs while preserving explicit scheme/port when provided."""
         candidates: List[str] = []
+        preferred_schemes = ["https", "http"] if self.is_public_hostname else ["http", "https"]
 
         if self.raw_target.startswith(("http://", "https://")):
             candidates.append(self.raw_target.rstrip("/"))
 
         if self.target_port:
-            for scheme in [self.target_scheme, "https", "http"]:
+            for scheme in [self.target_scheme] + preferred_schemes:
                 url = f"{scheme}://{self.target_host}:{self.target_port}"
                 if url not in candidates:
                     candidates.append(url)
         else:
             preferred = f"{self.target_scheme}://{self.target_host}"
             candidates.append(preferred)
-            for scheme in ["https", "http"]:
+            for scheme in preferred_schemes:
                 url = f"{scheme}://{self.target_host}"
                 if url not in candidates:
                     candidates.append(url)

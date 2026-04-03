@@ -42,7 +42,7 @@ class ReportGenerator:
         """Generate structured JSON report"""
         # FILTER: Only include high-confidence vulnerabilities
         all_vulns = self.state.get("vulnerabilities", [])
-        valid_vulns = [v for v in all_vulns if v.get('confidence', 0) >= 0.5]
+        valid_vulns = [v for v in all_vulns if self._confidence_sort_value(v.get('confidence', 0)) >= 0.5]
         
         logger.info(f"[REPORT] Filtering: {len(all_vulns)} → {len(valid_vulns)} valid vulns")
         
@@ -327,7 +327,7 @@ class ReportGenerator:
         high_potential = []
         vulns = self.state.get("vulnerabilities", [])
         for v in vulns:
-            if v.get("confidence", 0) >= 0.7 and not v.get("confirmed", False):
+            if self._confidence_sort_value(v.get("confidence", 0)) >= 0.7 and not v.get("confirmed", False):
                 high_potential.append({"source": "vulnerability_scan", "name": v.get("name", "Unknown"), "endpoint": v.get("endpoint", ""), "type": v.get("type", ""), "severity": v.get("severity", "MEDIUM"), "confidence": v.get("confidence", 0), "evidence": v.get("evidence", ""), "manual_steps": v.get("manual_verification_steps", [])})
         rce_chains = self.state.get("rce_chain_possibilities", [])
         for c in rce_chains:

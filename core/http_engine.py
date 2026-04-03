@@ -15,6 +15,7 @@ import random
 import config
 import urllib3
 from urllib.parse import urlparse
+import ipaddress
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 from core.scan_optimizer import get_optimizer
@@ -298,7 +299,7 @@ class HTTPClient:
     def _normalize_url(self, url: str) -> str:
         """
         Normalize URL for specific hosts.
-        Skip HTTPS for localhost entirely to avoid SSL errors.
+        Skip HTTPS for local/private hosts entirely to avoid slow TLS failures.
         """
         if not url:
             return url
@@ -307,12 +308,9 @@ class HTTPClient:
         parsed = urlparse(url)
         host = parsed.hostname or ''
         
-        # Skip HTTPS for localhost - use HTTP only
-        if host in ['localhost', '127.0.0.1', '::1', '0.0.0.0']:
-            if url.startswith('https://'):
-                # Replace https:// with http://
-                url = url.replace('https://', 'http://', 1)
-                return url
+        if config.LOCAL_HTTP_ONLY and self._is_local_or_private_host(host) and url.startswith('https://'):
+            url = url.replace('https://', 'http://', 1)
+            return url
         
         # Check cache for non-localhost hosts
         if host in self.scheme_cache:
@@ -321,6 +319,26 @@ class HTTPClient:
                 url = url.replace(f'{parsed.scheme}://', f'{preferred_scheme}://', 1)
         
         return url
+
+    def _is_local_or_private_host(self, host: str) -> bool:
+        host = (host or "").strip().lower()
+        if not host:
+            return False
+
+        if host in {'localhost', '127.0.0.1', '::1', '0.0.0.0', 'localhost.localdomain'}:
+            return True
+
+        try:
+            ip = ipaddress.ip_address(host)
+            return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+        except ValueError:
+            pass
+
+        if "." not in host:
+            return True
+
+        local_suffixes = (".local", ".localhost", ".internal", ".lan", ".home", ".test", ".example", ".invalid")
+        return host.endswith(local_suffixes)
 
     def _validate_url(self, url: str) -> tuple[bool, str]:
         """Validate URL before sending request"""

@@ -28,7 +28,7 @@ class PersistenceEngine:
         is_wordpress = target_info.get('wordpress_detected', False)
         
         if os_type == 'linux':
-            options.extend(self._linux_persistence_vectors(php_enabled, is_wordpress))
+            options.extend(self._linux_persistence_vectors(target_info, php_enabled, is_wordpress))
         elif os_type == 'windows':
             options.extend(self._windows_persistence_vectors())
         
@@ -48,7 +48,7 @@ class PersistenceEngine:
         
         return 'unknown'
     
-    def _linux_persistence_vectors(self, php_enabled: bool, is_wordpress: bool) -> List[Dict]:
+    def _linux_persistence_vectors(self, target_info: Dict, php_enabled: bool, is_wordpress: bool) -> List[Dict]:
         """Linux persistence methods"""
         vectors = [
             {
