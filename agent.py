@@ -164,6 +164,19 @@ from core.automatic_exploit_selector import select_exploitation_strategy, select
 # ─── AI Intelligence Engines ────────────────────────────────────────────────
 from ai.adaptive_payload_engine import generate_adaptive_payloads
 
+# ─── NEW: Advanced Core Modules ─────────────────────────────────────────────
+from core.async_scanner import AsyncScanner, sync_parallel_scan
+from core.distributed_engine import DistributedEngine
+from core.ml_classifier import MLClassifier
+from core.exploit_chain_optimizer import ExploitChainOptimizer
+
+# ─── NEW: Advanced Integrations ─────────────────────────────────────────────
+from integrations.metasploit_rpc import MetasploitRPC, AutoExploiter
+from integrations.burp_api import BurpAPI, BurpScanner
+
+# ─── NEW: Advanced AI Modules ───────────────────────────────────────────────
+from ai.llm_analyzer import LLMAnalyzer
+
 
 # ─── API Key Check ───────────────────────────────────────────────────────────
 def check_api_keys() -> dict:
@@ -325,14 +338,14 @@ class BatchDisplay:
         # Phase tracking for display
         self.ALL_PHASES = [
             'recon', 'live', 'wp', 'toolkit', 'crawl', 'wp_detect_state',
-            'js_hunter', 'param_mine', 'auth', 'classify', 'rank', 'scan',
+            'js_hunter', 'param_mine', 'auth', 'ml_classify', 'classify', 'rank', 'scan',
             'analyze', 'cve_analysis', 'pivot', 'graph', 'chain', 'select',
             'exploit', 'sqli_exploit', 'upload_bypass', 'reverse_shell',
             'privesc', 'waf_bypass', 'boolean_sqli', 'xss', 'idor',
             'default_creds', 'cve_exploit', 'api_vuln', 'subdomain_takeover',
             'mfa_bypass', 'oauth_saml', 'persistence', 'lateral_movement',
             'ssl_pinning', 'zero_day', 'container_escape', 'custom_exploit',
-            'log_evasion', 'learn', 'ddos', 'report'
+            'log_evasion', 'burp_scan', 'msf_exploit', 'llm_analysis', 'learn', 'ddos', 'report'
         ]
         self.PHASE_ORDER = {phase: idx for idx, phase in enumerate(self.ALL_PHASES)}
     def stop(self):
@@ -1350,6 +1363,24 @@ class ReconAgent:
         self.phase_errors = defaultdict(int)  # Track errors per phase
         self.playbook_state = {}  # Conditional playbook state
         
+        # FIX #1: Groq failover tracking - hard stop when Groq unavailable
+        self.groq_unavailable_consecutive = 0
+        self.groq_available = True
+        self.groq_circuit_open = False  # Hard stop flag for circuit breaker
+        
+        # FIX #2: Loop termination - explicit exit conditions
+        self._report_generated = False
+        self.max_wall_clock_seconds = 8 * 3600  # 8 hours hard limit
+        self.max_iterations_hard_limit = 5  # Absolute max iterations
+        
+        # FIX #3: External domain blacklist for scope leak prevention
+        self.external_domains_blacklist = set()
+        self.allowed_domains_set = set(self.allowed_domains) if self.allowed_domains else set()
+        
+        # FIX #4: Failure cache for endpoints (shared across iterations)
+        self.failed_endpoints_cache = {}
+        self.endpoint_timeout_cache = set()  # Cache for timed-out endpoints
+        
         self.stats = {
             'subs': 0, 'live': 0, 'eps': 0, 'vulns': 0, 
             'exploited': 0, 'wp': 0,
@@ -1391,6 +1422,72 @@ class ReconAgent:
         self.false_positive_filter = FalsePositiveFilter(self.state, self.output_dir)
         self.payload_optimizer = PayloadOptimizer(self.state, self.output_dir)
         self.chain_validator = ChainValidator(self.state, self.output_dir)
+        
+        # ═══════════════════════════════════════════════════════════════════
+        # NEW: Advanced Core Modules Initialization
+        # ═══════════════════════════════════════════════════════════════════
+        
+        # Initialize Async Scanner
+        self.async_scanner = AsyncScanner(
+            max_concurrent=config.ASYNC_MAX_CONCURRENT,
+            rate_limit=config.ASYNC_RATE_LIMIT,
+            cache_ttl=config.ASYNC_CACHE_TTL,
+        )
+        
+        # Initialize Distributed Engine (if enabled)
+        if config.DISTRIBUTED_ENABLED:
+            self.distributed_engine = DistributedEngine(
+                redis_host=config.REDIS_HOST,
+                redis_port=config.REDIS_PORT,
+            )
+        else:
+            self.distributed_engine = None
+        
+        # Initialize ML Classifier
+        self.ml_classifier = MLClassifier() if config.ML_CLASSIFIER_ENABLED else None
+        
+        # Initialize Exploit Chain Optimizer
+        self.chain_optimizer = ExploitChainOptimizer() if config.CHAIN_OPTIMIZER_ENABLED else None
+        
+        # Initialize Metasploit RPC (if enabled)
+        if config.METASPLOIT_ENABLED:
+            self.metasploit = MetasploitRPC(
+                host=config.METASPLOIT_HOST,
+                port=config.METASPLOIT_PORT,
+                password=config.METASPLOIT_PASSWORD,
+            )
+            if self.metasploit.connect():
+                self.auto_exploiter = AutoExploiter(self.metasploit)
+            else:
+                self.metasploit = None
+                self.auto_exploiter = None
+                self.logger.warning("[INIT] Failed to connect to Metasploit RPC, disabling auto-exploitation")
+        else:
+            self.metasploit = None
+            self.auto_exploiter = None
+        
+        # Initialize Burp API (if enabled)
+        if config.BURP_ENABLED:
+            self.burp_api = BurpAPI(
+                host=config.BURP_HOST,
+                port=config.BURP_PORT,
+                api_key=config.BURP_API_KEY,
+            )
+            if self.burp_api.test_connection():
+                self.burp_scanner = BurpScanner(self.burp_api)
+            else:
+                self.burp_api = None
+                self.burp_scanner = None
+                self.logger.warning("[INIT] Failed to connect to Burp Suite, disabling Burp scanning")
+        else:
+            self.burp_api = None
+            self.burp_scanner = None
+        
+        # Initialize LLM Analyzer
+        if config.LLM_ANALYZER_ENABLED:
+            self.llm_analyzer = LLMAnalyzer(self.groq_client) if self.groq_client else LLMAnalyzer()
+        else:
+            self.llm_analyzer = None
         
         if self.resumed_from_state:
             previous_phase = self.state.get("current_phase", "unknown")
@@ -1552,8 +1649,24 @@ class ReconAgent:
         try:
             attack_graph = AttackGraph()
             
+            # FIX #1: Check if Groq circuit is open for too long (hard stop)
+            if self.groq_client and hasattr(self.groq_client, '_circuit_state'):
+                from ai.groq_client import CircuitState
+                if self.groq_client._circuit_state == CircuitState.OPEN:
+                    backoff = self.groq_client._current_backoff
+                    if backoff >= self.groq_client.MAX_BACKOFF:
+                        self.logger.warning("[AGENT] Groq circuit breaker at max backoff. Switching to rule-based mode.")
+                        self.groq_available = False
+                        self.groq_circuit_open = True
+            
             while self.iteration_count < self.max_iterations:
                 self.iteration_count += 1
+                
+                # FIX #2: Check wall-clock time limit inside loop
+                elapsed_time = time.time() - self.scan_start_time
+                if elapsed_time > self.max_wall_clock_seconds:
+                    self.logger.warning(f"[AGENT] Wall-clock time limit reached during iteration. Stopping.")
+                    break
                 
                 # BUG 11 FIX: Clear completed phases on iteration 2+ to allow re-scanning
                 if self.iteration_count > 1:
@@ -2725,19 +2838,37 @@ class ReconAgent:
         self._mark_phase_done("wordpress")
 
     def _run_toolkit_phase(self):
-        """Enhanced toolkit scanning with detailed tracking of all sub-modules"""
-        live_hosts = self._select_live_hosts_for_deep_scan(limit=30)
+        """Enhanced toolkit scanning with detailed tracking of all sub-modules and timeout protection"""
+        live_hosts = self._select_live_hosts_for_deep_scan(limit=10)  # FIX: Reduced from 30 to prevent timeout
         
         if not live_hosts:
             self.last_action = "toolkit: no live hosts for scanning"
             self._mark_phase_done("toolkit")
             return
         
+        # FIX: Filter out unreachable hosts based on response time
+        live_hosts = self._filter_unreachable_hosts(live_hosts)
+        if not live_hosts:
+            self.last_action = "toolkit: no reachable hosts after filtering"
+            self._mark_phase_done("toolkit")
+            return
+        
         self._set_activity("kali-toolkit", "running", "kali-tools")
         self.logger.info(f"[TOOLKIT] Starting comprehensive scan on {len(live_hosts)} hosts")
         
+        # FIX: Add timeout protection for entire toolkit phase (600s = 10 minutes)
+        toolkit_start_time = time.time()
+        toolkit_timeout = 600  # 10 minutes max for entire toolkit phase
+        
         # Run toolkit with progress tracking
         findings = self.toolkit.run(live_hosts, progress_cb=self._progress_callback)
+        
+        # Check if toolkit phase exceeded timeout
+        toolkit_elapsed = time.time() - toolkit_start_time
+        if toolkit_elapsed > toolkit_timeout:
+            self.logger.warning(f"[TOOLKIT] Phase exceeded {toolkit_timeout}s timeout after {toolkit_elapsed:.0f}s")
+            self.last_action = f"toolkit: timeout after {toolkit_elapsed:.0f}s"
+        
         self._set_activity("kali-toolkit", "processing", "kali-tools")
         
         # Process and aggregate findings
@@ -3125,6 +3256,54 @@ class ReconAgent:
         self.logger.warning(f"[PROBE] Completed validation on {len(results)} endpoint(s)")
         self._update_display()
 
+    def _confidence_value(self, value, default=0.0):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _normalize_vulnerability_record(self, vuln):
+        if not isinstance(vuln, dict):
+            return {}
+
+        normalized = dict(vuln)
+        endpoint = normalized.get("endpoint") or normalized.get("url") or normalized.get("target") or ""
+        if endpoint:
+            normalized["endpoint"] = endpoint
+            normalized.setdefault("url", endpoint)
+
+        normalized["confidence"] = self._confidence_value(normalized.get("confidence", 0.0))
+
+        severity = str(normalized.get("severity", "") or "").upper()
+        if not severity:
+            confidence = normalized["confidence"]
+            severity = "CRITICAL" if confidence >= 0.9 else "HIGH" if confidence >= 0.75 else "MEDIUM" if confidence >= 0.4 else "LOW"
+        normalized["severity"] = severity
+        return normalized
+
+    def _vuln_merge_key(self, vuln):
+        normalized = self._normalize_vulnerability_record(vuln)
+        endpoint = normalized.get("endpoint") or normalized.get("url") or ""
+        vtype = normalized.get("type") or normalized.get("name") or "unknown"
+        payload = normalized.get("payload") or ""
+        return (endpoint, vtype, payload)
+
+    def _merge_vulnerability_lists(self, existing, incoming):
+        merged = {}
+        for source in (existing or [], incoming or []):
+            for vuln in source:
+                normalized = self._normalize_vulnerability_record(vuln)
+                if not normalized:
+                    continue
+                key = self._vuln_merge_key(normalized)
+                current = merged.get(key)
+                if current is None or normalized.get("confidence", 0.0) >= current.get("confidence", 0.0):
+                    if current:
+                        current.update(normalized)
+                    else:
+                        merged[key] = normalized
+        return list(merged.values())
+
     def _run_scanning_phase(self):
         before = len(self.state.get("confirmed_vulnerabilities", []))
 
@@ -3198,7 +3377,7 @@ class ReconAgent:
                         if result.get("vulnerable", False):
                             endpoint = result.get("endpoint", "")
                             category = result.get("category", "unknown")
-                            confidence = result.get("confidence", 0.5)
+                            confidence = self._confidence_value(result.get("confidence", 0.5), 0.5)
                             
                             # Tạo vuln object
                             vuln = {
@@ -3217,38 +3396,39 @@ class ReconAgent:
                     except json.JSONDecodeError as e:
                         self.logger.warning(f"[SCAN] Invalid JSON at line {line_num}: {e}")
                         continue
+            merged_confirmed = self._merge_vulnerability_lists(
+                self.state.get("confirmed_vulnerabilities", []) or [],
+                vulns_from_scan,
+            )
+            merged_all = self._merge_vulnerability_lists(
+                self.state.get("vulnerabilities", []) or [],
+                merged_confirmed,
+            )
 
-            self.logger.info(f"[SCAN] Loaded {len(scan_responses)} responses, found {len(vulns_from_scan)} vulnerabilities")
-            
-            # Cập nhật confirmed_vulnerabilities
+            self.state.update(confirmed_vulnerabilities=[])
+            self.state.update(confirmed_vulnerabilities=merged_confirmed)
+            self.state.update(vulnerabilities=[])
+            self.state.update(vulnerabilities=merged_all)
+
+            self.logger.info(
+                f"[SCAN] Loaded {len(scan_responses)} responses, parsed {len(vulns_from_scan)} file findings, "
+                f"state now has {len(merged_confirmed)} confirmed / {len(merged_all)} total vulnerabilities"
+            )
+
             if vulns_from_scan:
-                current_vulns = self.state.get("confirmed_vulnerabilities", [])
-                
-                # Deduplicate by endpoint+type
-                existing_keys = {(v.get('endpoint'), v.get('type')) for v in current_vulns}
-                new_vulns = []
-                
-                for vuln in vulns_from_scan:
-                    key = (vuln.get('endpoint'), vuln.get('type'))
-                    if key not in existing_keys:
-                        new_vulns.append(vuln)
-                        existing_keys.add(key)
-                
-                if new_vulns:
-                    current_vulns.extend(new_vulns)
-                    self.state.update(confirmed_vulnerabilities=current_vulns)
-                    self.logger.info(f"[SCAN] ✅ Added {len(new_vulns)} new vulnerabilities to state")
-                    
-                    # Log chi tiết
-                    for vuln in new_vulns[:10]:
-                        self.logger.info(f"[SCAN]   - {vuln['type']} on {vuln['endpoint'][:60]} (conf: {vuln['confidence']})")
-                else:
-                    self.logger.info("[SCAN] No new vulnerabilities (all already in state)")
+                for vuln in vulns_from_scan[:10]:
+                    self.logger.info(
+                        f"[SCAN]   - {vuln['type']} on {vuln['endpoint'][:60]} (conf: {vuln['confidence']})"
+                    )
+            elif merged_confirmed:
+                self.logger.info("[SCAN] No vulnerable file findings, but tool-promoted findings already exist in state")
             else:
-                self.logger.info("[SCAN] No vulnerable results found in scan_results.json")
+                self.logger.info("[SCAN] No vulnerable results found in scan artifacts or state")
 
         else:
-            self.logger.error(f"[SCAN] scan_results.json NOT FOUND at {scan_results_file}")
+            current_confirmed = self.state.get("confirmed_vulnerabilities", []) or []
+            current_all = self.state.get("vulnerabilities", []) or []
+            self.logger.warning(f"[SCAN] scan_results.json NOT FOUND at {scan_results_file}")
             # Fallback
             fallback_targets = self.state.get("prioritized_endpoints") or self.state.get("endpoints") or []
             for e in fallback_targets[:20]:
@@ -3259,7 +3439,10 @@ class ReconAgent:
                     "confidence": 0.1,
                     "reason": "No active scan result - fallback surface detection"
                 })
-            self.logger.warning(f"[SCAN] Generated {len(scan_responses)} fallback responses")
+            self.logger.warning(
+                f"[SCAN] Generated {len(scan_responses)} fallback responses; "
+                f"state currently has {len(current_confirmed)} confirmed / {len(current_all)} total vulnerabilities"
+            )
 
         # SAVE TO STATE
         self.state.update(scan_responses=scan_responses)
@@ -3320,11 +3503,12 @@ class ReconAgent:
                 self.state.update(scan_responses=responses)
                 self.logger.warning(f"[ANALYSIS] Loaded {len(responses)} scan responses from scan_results.json")
 
-        vulnerabilities = []
-        manual_queue = []
+        existing_confirmed = self.state.get("confirmed_vulnerabilities", []) or []
+        existing_detected = self.state.get("vulnerabilities", []) or []
+        parsed_vulnerabilities = []
         for response in responses:
             if response.get("vulnerable"):
-                confidence = float(response.get("confidence", 0) or 0)
+                confidence = self._confidence_value(response.get("confidence", 0), 0.0)
                 severity = "CRITICAL" if confidence >= 0.9 else "HIGH" if confidence >= 0.75 else "MEDIUM"
                 requires_manual = severity in ("CRITICAL", "HIGH")
                 vuln = {
@@ -3340,20 +3524,29 @@ class ReconAgent:
                     "requires_manual_validation": requires_manual,
                     "validated": False,
                 }
-                vulnerabilities.append(vuln)
-                if requires_manual:
-                    manual_queue.append(
-                        {
-                            "id": f"{response.get('endpoint')}::{response.get('category')}::{len(manual_queue)+1}",
-                            "endpoint": response.get("endpoint"),
-                            "type": response.get("category"),
-                            "severity": severity,
-                            "evidence": response.get("reason", ""),
-                            "status": "pending_manual_review",
-                        }
-                    )
+                parsed_vulnerabilities.append(vuln)
 
-        self.state.update(confirmed_vulnerabilities=vulnerabilities)
+        merged_confirmed = self._merge_vulnerability_lists(existing_confirmed, parsed_vulnerabilities)
+        merged_detected = self._merge_vulnerability_lists(existing_detected, merged_confirmed)
+        manual_queue = []
+        for vuln in merged_confirmed:
+            severity = str(vuln.get("severity", "") or "").upper()
+            if vuln.get("requires_manual_validation") or severity in ("CRITICAL", "HIGH"):
+                manual_queue.append(
+                    {
+                        "id": f"{vuln.get('endpoint') or vuln.get('url')}::{vuln.get('type')}::{len(manual_queue)+1}",
+                        "endpoint": vuln.get("endpoint") or vuln.get("url"),
+                        "type": vuln.get("type"),
+                        "severity": severity or "HIGH",
+                        "evidence": vuln.get("evidence", ""),
+                        "status": "pending_manual_review",
+                    }
+                )
+
+        self.state.update(confirmed_vulnerabilities=[])
+        self.state.update(confirmed_vulnerabilities=merged_confirmed)
+        self.state.update(vulnerabilities=[])
+        self.state.update(vulnerabilities=merged_detected)
         self.state.update(manual_validation_required=manual_queue)
         if manual_queue:
             queue_file = os.path.join(self.output_dir, "manual_validation_queue.json")
@@ -3384,8 +3577,8 @@ class ReconAgent:
         self._update_display()
         self._run_security_misconfig_checks()
 
-        if vulnerabilities:
-            self.last_action = f"analysis: {len(vulnerabilities)} CVEs + {len(findings)} findings"
+        if merged_confirmed:
+            self.last_action = f"analysis: {len(merged_confirmed)} confirmed vulns + {len(findings)} findings"
             self._update_stats()
         elif findings:
             self.last_action = f"analysis: {len(findings)} findings (no CVEs)"
@@ -5817,7 +6010,7 @@ class ReconAgent:
     def _run_ddos_phase(self):
 
         exploit_results = self.state.get("exploit_results", [])
-        successful_exploits = [r for r in exploit_results if r.get("success", False)]
+        successful_exploits = self._meaningful_successful_exploits(exploit_results)
         
         # FIX 4: Only skip DDoS if exploits were successful (not the other way around)
         if successful_exploits:
@@ -5989,6 +6182,337 @@ class ReconAgent:
             self.logger.debug(f"[MISCONFIG] Error in security checks: {e}")
             self.last_action = f"misconfig error: {str(e)[:40]}"
 
+    # ═══════════════════════════════════════════════════════════════════════════
+    # NEW: Advanced Core Module Phase Handlers
+    # These phases integrate the new ML, Burp, Metasploit, and LLM modules
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _run_ml_classification_phase(self):
+        """ML-based endpoint classification phase"""
+        if not self.ml_classifier:
+            self._mark_phase_done("ml_classify")
+            return
+        
+        self.phase_detail = "[ML] Classifying endpoints with ML..."
+        self._update_display()
+        
+        try:
+            endpoints = self.state.get("endpoints", [])
+            if not endpoints:
+                self.phase_detail = "[ML] No endpoints to classify"
+                self._update_display()
+                self._mark_phase_done("ml_classify")
+                return
+            
+            # Extract URLs for classification
+            urls = []
+            for ep in endpoints[:100]:
+                url = ep.get('url', '') if isinstance(ep, dict) else str(ep)
+                if url:
+                    urls.append(url)
+            
+            self.logger.info(f"[ML] Classifying {len(urls)} endpoints")
+            
+            # Run ML classification
+            results = self.ml_classifier.classify_batch(urls)
+            
+            # Store classification results
+            api_endpoints = []
+            admin_endpoints = []
+            auth_endpoints = []
+            upload_endpoints = []
+            
+            ml_classified = []
+            for r in results:
+                ml_classified.append({
+                    'url': r.endpoint,
+                    'type': r.predicted_type.value,
+                    'confidence': r.confidence,
+                    'reasoning': r.reasoning
+                })
+                
+                if r.predicted_type.name == 'API':
+                    api_endpoints.append(r.endpoint)
+                elif r.predicted_type.name == 'ADMIN':
+                    admin_endpoints.append(r.endpoint)
+                elif r.predicted_type.name == 'AUTH':
+                    auth_endpoints.append(r.endpoint)
+                elif r.predicted_type.name == 'UPLOAD':
+                    upload_endpoints.append(r.endpoint)
+            
+            # Store in state
+            self.state.update(ml_classified_endpoints=ml_classified)
+            self.state.update(api_endpoints=api_endpoints)
+            self.state.update(admin_endpoints=admin_endpoints)
+            self.state.update(auth_endpoints=auth_endpoints)
+            self.state.update(upload_endpoints=upload_endpoints)
+            
+            # Predict vulnerabilities
+            vuln_predictions = self.ml_classifier.predict_vulnerabilities(urls)
+            if vuln_predictions:
+                predictions_list = []
+                for p in vuln_predictions:
+                    predictions_list.append({
+                        'url': p.endpoint,
+                        'vulnerability_type': p.vulnerability_type.value,
+                        'probability': p.probability,
+                        'confidence': p.confidence,
+                        'indicators': p.indicators,
+                        'recommendations': p.recommendations
+                    })
+                self.state.update(ml_vulnerability_predictions=predictions_list)
+            
+            self.stats['eps'] = len(results)
+            self.last_action = f"ml_classify: {len(results)} endpoints classified"
+            self.phase_detail = f"[ML] Complete - {len(results)} classified, {len(vuln_predictions)} vuln predictions"
+            self._update_display()
+            
+            if self.batch_display:
+                self.batch_display._add_to_feed("🤖", "ML Classify", self.target, f"{len(results)} endpoints")
+            
+        except Exception as e:
+            self.logger.error(f"[ML] Phase failed: {e}")
+            self.last_action = f"ml_classify error: {str(e)[:50]}"
+            self.phase_detail = f"[ML] Error - {str(e)[:60]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("ml_classify")
+
+    def _run_burp_scan_phase(self):
+        """Burp Suite automated scanning phase"""
+        if not self.burp_scanner:
+            self._mark_phase_done("burp_scan")
+            return
+        
+        self.phase_detail = "[BURP] Running Burp Suite scan..."
+        self._update_display()
+        
+        try:
+            target_url = self.target
+            if not target_url.startswith(('http://', 'https://')):
+                target_url = f"https://{target_url}"
+            
+            self.logger.info(f"[BURP] Starting scan on {target_url}")
+            
+            # Run Burp scan
+            issues = self.burp_scanner.scan_url(
+                target_url,
+                wait_for_completion=True,
+                timeout=3600  # 1 hour timeout
+            )
+            
+            # Store Burp findings
+            burp_issues = []
+            for issue in issues:
+                burp_issues.append({
+                    'name': issue.issue_name,
+                    'severity': issue.severity.value,
+                    'confidence': issue.confidence.value,
+                    'url': issue.url,
+                    'type': issue.issue_type,
+                    'parameter': issue.parameter,
+                    'evidence': issue.evidence,
+                    'background': issue.background,
+                    'remediation': issue.remediation
+                })
+            
+            self.state.update(burp_issues=burp_issues)
+            
+            # Update stats
+            high_severity = sum(1 for i in burp_issues if i['severity'] == 'High')
+            medium_severity = sum(1 for i in burp_issues if i['severity'] == 'Medium')
+            low_severity = sum(1 for i in burp_issues if i['severity'] == 'Low')
+            
+            self.stats['vulns'] += len(burp_issues)
+            
+            self.last_action = f"burp_scan: {len(burp_issues)} issues ({high_severity}H/{medium_severity}M/{low_severity}L)"
+            self.phase_detail = f"[BURP] Complete - {len(burp_issues)} issues found"
+            self._update_display()
+            
+            if self.batch_display:
+                self.batch_display._add_to_feed("🔧", "Burp Scan", self.target, f"{len(burp_issues)} issues")
+            
+        except Exception as e:
+            self.logger.error(f"[BURP] Phase failed: {e}")
+            self.last_action = f"burp_scan error: {str(e)[:50]}"
+            self.phase_detail = f"[BURP] Error - {str(e)[:60]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("burp_scan")
+
+    def _run_metasploit_exploit_phase(self):
+        """Metasploit auto-exploitation phase"""
+        if not self.auto_exploiter or not self.metasploit or not self.metasploit.connected:
+            self._mark_phase_done("msf_exploit")
+            return
+        
+        self.phase_detail = "[MSF] Running Metasploit auto-exploitation..."
+        self._update_display()
+        
+        try:
+            # Get vulnerabilities from state
+            vulns = self.state.get("confirmed_vulnerabilities", [])
+            exploitable_cves = self.state.get("exploitable_cves", [])
+            
+            if not vulns and not exploitable_cves:
+                self.phase_detail = "[MSF] No vulnerabilities to exploit"
+                self._update_display()
+                self._mark_phase_done("msf_exploit")
+                return
+            
+            # Build vulnerability list for auto-exploiter
+            vuln_list = []
+            for v in vulns:
+                vuln_list.append({
+                    'id': v.get('type', ''),
+                    'name': v.get('name', ''),
+                    'endpoint': v.get('endpoint', ''),
+                    'severity': v.get('severity', ''),
+                    'confidence': v.get('confidence', 0)
+                })
+            
+            for cve in exploitable_cves:
+                vuln_list.append({
+                    'id': cve.get('cve_id', ''),
+                    'name': cve.get('name', ''),
+                    'endpoint': cve.get('endpoint', ''),
+                    'severity': cve.get('severity', ''),
+                    'confidence': cve.get('probability_of_success', 0)
+                })
+            
+            self.logger.info(f"[MSF] Auto-exploiting with {len(vuln_list)} vulnerabilities")
+            
+            # Determine platform
+            platform = "linux"  # Default
+            tech_stack = self.state.get("technologies", {})
+            if tech_stack:
+                tech_names = [t.lower() for t in tech_stack.keys()]
+                if any('windows' in t or 'iis' in t for t in tech_names):
+                    platform = "windows"
+                elif any('php' in t or 'apache' in t for t in tech_names):
+                    platform = "linux"
+            
+            # Run auto-exploitation
+            attempts = self.auto_exploiter.auto_exploit(
+                target=self.target,
+                vulnerabilities=vuln_list,
+                platform=platform
+            )
+            
+            # Store exploit results
+            msf_results = []
+            successful = 0
+            for attempt in attempts:
+                msf_results.append({
+                    'attempt_id': attempt.attempt_id,
+                    'target': attempt.target,
+                    'exploit_module': attempt.exploit_module,
+                    'payload': attempt.payload,
+                    'status': attempt.status.value,
+                    'session_id': attempt.session_id,
+                    'result': attempt.result,
+                    'error': attempt.error
+                })
+                if attempt.status.name == 'SUCCESS':
+                    successful += 1
+            
+            self.state.update(msf_exploit_attempts=msf_results)
+            self.stats['exploited'] += successful
+            
+            self.last_action = f"msf_exploit: {successful}/{len(attempts)} successful"
+            self.phase_detail = f"[MSF] Complete - {successful} sessions established"
+            self._update_display()
+            
+            if self.batch_display:
+                self.batch_display._add_to_feed("💣", "Metasploit", self.target, f"{successful} sessions")
+            
+        except Exception as e:
+            self.logger.error(f"[MSF] Phase failed: {e}")
+            self.last_action = f"msf_exploit error: {str(e)[:50]}"
+            self.phase_detail = f"[MSF] Error - {str(e)[:60]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("msf_exploit")
+
+    def _run_llm_analysis_phase(self):
+        """LLM-powered analysis phase"""
+        if not self.llm_analyzer:
+            self._mark_phase_done("llm_analysis")
+            return
+        
+        self.phase_detail = "[LLM] Running AI-powered analysis..."
+        self._update_display()
+        
+        try:
+            # Gather all findings
+            findings = {
+                'target': self.target,
+                'vulnerabilities': self.state.get("confirmed_vulnerabilities", []),
+                'endpoints': self.state.get("endpoints", []),
+                'technologies': self.state.get("technologies", {}),
+                'exploit_chains': self.state.get("exploit_chains", []),
+                'security_findings': self.state.get("security_findings", []),
+                'wordpress_findings': {
+                    'version': self.state.get("wp_version", ""),
+                    'plugins': self.state.get("wp_plugins", []),
+                    'themes': self.state.get("wp_themes", []),
+                    'users': self.state.get("wp_users", []),
+                    'vulnerabilities': self.state.get("wp_vulnerabilities", [])
+                }
+            }
+            
+            self.logger.info(f"[LLM] Analyzing target with AI...")
+            
+            # Run vulnerability analysis
+            vuln_analysis = self.llm_analyzer.analyze_vulnerabilities(
+                findings['vulnerabilities'],
+                context=f"Target: {self.target}"
+            )
+            
+            # Run risk assessment
+            risk_assessment = self.llm_analyzer.assess_risk(findings)
+            
+            # Run attack path suggestion
+            attack_paths = self.llm_analyzer.suggest_attack_paths(findings)
+            
+            # Run remediation advice
+            remediation = self.llm_analyzer.get_remediation_advice(
+                findings['vulnerabilities'],
+                environment=self.target
+            )
+            
+            # Store analysis results
+            llm_analysis = {
+                'vulnerability_analysis': vuln_analysis.content,
+                'risk_assessment': risk_assessment.content,
+                'attack_paths': attack_paths.content,
+                'remediation_advice': remediation.content,
+                'confidence': vuln_analysis.confidence.value,
+                'key_findings': vuln_analysis.key_findings,
+                'recommendations': vuln_analysis.recommendations
+            }
+            
+            self.state.update(llm_analysis=llm_analysis)
+            
+            self.last_action = f"llm_analysis: AI analysis complete (confidence: {vuln_analysis.confidence.value})"
+            self.phase_detail = f"[LLM] Complete - AI-powered analysis finished"
+            self._update_display()
+            
+            if self.batch_display:
+                self.batch_display._add_to_feed("🧠", "LLM Analysis", self.target, f"Confidence: {vuln_analysis.confidence.value}")
+            
+        except Exception as e:
+            self.logger.error(f"[LLM] Phase failed: {e}")
+            self.last_action = f"llm_analysis error: {str(e)[:50]}"
+            self.phase_detail = f"[LLM] Error - {str(e)[:60]}"
+            self._update_display()
+        
+        self.phase_status = "done"
+        self._mark_phase_done("llm_analysis")
+
     def _run_learning_phase(self):
         self.phase_detail = "[LEARN] Analyzing results and updating patterns..."
         self._update_display()
@@ -6048,6 +6572,250 @@ class ReconAgent:
 
         self.phase_status = "done"
         self._mark_phase_done("learn")
+
+    def _filter_unreachable_hosts(self, live_hosts: List[Dict]) -> List[Dict]:
+        """
+        FIX: Filter out unreachable hosts based on response time and connectivity.
+        Skip hosts that are likely to timeout during toolkit scanning.
+        """
+        if not live_hosts:
+            return []
+        
+        filtered = []
+        max_response_time = 10.0  # Skip hosts with >10s response time
+        
+        for host in live_hosts:
+            url = host.get("url", "")
+            if not url:
+                continue
+            
+            # Check if host has good response time from previous scans
+            response_time = host.get("response_time", 0) or host.get("latency", 0) or 0
+            status_code = host.get("status_code", 0) or 0
+            
+            # Skip hosts with no response or error status
+            if status_code == 0 or status_code >= 500:
+                self.logger.debug(f"[TOOLKIT] Skipping unreachable host: {url} (status: {status_code})")
+                continue
+            
+            # Skip hosts with high response time
+            if response_time > max_response_time:
+                self.logger.debug(f"[TOOLKIT] Skipping slow host: {url} (response_time: {response_time:.2f}s)")
+                continue
+            
+            # Check if host was previously blacklisted for timeouts
+            from urllib.parse import urlparse
+            hostname = urlparse(url).hostname or ""
+            from core.scan_optimizer import get_optimizer
+            optimizer = get_optimizer()
+            if optimizer and optimizer.is_host_blacklisted(hostname):
+                self.logger.debug(f"[TOOLKIT] Skipping blacklisted host: {url}")
+                continue
+            
+            filtered.append(host)
+        
+        if filtered:
+            self.logger.info(f"[TOOLKIT] Filtered {len(live_hosts)} hosts → {len(filtered)} reachable hosts")
+        
+        return filtered
+
+    def _generate_fallback_chains(self) -> List[Dict]:
+        """
+        FIX: Generate fallback exploit chains when toolkit phase fails or produces no chains.
+        This ensures exploit phase always has something to work with.
+        """
+        fallback_chains = []
+        
+        # Get available data from state
+        technologies = self.state.get("technologies", {}) or {}
+        endpoints = self.state.get("endpoints", []) or []
+        vulnerabilities = self.state.get("vulnerabilities", []) or []
+        wp_detected = self.state.get("wordpress_detected", False)
+        
+        # Chain 1: Unauthenticated API Access (if API endpoints found)
+        api_endpoints = [e for e in endpoints if 'api' in (e.get('url', '') if isinstance(e, dict) else str(e)).lower()]
+        if api_endpoints:
+            fallback_chains.append({
+                "name": "Unauthenticated API Access",
+                "description": "Test API endpoints for missing authentication or weak authorization",
+                "risk_level": "HIGH",
+                "estimated_time": "5-10 minutes",
+                "steps": [
+                    {
+                        "name": "API Discovery",
+                        "action": "Enumerate all API endpoints and methods",
+                        "target": api_endpoints[0].get('url', '') if isinstance(api_endpoints[0], dict) else api_endpoints[0],
+                        "tool": "api_scanner",
+                        "payload": "",
+                        "success_indicator": "API endpoints identified with methods"
+                    },
+                    {
+                        "name": "Authentication Bypass Test",
+                        "action": "Test each endpoint without authentication",
+                        "target": "",
+                        "tool": "http_client",
+                        "payload": "GET /api/v1/users (no auth)",
+                        "success_indicator": "200 OK response without authentication"
+                    },
+                    {
+                        "name": "Data Extraction",
+                        "action": "Extract sensitive data from unauthenticated endpoints",
+                        "target": "",
+                        "tool": "http_client",
+                        "payload": "",
+                        "success_indicator": "User data, credentials, or sensitive information retrieved"
+                    }
+                ]
+            })
+        
+        # Chain 2: WordPress Exploitation (if WordPress detected)
+        if wp_detected:
+            wp_version = self.state.get("wp_version", "unknown")
+            wp_plugins = self.state.get("wp_plugins", []) or []
+            
+            fallback_chains.append({
+                "name": f"WordPress {wp_version} Exploitation Chain",
+                "description": "Exploit WordPress vulnerabilities for initial access",
+                "risk_level": "HIGH",
+                "estimated_time": "10-15 minutes",
+                "steps": [
+                    {
+                        "name": "WordPress Enumeration",
+                        "action": "Enumerate WordPress version, plugins, themes, and users",
+                        "target": self.target,
+                        "tool": "wpscan",
+                        "payload": "",
+                        "success_indicator": "WordPress version and plugins identified"
+                    },
+                    {
+                        "name": "Plugin Vulnerability Exploitation",
+                        "action": "Exploit known vulnerabilities in detected plugins",
+                        "target": "",
+                        "tool": "exploit_framework",
+                        "payload": "",
+                        "success_indicator": "Plugin vulnerability exploited successfully"
+                    },
+                    {
+                        "name": "Admin Access",
+                        "action": "Gain administrative access via exploited vulnerability",
+                        "target": "",
+                        "tool": "http_client",
+                        "payload": "",
+                        "success_indicator": "Admin dashboard access achieved"
+                    }
+                ]
+            })
+        
+        # Chain 3: SQL Injection (if parameters found)
+        endpoints_with_params = [e for e in endpoints if '?' in (e.get('url', '') if isinstance(e, dict) else str(e))]
+        if endpoints_with_params:
+            fallback_chains.append({
+                "name": "SQL Injection Exploitation Chain",
+                "description": "Test for and exploit SQL injection vulnerabilities",
+                "risk_level": "CRITICAL",
+                "estimated_time": "15-20 minutes",
+                "steps": [
+                    {
+                        "name": "SQLi Detection",
+                        "action": "Test parameters for SQL injection vulnerability",
+                        "target": endpoints_with_params[0].get('url', '') if isinstance(endpoints_with_params[0], dict) else endpoints_with_params[0],
+                        "tool": "sqlmap",
+                        "payload": "' OR 1=1--",
+                        "success_indicator": "SQL injection confirmed"
+                    },
+                    {
+                        "name": "Database Enumeration",
+                        "action": "Enumerate database structure and tables",
+                        "target": "",
+                        "tool": "sqlmap",
+                        "payload": "--dbs --tables",
+                        "success_indicator": "Database structure enumerated"
+                    },
+                    {
+                        "name": "Credential Extraction",
+                        "action": "Dump user credentials from database",
+                        "target": "",
+                        "tool": "sqlmap",
+                        "payload": "--dump -T users",
+                        "success_indicator": "User credentials extracted"
+                    }
+                ]
+            })
+        
+        # Chain 4: File Upload RCE (if upload endpoints found)
+        upload_endpoints = [e for e in endpoints if 'upload' in (e.get('url', '') if isinstance(e, dict) else str(e)).lower()]
+        if upload_endpoints:
+            fallback_chains.append({
+                "name": "File Upload to RCE Chain",
+                "description": "Bypass file upload restrictions to achieve remote code execution",
+                "risk_level": "CRITICAL",
+                "estimated_time": "10-15 minutes",
+                "steps": [
+                    {
+                        "name": "Upload Endpoint Analysis",
+                        "action": "Analyze file upload endpoint for validation bypass",
+                        "target": upload_endpoints[0].get('url', '') if isinstance(upload_endpoints[0], dict) else upload_endpoints[0],
+                        "tool": "http_client",
+                        "payload": "",
+                        "success_indicator": "Upload mechanism understood"
+                    },
+                    {
+                        "name": "Validation Bypass",
+                        "action": "Bypass file type validation (extension, MIME, magic bytes)",
+                        "target": "",
+                        "tool": "upload_bypass",
+                        "payload": "",
+                        "success_indicator": "Malicious file uploaded successfully"
+                    },
+                    {
+                        "name": "Webshell Execution",
+                        "action": "Execute uploaded webshell for RCE",
+                        "target": "",
+                        "tool": "http_client",
+                        "payload": "",
+                        "success_indicator": "Remote code execution achieved"
+                    }
+                ]
+            })
+        
+        # Chain 5: Default Credentials (always applicable)
+        fallback_chains.append({
+            "name": "Default Credentials Exploitation",
+            "description": "Test for default/weak credentials on admin panels and APIs",
+            "risk_level": "MEDIUM",
+            "estimated_time": "5-10 minutes",
+            "steps": [
+                {
+                    "name": "Login Panel Discovery",
+                    "action": "Find login panels and authentication endpoints",
+                    "target": self.target,
+                    "tool": "crawler",
+                    "payload": "",
+                    "success_indicator": "Login endpoints identified"
+                },
+                {
+                    "name": "Credential Testing",
+                    "action": "Test common default credentials",
+                    "target": "",
+                    "tool": "http_client",
+                    "payload": "admin:admin, admin:password, root:root",
+                    "success_indicator": "Valid credentials found"
+                },
+                {
+                    "name": "Session Hijacking",
+                    "action": "Use credentials to gain authenticated access",
+                    "target": "",
+                    "tool": "http_client",
+                    "payload": "",
+                    "success_indicator": "Authenticated session established"
+                }
+            ]
+        })
+        
+        if fallback_chains:
+            self.logger.warning(f"[FALLBACK] Generated {len(fallback_chains)} fallback exploit chains")
+        
+        return fallback_chains
 
     def _select_live_hosts_for_deep_scan(self, limit: int = 50) -> List[Dict]:
         live_hosts = self.state.get("live_hosts", []) or []
@@ -6133,17 +6901,37 @@ class ReconAgent:
         exploit_results = self.state.get("exploit_results", [])
         
         if vulnerabilities and exploit_results:
-            successful = len([r for r in exploit_results if r.get("success")])
+            successful = len(self._meaningful_successful_exploits(exploit_results))
             confidence = successful / len(vulnerabilities)
             return confidence >= self.confidence_threshold
         return False
+
+    def _meaningful_successful_exploits(self, exploit_results=None):
+        exploit_results = exploit_results if exploit_results is not None else (self.state.get("exploit_results", []) or [])
+
+        def is_meaningful(result):
+            if not result.get("success"):
+                return False
+            context = result.get("context", {}) or {}
+            chain_name = (result.get("chain") or "").lower()
+            if "xml-rpc multicall bruteforce" in chain_name:
+                return bool(context.get("valid_credentials"))
+            if "wordpress admin takeover" in chain_name:
+                return bool(context.get("authenticated_session") and context.get("admin_access"))
+            if "sql injection" in chain_name:
+                return bool(context.get("sqli_confirmed") and (context.get("database_list") or context.get("dumped_credentials")))
+            if "upload" in chain_name and "rce" in chain_name:
+                return bool(context.get("uploaded_shell_url") and context.get("rce_verified"))
+            return bool(result.get("final_payload"))
+
+        return [r for r in exploit_results if is_meaningful(r)]
 
     def _iteration_snapshot(self) -> Dict[str, int]:
         exploit_results = self.state.get("exploit_results", []) or []
         return {
             "confirmed_vulns": len(self.state.get("confirmed_vulnerabilities", []) or []),
             "all_vulns": len(self.state.get("vulnerabilities", []) or []),
-            "successful_exploits": len([r for r in exploit_results if r.get("success")]),
+            "successful_exploits": len(self._meaningful_successful_exploits(exploit_results)),
             "exploit_results": len(exploit_results),
             "prioritized_endpoints": len(self.state.get("prioritized_endpoints", []) or []),
             "security_findings": len(self.state.get("security_findings", []) or []),
@@ -7449,7 +8237,7 @@ Exploitability estimation:
             vtype = v.get('type', 'unknown')
             vuln_types[vtype] = vuln_types.get(vtype, 0) + 1
         
-        successful_exploits = [e for e in exploit_results if e.get('success')]
+        successful_exploits = self._meaningful_successful_exploits(exploit_results)
         C = Colors
         T = Theme
         

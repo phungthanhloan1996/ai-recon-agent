@@ -37,14 +37,14 @@ class HTTPClient:
         self.session = requests.Session()
         self.base_timeout = timeout or config.HTTP_TIMEOUT
 
-        # AGGRESSIVE timeout profiles - ULTRA fast fail-fast
-        # FIXED: Ensure all timeout values are proper int/float types
+        # ADAPTIVE timeout profiles - balanced for reliability and speed
+        # Increased timeouts to handle slow/unstable networks
         self.timeouts = {
-            "fast": float(max(2, int(self.base_timeout) - 3)),   # 5s (ultra-aggressive)
-            "normal": float(max(3, int(int(self.base_timeout) * 0.8))),  # 8s (aggressive)
-            "slow": float(max(5, int(int(self.base_timeout) * 1.5))),  # 15s (was 30s)
-            "exploit": float(max(8, int(int(self.base_timeout) * 2))),  # 20s (was 50s)
-            "connect": float(3)  # Connection timeout (ultra-aggressive)
+            "fast": float(max(5, int(self.base_timeout) - 2)),   # 8s (was 5s)
+            "normal": float(max(8, int(self.base_timeout * 0.9))),  # 12s (was 8s)
+            "slow": float(max(15, int(self.base_timeout * 1.5))),  # 20s (was 15s)
+            "exploit": float(max(15, int(self.base_timeout * 2))),  # 30s (was 20s)
+            "connect": float(5)  # Connection timeout (was 3s)
         }
         self.max_retries = max_retries  # AGGRESSIVE: only 1 retry
         self.session_manager = session_manager
@@ -61,10 +61,10 @@ class HTTPClient:
 
         # ENHANCED: Connection pool of 50, with exponential backoff
         retry_strategy = Retry(
-            total=max_retries,
-            connect=0,
-            read=0,
-            redirect=0,
+            total=max_retries + 1,  # Allow one extra retry for connection issues
+            connect=1,  # Retry connection failures once
+            read=1,  # Retry read timeouts once
+            redirect=2,
             other=0,
             status_forcelist=[429, 500, 502, 503, 504],
             allowed_methods=["HEAD", "GET", "OPTIONS", "POST", "PUT", "DELETE"],
@@ -155,6 +155,11 @@ class HTTPClient:
             if 'Connection refused' in str(e):
                 self.unreachable_ports.add(host_port)
                 logger.debug(f"[HTTP] Cached unreachable: {host_port}")
+            
+            # Cache "No route to host" errors
+            if 'No route to host' in str(e) or 'No route' in str(e):
+                self.unreachable_ports.add(host_port)
+                logger.debug(f"[HTTP] Cached no route: {host_port}")
             
             # FALLBACK HTTPS -> HTTP for SSL errors
             if 'SSL' in str(e) and url.startswith('https://'):

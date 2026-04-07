@@ -7,7 +7,7 @@ import os
 DEFAULT_TIMEOUT = 60  # Default timeout for lightweight operations (reduced from 90)
 HEAVY_TOOL_TIMEOUT = 90  # Timeout for heavy tools (reduced from 120)
 GROQ_TIMEOUT = 10  # Groq API timeout (reduced from 15)
-HTTP_TIMEOUT = 5  # HTTP request timeout (reduced from 10 for faster fail-fast)
+HTTP_TIMEOUT = 20  # HTTP request timeout (reduced from 10 for faster fail-fast)
 AMASS_TIMEOUT = int(os.getenv('AMASS_TIMEOUT', 45))  # Amass timeout (reduced from 60)
 CT_API_TIMEOUT = int(os.getenv('CT_API_TIMEOUT', 8))  # Certificate Transparency lookups (reduced from 10)
 
@@ -134,3 +134,51 @@ TOR_ENABLED = os.getenv('TOR_ENABLED', 'false').lower() == 'true'
 TOR_PROXY_PORT = int(os.getenv('TOR_PROXY_PORT', 9050))
 TOR_CONTROL_PORT = int(os.getenv('TOR_CONTROL_PORT', 9051))
 TOR_PROXY_URL = os.getenv('TOR_PROXY_URL', f'socks5://127.0.0.1:{TOR_PROXY_PORT}')
+
+# ═══════════════════════════════════════════════════════════════════
+# NEW: Async Scanner Configuration
+# ═══════════════════════════════════════════════════════════════════
+ASYNC_MAX_CONCURRENT = int(os.getenv('ASYNC_MAX_CONCURRENT', 50))
+ASYNC_RATE_LIMIT = float(os.getenv('ASYNC_RATE_LIMIT', 100.0))
+ASYNC_CACHE_TTL = int(os.getenv('ASYNC_CACHE_TTL', 3600))
+
+# ═══════════════════════════════════════════════════════════════════
+# NEW: Distributed Engine Configuration
+# ═══════════════════════════════════════════════════════════════════
+DISTRIBUTED_ENABLED = os.getenv('DISTRIBUTED_ENABLED', 'false').lower() == 'true'
+REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
+REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+
+# ═══════════════════════════════════════════════════════════════════
+# NEW: Metasploit Configuration
+# ═══════════════════════════════════════════════════════════════════
+METASPLOIT_ENABLED = os.getenv('METASPLOIT_ENABLED', 'false').lower() == 'true'
+METASPLOIT_HOST = os.getenv('METASPLOIT_HOST', '127.0.0.1')
+METASPLOIT_PORT = int(os.getenv('METASPLOIT_PORT', 55553))
+METASPLOIT_PASSWORD = os.getenv('METASPLOIT_PASSWORD', '')
+
+# ═══════════════════════════════════════════════════════════════════
+# NEW: Burp Suite Configuration
+# ═══════════════════════════════════════════════════════════════════
+BURP_ENABLED = os.getenv('BURP_ENABLED', 'false').lower() == 'true'
+BURP_HOST = os.getenv('BURP_HOST', '127.0.0.1')
+BURP_PORT = int(os.getenv('BURP_PORT', 1337))
+BURP_API_KEY = os.getenv('BURP_API_KEY', '')
+
+# ═══════════════════════════════════════════════════════════════════
+# NEW: ML Classifier Configuration
+# ═══════════════════════════════════════════════════════════════════
+ML_CLASSIFIER_ENABLED = os.getenv('ML_CLASSIFIER_ENABLED', 'true').lower() == 'true'
+ML_MIN_CONFIDENCE = float(os.getenv('ML_MIN_CONFIDENCE', '0.5'))
+
+# ═══════════════════════════════════════════════════════════════════
+# NEW: Exploit Chain Optimizer
+# ═══════════════════════════════════════════════════════════════════
+CHAIN_OPTIMIZER_ENABLED = os.getenv('CHAIN_OPTIMIZER_ENABLED', 'true').lower() == 'true'
+CHAIN_OPTIMIZATION_STRATEGY = os.getenv('CHAIN_OPTIMIZATION_STRATEGY', 'balanced')
+
+# ═══════════════════════════════════════════════════════════════════
+# NEW: LLM Analyzer
+# ═══════════════════════════════════════════════════════════════════
+LLM_ANALYZER_ENABLED = os.getenv('LLM_ANALYZER_ENABLED', 'true').lower() == 'true'
+LLM_FALLBACK_RULE_BASED = os.getenv('LLM_FALLBACK_RULE_BASED', 'true').lower() == 'true'

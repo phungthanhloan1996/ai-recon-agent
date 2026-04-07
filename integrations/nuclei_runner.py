@@ -129,7 +129,14 @@ class NucleiRunner:
         if len(self._timeout_history[url]) > 5:
             self._timeout_history[url] = self._timeout_history[url][-5:]
 
-    def run(self, url: str, timeout: int = None) -> Dict[str, Any]:
+    def run(
+        self,
+        url: str,
+        timeout: int = None,
+        tags: Optional[List[str]] = None,
+        severity: Optional[List[str]] = None,
+        additional_args: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """
         Run nuclei on URL with:
         - Adaptive timeout based on URL history
@@ -154,13 +161,20 @@ class NucleiRunner:
         
         try:
             self._active_scans += 1
-            return self._run_scan(url, timeout)
+            return self._run_scan(url, timeout, tags=tags, severity=severity, additional_args=additional_args)
         finally:
             self._active_scans -= 1
             if acquired_slot and self._scan_lock:
                 self._scan_lock.release()
 
-    def _run_scan(self, url: str, timeout: int) -> Dict[str, Any]:
+    def _run_scan(
+        self,
+        url: str,
+        timeout: int,
+        tags: Optional[List[str]] = None,
+        severity: Optional[List[str]] = None,
+        additional_args: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """Internal scan execution with retry logic"""
         start_time = time.time()
         output_path = self._get_output_path(url)
@@ -189,10 +203,21 @@ class NucleiRunner:
                     "-exclude-severity", "info,unknown",  # Skip low-value findings
                     "-stats",  # Show progress stats
                 ]
+
+                normalized_tags = [t.strip() for t in (tags or []) if isinstance(t, str) and t.strip()]
+                if normalized_tags:
+                    cmd.extend(["-tags", ",".join(sorted(set(normalized_tags)))])
+
+                normalized_severity = [s.strip().lower() for s in (severity or []) if isinstance(s, str) and s.strip()]
+                if normalized_severity:
+                    cmd.extend(["-severity", ",".join(sorted(set(normalized_severity)))])
                 
                 # Add bulk size limit to prevent overwhelming slow hosts
                 if attempt > 0:
                     cmd.extend(["-bs", "10"])  # Reduce bulk size on retry
+
+                if additional_args:
+                    cmd.extend(additional_args)
                 
                 result = subprocess.run(
                     cmd,
@@ -210,6 +235,7 @@ class NucleiRunner:
                     "artifact_path": output_path,
                     "findings": findings,
                     "output": artifact_text or result.stdout,
+                    "tags": normalized_tags if 'normalized_tags' in locals() else [],
                 }
                 
                 if result.returncode == 0 or findings:

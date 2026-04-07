@@ -192,8 +192,28 @@ class ReportGenerator:
             "exploit_chains_planned": len(chains),
             "critical_vulns": len([v for v in vulns if v.get("severity") == "CRITICAL"]),
             "high_vulns": len([v for v in vulns if v.get("severity") == "HIGH"]),
-            "successful_exploits": len([r for r in self.state.get("exploit_results", []) if r.get("success")])
+            "successful_exploits": len(self._meaningful_successful_exploits())
         }
+
+    def _meaningful_successful_exploits(self) -> List[Dict[str, Any]]:
+        exploit_results = self.state.get("exploit_results", []) or []
+
+        def is_meaningful(result):
+            if not result.get("success"):
+                return False
+            context = result.get("context", {}) or {}
+            chain_name = (result.get("chain") or "").lower()
+            if "xml-rpc multicall bruteforce" in chain_name:
+                return bool(context.get("valid_credentials"))
+            if "wordpress admin takeover" in chain_name:
+                return bool(context.get("authenticated_session") and context.get("admin_access"))
+            if "sql injection" in chain_name:
+                return bool(context.get("sqli_confirmed") and (context.get("database_list") or context.get("dumped_credentials")))
+            if "upload" in chain_name and "rce" in chain_name:
+                return bool(context.get("uploaded_shell_url") and context.get("rce_verified"))
+            return bool(result.get("final_payload"))
+
+        return [r for r in exploit_results if is_meaningful(r)]
 
     def _build_executive_summary(self) -> List[str]:
         """Build executive summary section"""

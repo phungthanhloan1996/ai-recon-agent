@@ -4,9 +4,11 @@ Lên kế hoạch exploit chain dựa trên findings
 Ví dụ: user enum → password brute → login → upload plugin → reverse shell
 """
 
+import hashlib
 import json
 import logging
 import re
+import time
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
@@ -530,19 +532,15 @@ Return ONLY valid JSON."""
                             if not isinstance(step_data, dict):
                                 continue
                             
-                            step_name = step_data.get('name', 'Unknown Step')
-                            step_target = step_data.get('target', base_url)
-                            
-                            # Ensure target has proper URL
-                            if step_target and not step_target.startswith(('http://', 'https://')):
-                                step_target = self._build_full_url(step_target)
-                            
-                            if not step_target:
-                                step_target = base_url
+                            step_name = step_data.get('name') or step_data.get('action') or 'Unknown Step'
+                            step_action = step_data.get('action', step_name)
+                            step_target = self._resolve_step_target(step_data.get('target', base_url), step_name, step_action)
+                            if not step_name.strip():
+                                continue
                             
                             step = ExploitStep(
                                 name=step_name,
-                                action=step_data.get('action', step_name),
+                                action=step_action,
                                 target=step_target,
                                 tool=step_data.get('tool', 'curl'),
                                 payload=step_data.get('payload', ''),
@@ -664,6 +662,39 @@ Return ONLY valid JSON."""
         if path.startswith(('#', '?')):
             return base + path
         return f"{base}/{path}"
+
+    def _resolve_step_target(self, target: Optional[str], step_name: str = "", action: str = "") -> str:
+        """Resolve placeholders and prevent empty/invalid step targets."""
+        raw = (target or "").strip()
+        if not raw:
+            return self._get_base_url()
+
+        placeholder = raw.lower()
+        endpoints = self.state.get("prioritized_endpoints", []) or self.state.get("endpoints", []) or []
+        wp_users = self.state.get("wp_users", []) or []
+
+        def first_matching(predicate):
+            for ep in endpoints:
+                if isinstance(ep, dict) and predicate(ep):
+                    return ep.get("url", "")
+            return ""
+
+        if placeholder in {"vulnerable_endpoint", "entry_point"}:
+            return self._get_base_url()
+        if placeholder == "upload_endpoint":
+            match = first_matching(lambda ep: "upload" in (ep.get("url", "") + ep.get("path", "")).lower() or "file" in (ep.get("url", "") + ep.get("path", "")).lower())
+            return match or self._get_base_url()
+        if placeholder in {"login page", "login_endpoint"}:
+            return self._build_full_url("wp-login.php")
+        if placeholder in {"admin_panel", "admin panel"}:
+            return self._build_full_url("wp-admin/")
+        if placeholder == "attacker server":
+            return "http://127.0.0.1:8000"
+        if placeholder == "uploads/shell.php":
+            return self._build_full_url("wp-content/uploads/shell.php")
+        if raw.startswith(("http://", "https://")):
+            return raw.rstrip("/")
+        return self._build_full_url(raw)
 
     def normalize_endpoint(self, ep: Dict) -> Optional[str]:
         """
@@ -1501,7 +1532,7 @@ Return ONLY valid JSON."""
             step = ExploitStep(
                 name=f"Exploit {node.get('name', f'Vuln {i+1}')}",
                 action=f"exploit_{node.get('vuln_type', 'unknown')}",
-                target=node.get('endpoint', ''),
+                target=self._resolve_step_target(node.get('endpoint', ''), node.get('name', ''), node.get('vuln_type', '')),
                 tool=self._get_tool_for_vuln_type(node.get('vuln_type', '')),
                 success_indicator=f"{node.get('vuln_type', 'unknown')} exploited",
                 priority=10 - i  # Decreasing priority
@@ -2212,19 +2243,14 @@ Format each chain as JSON with:
                     for step_data in chain_data.get('steps', []):
                         if isinstance(step_data, dict):
                             step_name = step_data.get('name', step_data.get('action', 'Unknown Step'))
-                            step_target = step_data.get('target', entry_point)
-                            
-                            # Ensure target has proper URL
-                            if step_target and not step_target.startswith(('http://', 'https://')):
-                                step_target = self._build_full_url(step_target)
-                            
-                            # Skip if target is empty
-                            if not step_target:
-                                step_target = base_url
+                            step_action = step_data.get('action', step_name)
+                            step_target = self._resolve_step_target(step_data.get('target', entry_point), step_name, step_action)
+                            if not step_name.strip():
+                                continue
                             
                             steps.append(ExploitStep(
                                 name=step_name,
-                                action=step_data.get('action', step_name),
+                                action=step_action,
                                 target=step_target,
                                 tool=step_data.get('tool', 'curl'),
                                 payload=step_data.get('payload', ''),
@@ -2645,10 +2671,14 @@ Format each chain as JSON with:
     def _build_wp_admin_chain(self, users: List[str]) -> ExploitChain:
         """WordPress: enumerate → brute → wp-admin → plugin upload → RCE"""
         primary_user = users[0] if users else "admin"
+        has_plugins = bool(self.state.get("wp_plugins", []))
+        description = "Bruteforce WP credentials, log in as admin, upload malicious plugin for RCE"
+        if not has_plugins:
+            description += " (requires manual credential recovery or a confirmed plugin-management foothold)"
 
         return ExploitChain(
             name="WordPress Admin Takeover → RCE",
-            description="Bruteforce WP credentials, log in as admin, upload malicious plugin for RCE",
+            description=description,
             risk_level="CRITICAL",
             estimated_time="15-60 min",
             prerequisites=["WordPress detected", "Login page accessible"],

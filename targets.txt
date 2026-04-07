@@ -1,1 +1,2 @@
-http://vulnwp.local:8000/
+https://dft.vn/
+https://dolphin-vc.com/

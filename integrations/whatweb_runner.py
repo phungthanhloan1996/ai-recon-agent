@@ -40,7 +40,7 @@ class WhatwebRunner:
             logger.warning(f"Failed to load CVE patterns: {e}")
         return cve_patterns
 
-    def run(self, url: str, timeout: int = 30, max_retries: int = 1) -> Dict[str, Any]:
+    def run(self, url: str, timeout: int = 60, max_retries: int = 2) -> Dict[str, Any]:
         """Run whatweb on URL with retry logic and comprehensive parsing"""
         result = {
             "url": url,
@@ -74,7 +74,7 @@ class WhatwebRunner:
         return result
 
     def _execute_whatweb(self, url: str, timeout: int) -> str:
-        """Execute whatweb command and capture output"""
+        """Execute whatweb command and capture output - improved reliability"""
         try:
             cmd = [
                 "whatweb",
@@ -82,6 +82,7 @@ class WhatwebRunner:
                 "--follow-redirect=same-host",
                 "--max-redirect=5",
                 "--log-json=/tmp/whatweb.json",
+                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 url
             ]
             
@@ -103,7 +104,20 @@ class WhatwebRunner:
             except Exception:
                 pass
             
-            return result.stdout if result.returncode == 0 else result.stderr
+            # Return stdout if successful, otherwise try stderr
+            output = result.stdout if result.returncode == 0 else result.stderr
+            
+            # If no output, try to read the JSON file anyway
+            if not output:
+                try:
+                    json_file = Path("/tmp/whatweb.json")
+                    if json_file.exists():
+                        with open(json_file, "r") as f:
+                            output = f.read()
+                except Exception:
+                    pass
+            
+            return output
         except subprocess.TimeoutExpired:
             raise
         except Exception as e:

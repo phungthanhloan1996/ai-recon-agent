@@ -2,7 +2,7 @@
 modules/recon.py - Recon Engine
 External integrations for comprehensive surface discovery
 """
-
+import re
 import json
 import os
 import logging

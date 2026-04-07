@@ -97,10 +97,11 @@ class DirBustingRunner:
             logger.error(f"Failed to create wordlist: {e}")
             return ""
 
-    def run(self, url: str, timeout: int = 180, max_retries: int = 2) -> Dict[str, Any]:
+    def run(self, url: str, timeout: int = 300, max_retries: int = 3) -> Dict[str, Any]:
         """Run directory brute-forcing on URL.
         
-        FIXED: Increased timeout from 60s to 180s to handle slow hosts.
+        FIXED: Increased timeout from 180s to 300s to handle slow hosts.
+        FIXED: Increased max_retries from 2 to 3 for better resilience.
         FIXED: Added retry logic with exponential backoff for timeouts.
         FIXED: Adaptive timeout based on host history.
         FIX #3: Implement adaptive timeout REDUCTION on retry (not increase).
@@ -153,12 +154,14 @@ class DirBustingRunner:
         
         for attempt in range(max_retries):
             try:
-                # FIX #3: On retry after timeout, REDUCE timeout by 25% (fail faster)
+                # FIX #3: On retry after timeout, use adaptive timeout
                 if attempt > 0 and timeout_count > 0:
-                    # Reduce timeout: 75% of previous
-                    current_timeout = int(current_timeout * 0.75)
-                    current_timeout = max(30, current_timeout)  # Minimum 30s
-                    logger.info(f"[DIRBUST] Retry attempt {attempt+1} for {url} with REDUCED timeout {current_timeout}s (was {timeout}s)")
+                    # First retry: reduce by 25%
+                    # Second retry: reduce by 50% (but not below 60s)
+                    reduction = 0.25 if attempt == 1 else 0.50
+                    current_timeout = int(current_timeout * (1 - reduction))
+                    current_timeout = max(60, current_timeout)  # Minimum 60s for dirbusting
+                    logger.info(f"[DIRBUST] Retry attempt {attempt+1} for {url} with timeout {current_timeout}s (was {timeout}s)")
                 
                 output = self._execute_scan(url, current_timeout)
                 if output:

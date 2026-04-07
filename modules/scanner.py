@@ -53,6 +53,236 @@ class ScanningEngine:
         self.scan_results_file = os.path.join(output_dir, "scan_results.json")
         self.manifest_file = os.path.join(output_dir, "scanner_manifest.json")
 
+    def _canonicalize_scan_url(self, url: str) -> str:
+        if not url:
+            return url
+        try:
+            parsed = urllib.parse.urlparse(url)
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            live_hosts = self.state.get("live_hosts", []) or []
+            for item in live_hosts:
+                live_url = item.get("url", "")
+                live_parsed = urllib.parse.urlparse(live_url)
+                live_port = live_parsed.port or (443 if live_parsed.scheme == "https" else 80)
+                if (parsed.hostname or "").lower() == (live_parsed.hostname or "").lower() and port == live_port:
+                    return urllib.parse.urlunparse(parsed._replace(scheme=live_parsed.scheme, netloc=live_parsed.netloc))
+        except Exception:
+            pass
+        return url
+
+    def _tool_confidence(self, value: Any, default: float = 0.0) -> float:
+        try:
+            if isinstance(value, str):
+                cleaned = value.strip()
+                if cleaned.endswith("%"):
+                    return float(cleaned[:-1]) / 100.0
+                return float(cleaned)
+            if isinstance(value, (int, float)):
+                return float(value)
+        except (TypeError, ValueError):
+            pass
+        return default
+
+    def _severity_confidence(self, severity: str) -> float:
+        mapping = {
+            "CRITICAL": 0.95,
+            "HIGH": 0.85,
+            "MEDIUM": 0.7,
+            "LOW": 0.55,
+            "INFO": 0.35,
+        }
+        return mapping.get(str(severity or "INFO").upper(), 0.5)
+
+    def _append_unique_vulnerability(self, vuln: Dict[str, Any], confirmed: bool = False):
+        vulnerabilities = self.state.get("vulnerabilities", []) or []
+        key = (
+            vuln.get("url") or vuln.get("endpoint"),
+            vuln.get("type"),
+            vuln.get("tool") or vuln.get("source"),
+            vuln.get("payload"),
+            vuln.get("artifact_path"),
+        )
+        existing_keys = {
+            (
+                item.get("url") or item.get("endpoint"),
+                item.get("type"),
+                item.get("tool") or item.get("source"),
+                item.get("payload"),
+                item.get("artifact_path"),
+            )
+            for item in vulnerabilities
+            if isinstance(item, dict)
+        }
+        if key not in existing_keys:
+            vulnerabilities.append(vuln)
+            self.state.update(vulnerabilities=vulnerabilities)
+
+        if confirmed:
+            confirmed_vulns = self.state.get("confirmed_vulnerabilities", []) or []
+            confirmed_keys = {
+                (
+                    item.get("url") or item.get("endpoint"),
+                    item.get("type"),
+                    item.get("tool") or item.get("source"),
+                    item.get("payload"),
+                    item.get("artifact_path"),
+                )
+                for item in confirmed_vulns
+                if isinstance(item, dict)
+            }
+            if key not in confirmed_keys:
+                confirmed_vulns.append(vuln)
+                self.state.update(confirmed_vulnerabilities=confirmed_vulns)
+
+    def _extract_nuclei_tags(self, url: str, categories: List[str], parameters: List[str]) -> List[str]:
+        tags = set()
+        category_map = {
+            "wordpress": ["wordpress"],
+            "authentication": ["auth", "panel"],
+            "admin": ["auth", "panel"],
+            "api_injection": ["api"],
+            "api": ["api"],
+            "file_upload": ["upload", "files"],
+            "rpc": ["xmlrpc", "wordpress"],
+            "injection": ["sqli"],
+            "sql_injection": ["sqli"],
+            "sqli": ["sqli"],
+            "xss": ["xss"],
+            "command_injection": ["rce"],
+            "rce": ["rce"],
+        }
+        for category in categories or []:
+            for tag in category_map.get(str(category).lower(), []):
+                tags.add(tag)
+
+        url_lower = (url or "").lower()
+        if "wp-admin" in url_lower or "wp-json" in url_lower:
+            tags.update(["wordpress", "auth"])
+        if "xmlrpc" in url_lower:
+            tags.update(["wordpress", "xmlrpc"])
+        if parameters:
+            tags.add("fuzz")
+        return sorted(tags)
+
+    def _build_tool_plan(self, endpoint: Dict[str, Any], url: str, categories: List[str], parameters: List[str], endpoint_score: int) -> Dict[str, Any]:
+        category_set = {str(c).lower() for c in (categories or [])}
+        url_lower = (url or "").lower()
+        hints = " ".join(str(h) for h in (endpoint.get("vulnerability_hints", []) or [])).lower()
+
+        sqli_interest = (
+            bool(parameters)
+            and (
+                self._detect_sqli_potential(endpoint)
+                or {"injection", "sql_injection", "sqli", "api_injection"} & category_set
+                or any(token in url_lower for token in ["id=", "cat=", "page=", "item=", "query=", "search="])
+                or "sql" in hints
+            )
+        )
+        xss_interest = (
+            bool(parameters)
+            and (
+                self._detect_xss_potential(endpoint)
+                or {"xss", "api_injection", "authentication"} & category_set
+                or any(token in url_lower for token in ["search", "query", "q=", "input=", "callback="])
+                or "xss" in hints
+            )
+        )
+        nuclei_interest = (
+            endpoint_score >= max(config.NUCLEI_MIN_ENDPOINT_SCORE - 2, 5)
+            and (
+                bool(parameters)
+                or bool({"wordpress", "authentication", "api_injection", "file_upload", "rpc", "admin"} & category_set)
+                or any(token in url_lower for token in ["wp-admin", "xmlrpc", "api", "login", "admin", "upload", "graphql"])
+            )
+        )
+
+        return {
+            "sqlmap": sqli_interest,
+            "dalfox": xss_interest,
+            "nuclei": nuclei_interest,
+            "nuclei_tags": self._extract_nuclei_tags(url, categories, parameters),
+            "nuclei_severity": ["critical", "high", "medium"],
+            "sqlmap_timeout": 120 if endpoint_score < 8 else 180,
+            "dalfox_timeout": 20 if endpoint_score < 8 else 35,
+            "nuclei_timeout": 90 if endpoint_score < 8 else 180,
+        }
+
+    def _promote_sqlmap_result(self, target: str, result: Dict[str, Any]):
+        if not result.get("vulnerable"):
+            return
+        vuln = {
+            "name": "SQL Injection",
+            "type": "sqli",
+            "url": target,
+            "endpoint": target,
+            "tool": "sqlmap",
+            "source": "sqlmap",
+            "severity": "CRITICAL",
+            "confidence": 0.95,
+            "output": result.get("output", "")[:2000],
+            "findings": result.get("findings", []),
+            "dbms": result.get("dbms"),
+            "evidence": "; ".join(f.get("evidence", "") for f in result.get("findings", [])[:3] if isinstance(f, dict)) or result.get("dbms", ""),
+            "artifact_path": result.get("artifact_path"),
+            "raw_output_path": result.get("raw_output_path"),
+            "exploitable": True,
+            "exploit_context": {"tool": "sqlmap", "dbms": result.get("dbms")},
+        }
+        self._append_unique_vulnerability(vuln, confirmed=True)
+
+    def _promote_dalfox_result(self, url: str, result: Dict[str, Any]):
+        findings = result.get("findings", []) or []
+        if not result.get("success") and not findings:
+            return
+        evidence = ""
+        if findings:
+            first = findings[0] if isinstance(findings[0], dict) else {}
+            evidence = first.get("evidence", "") or first.get("message", "")
+        confidence = 0.8 if findings else 0.65
+        vuln = {
+            "name": "Cross-Site Scripting",
+            "type": "xss",
+            "url": url,
+            "endpoint": url,
+            "tool": "dalfox",
+            "source": "dalfox",
+            "severity": "HIGH",
+            "confidence": confidence,
+            "output": result.get("output", "")[:2000],
+            "findings": findings,
+            "evidence": evidence,
+            "artifact_path": result.get("artifact_path"),
+            "exploitable": confidence >= 0.7,
+            "exploit_context": {"tool": "dalfox"},
+        }
+        self._append_unique_vulnerability(vuln, confirmed=confidence >= 0.7)
+
+    def _promote_nuclei_result(self, url: str, result: Dict[str, Any]):
+        findings = result.get("findings", []) or []
+        if not findings:
+            return
+        for finding in findings:
+            info = finding.get("info", {}) if isinstance(finding, dict) else {}
+            severity = str(info.get("severity", result.get("severity", "INFO"))).upper()
+            confidence = self._severity_confidence(severity)
+            vuln = {
+                "name": info.get("name", finding.get("template-id", "Nuclei Finding")),
+                "type": finding.get("template-id", "general"),
+                "url": finding.get("matched-at", url) or url,
+                "endpoint": finding.get("matched-at", url) or url,
+                "tool": "nuclei",
+                "source": "nuclei",
+                "severity": severity,
+                "confidence": confidence,
+                "evidence": finding.get("matcher-name", "") or info.get("description", ""),
+                "artifact_path": result.get("artifact_path"),
+                "findings": [finding],
+                "tags": info.get("tags", []) or result.get("tags", []),
+                "exploitable": severity in {"CRITICAL", "HIGH", "MEDIUM"},
+                "exploit_context": {"tool": "nuclei", "template_id": finding.get("template-id")},
+            }
+            self._append_unique_vulnerability(vuln, confirmed=confidence >= 0.7)
+
     def _is_valid_url(self, url: str) -> bool:
         """Kiểm tra URL hợp lệ trước khi gửi request"""
         if not url or not isinstance(url, str):
@@ -61,7 +291,11 @@ class ScanningEngine:
             return False
         try:
             parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https"):
+                return False
             hostname = parsed.netloc or parsed.hostname or ''
+            if not hostname:
+                return False
             invalid_chars = ['<', '>', '"', "'", '&lt;', '&gt;']
             if any(c in hostname for c in invalid_chars):
                 return False
@@ -220,7 +454,7 @@ class ScanningEngine:
             logger.warning(f"[SCANNING] Invalid endpoint type: {type(endpoint)}, skipping")
             return []
         
-        url = endpoint.get("url", "")
+        url = self._canonicalize_scan_url(endpoint.get("url", ""))
         
         # FIX: Track scanned endpoints for resume functionality
         # Check if this endpoint was already scanned in a previous session
@@ -295,6 +529,9 @@ class ScanningEngine:
         if host in getattr(self.http_client, "_dead_hosts", set()):
             logger.debug(f"[SCANNING] Skipping dead host before scan: {host}")
             return []
+        if not self._is_valid_url(url):
+            logger.debug(f"[SCANNING] Skipping invalid endpoint before payload generation: {url}")
+            return []
         
         # Store first parameter for exploitation context
         first_param = parameters[0] if parameters else None
@@ -306,6 +543,14 @@ class ScanningEngine:
         baseline_response = self.get_baseline_response(url)
         if not baseline_response:
             logger.debug(f"[SCANNING] Failed to get baseline for {url}")
+            baseline_response = {
+                "status_code": 0,
+                "content_length": 0,
+                "response_time": 0,
+                "content": "",
+                "headers": {},
+                "tech": []
+            }
             # FIX: Save scanned endpoint to state for resume functionality
         scanned_endpoints = self.state.get("scanned_endpoints", [])
         if url not in scanned_endpoints:
@@ -314,24 +559,14 @@ class ScanningEngine:
 
         endpoint_score = self._estimate_endpoint_score(url, categories, parameters)
 
-        # Decision logic: auto-detect and call external tools
-        if parameters:
-            if self._detect_sqli_potential(endpoint):
-                self._run_sqlmap(url, parameters)
-            if self._detect_xss_potential(endpoint):
-                dalfox_result = self.dalfox_runner.run(url)
-                if dalfox_result.get("success"):
-                    vuln = {
-                        "type": "xss",
-                        "url": url,
-                        "tool": "dalfox",
-                        "output": dalfox_result.get("output", ""),
-                        "findings": dalfox_result.get("findings", []),
-                        "artifact_path": dalfox_result.get("artifact_path"),
-                    }
-                    current_vulns = self.state.get("vulnerabilities", [])
-                    current_vulns.append(vuln)
-                    self.state.update(vulnerabilities=current_vulns)
+        tool_plan = self._build_tool_plan(endpoint, url, categories, parameters, endpoint_score)
+
+        # Decision logic: build tool execution from endpoint metadata and prior recon context.
+        if tool_plan["sqlmap"]:
+            self._run_sqlmap(url, parameters, timeout=tool_plan["sqlmap_timeout"])
+        if tool_plan["dalfox"]:
+            dalfox_result = self.dalfox_runner.run(url, timeout=tool_plan["dalfox_timeout"])
+            self._promote_dalfox_result(url, dalfox_result)
                     
         # Resource Management: Initialize nuclei pool and concurrency manager on first use
         if not hasattr(self, '_nuclei_pool'):
@@ -346,29 +581,25 @@ class ScanningEngine:
         url_lower = url.lower()
         has_important_keyword = any(kw in url_lower for kw in important_keywords)
         
-        if (has_real_query_params or has_important_keyword) and endpoint_score >= config.NUCLEI_MIN_ENDPOINT_SCORE:
+        if tool_plan["nuclei"] and (has_real_query_params or has_important_keyword or tool_plan["nuclei_tags"]):
             # Resource Management: Use NucleiWorkerPool with concurrency control
             operation_id = f"nuclei_scan_{hash(url)}"
             if self._nuclei_concurrency.acquire(operation_id, timeout=300):
                 try:
                     # Submit scan to the worker pool for managed execution
-                    scan = self._nuclei_pool.submit_scan(url, lambda u, timeout: self.nuclei_runner.run(u))
+                    scan = self._nuclei_pool.submit_scan(
+                        url,
+                        lambda u, timeout: self.nuclei_runner.run(
+                            u,
+                            timeout=tool_plan["nuclei_timeout"],
+                            tags=tool_plan["nuclei_tags"],
+                            severity=tool_plan["nuclei_severity"],
+                        )
+                    )
                     # Wait for result with timeout
                     try:
                         nuclei_result = scan['future'].result(timeout=300)
-                        if nuclei_result.get("success"):
-                            vuln = {
-                                "type": "general",
-                                "url": url,
-                                "tool": "nuclei",
-                                "output": nuclei_result.get("output", ""),
-                                "findings": nuclei_result.get("findings", []),
-                                "severity": nuclei_result.get("severity", "INFO"),
-                                "artifact_path": nuclei_result.get("artifact_path"),
-                            }
-                            current_vulns = self.state.get("vulnerabilities", [])
-                            current_vulns.append(vuln)
-                            self.state.update(vulnerabilities=current_vulns)
+                        self._promote_nuclei_result(url, nuclei_result)
                     except concurrent.futures.TimeoutError:
                         logger.warning(f"[SCANNING] Nuclei scan timed out for {url}")
                 except Exception as e:
@@ -615,6 +846,32 @@ class ScanningEngine:
         auth_ctx: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """Test a single payload against an endpoint with baseline comparison and WAF bypass"""
+        safe_baseline = baseline or {
+            "status_code": 0,
+            "content_length": 0,
+            "response_time": 0,
+            "content": "",
+            "headers": {},
+        }
+
+        if not self._is_valid_url(url):
+            logger.debug(f"[SCANNING] Skipping invalid absolute URL: {url[:100]}")
+            return {
+                "endpoint": url,
+                "payload": payload.get("value", ""),
+                "method": payload.get("method", "GET"),
+                "status_code": 0,
+                "content_length": 0,
+                "response_time": 0,
+                "baseline_status": safe_baseline.get("status_code", 0),
+                "baseline_length": safe_baseline.get("content_length", 0),
+                "baseline_time": safe_baseline.get("response_time", 0),
+                "category": category,
+                "vulnerable": False,
+                "confidence": 0,
+                "reason": "Invalid absolute URL",
+                "timestamp": time.time()
+            }
         
         # FILTER: Skip non-scannable URLs (mailto:, tel:, javascript:, data:, etc.)
         # These URLs cannot be exploited and waste WAF bypass attempts
@@ -629,9 +886,9 @@ class ScanningEngine:
                 "status_code": 0,
                 "content_length": 0,
                 "response_time": 0,
-                "baseline_status": baseline.get("status_code", 0),
-                "baseline_length": baseline.get("content_length", 0),
-                "baseline_time": baseline.get("response_time", 0),
+                "baseline_status": safe_baseline.get("status_code", 0),
+                "baseline_length": safe_baseline.get("content_length", 0),
+                "baseline_time": safe_baseline.get("response_time", 0),
                 "category": category,
                 "vulnerable": False,
                 "confidence": 0,
@@ -651,9 +908,9 @@ class ScanningEngine:
                     "status_code": 0,
                     "content_length": 0,
                     "response_time": 0,
-                    "baseline_status": baseline.get("status_code", 0),
-                    "baseline_length": baseline.get("content_length", 0),
-                    "baseline_time": baseline.get("response_time", 0),
+                    "baseline_status": safe_baseline.get("status_code", 0),
+                    "baseline_length": safe_baseline.get("content_length", 0),
+                    "baseline_time": safe_baseline.get("response_time", 0),
                     "category": category,
                     "vulnerable": False,
                     "confidence": 0,
@@ -680,6 +937,7 @@ class ScanningEngine:
             
             for attempt in range(max_retries):
                 try:
+                    response = None
                     # Prepare request - TEST ALL PARAMETERS, NOT JUST FIRST
                     if method == "GET":
                         parsed = urllib.parse.urlparse(url)
@@ -699,11 +957,11 @@ class ScanningEngine:
                                         continue
                                     response = self.http_client.get(test_url, timeout=10, headers=req_headers, cookies=req_cookies)
                                     if not self._is_waf_blocked(response):
-                                        analysis = self.analyze_response(response, baseline, {"value": mutation}, category)
+                                        analysis = self.analyze_response(response, safe_baseline, {"value": mutation}, category)
                                         if analysis.get("vulnerable"):
                                             return {"endpoint": url, "payload": mutation, "vulnerable": True, "confidence": analysis.get("confidence", 0), "param": param_key}
-                                except:
-                                    pass
+                                except Exception as inner_error:
+                                    logger.debug(f"[SCANNING] Parameter payload request failed for {test_url[:100]}: {inner_error}")
                         else:
                             inject_key = next(iter(params.keys()), "q") if isinstance(params, dict) else "q"
                             safe_mutation = urllib.parse.quote(mutation, safe='')
@@ -725,6 +983,9 @@ class ScanningEngine:
                         # Default to GET
                         response = self.http_client.get(url, timeout=10, headers=req_headers, cookies=req_cookies)
 
+                    if response is None:
+                        raise ValueError("No valid request could be issued for payload test")
+
                     # Check for WAF blocking
                     if self._is_waf_blocked(response):
                         if not waf_bypass_attempted:
@@ -739,7 +1000,7 @@ class ScanningEngine:
                         logger.info(f"[WAF] Bypass successful with mutation for {url}")
 
                     # Analyze response with baseline comparison
-                    analysis = self.analyze_response(response, baseline, {"value": mutation}, category)
+                    analysis = self.analyze_response(response, safe_baseline, {"value": mutation}, category)
 
                     if analysis.get("vulnerable"):
                         confidence = analysis.get("confidence", 0)
@@ -780,9 +1041,9 @@ class ScanningEngine:
                         "status_code": response.status_code,
                         "content_length": len(response.text),
                         "response_time": response.elapsed.total_seconds() if hasattr(response, 'elapsed') else 0,
-                        "baseline_status": baseline["status_code"],
-                        "baseline_length": baseline["content_length"],
-                        "baseline_time": baseline["response_time"],
+                        "baseline_status": safe_baseline["status_code"],
+                        "baseline_length": safe_baseline["content_length"],
+                        "baseline_time": safe_baseline["response_time"],
                         "category": category,
                         "vulnerable": analysis.get("vulnerable", False),
                         "confidence": analysis.get("confidence", 0),
@@ -799,9 +1060,9 @@ class ScanningEngine:
                             "status_code": 0,
                             "content_length": 0,
                             "response_time": 0,
-                            "baseline_status": baseline.get("status_code", 0),
-                            "baseline_length": baseline.get("content_length", 0),
-                            "baseline_time": baseline.get("response_time", 0),
+                            "baseline_status": safe_baseline.get("status_code", 0),
+                            "baseline_length": safe_baseline.get("content_length", 0),
+                            "baseline_time": safe_baseline.get("response_time", 0),
                             "category": category,
                             "vulnerable": False,
                             "confidence": 0,
@@ -818,9 +1079,9 @@ class ScanningEngine:
                             "status_code": 0,
                             "content_length": 0,
                             "response_time": 0,
-                            "baseline_status": baseline["status_code"],
-                            "baseline_length": baseline["content_length"],
-                            "baseline_time": baseline["response_time"],
+                            "baseline_status": safe_baseline["status_code"],
+                            "baseline_length": safe_baseline["content_length"],
+                            "baseline_time": safe_baseline["response_time"],
                             "category": category,
                             "vulnerable": False,
                             "confidence": 0,
@@ -839,9 +1100,9 @@ class ScanningEngine:
                     "status_code": 403,
                     "content_length": 0,
                     "response_time": 0,
-                    "baseline_status": baseline.get("status_code", 0),
-                    "baseline_length": baseline.get("content_length", 0),
-                    "baseline_time": baseline.get("response_time", 0),
+                    "baseline_status": safe_baseline.get("status_code", 0),
+                    "baseline_length": safe_baseline.get("content_length", 0),
+                    "baseline_time": safe_baseline.get("response_time", 0),
                     "category": category,
                     "vulnerable": False,
                     "confidence": 0,
@@ -861,9 +1122,9 @@ class ScanningEngine:
             "status_code": 0,
             "content_length": 0,
             "response_time": 0,
-            "baseline_status": baseline["status_code"],
-            "baseline_length": baseline["content_length"],
-            "baseline_time": baseline["response_time"],
+            "baseline_status": safe_baseline["status_code"],
+            "baseline_length": safe_baseline["content_length"],
+            "baseline_time": safe_baseline["response_time"],
             "category": category,
             "vulnerable": False,
             "confidence": 0,
@@ -1089,7 +1350,7 @@ class ScanningEngine:
                 break
         return contexts
 
-    def _run_sqlmap(self, url: str, parameters: List[str]):
+    def _run_sqlmap(self, url: str, parameters: List[str], timeout: int = 180):
         """Best-effort sqlmap execution for high-signal parameterized endpoints using SQLMapRunner."""
         if not self.sqlmap_runner.is_sqlmap_available():
             return
@@ -1105,25 +1366,13 @@ class ScanningEngine:
             url=target,
             level=2,
             risk=1,
-            timeout=180,
+            timeout=timeout,
             batch=True,
             additional_args=["--smart"]
         )
-        
+
         if result.get("vulnerable"):
-            vuln = {
-                "type": "sqli",
-                "url": target,
-                "tool": "sqlmap",
-                "output": result.get("output", "")[:2000],
-                "findings": result.get("findings", []),
-                "dbms": result.get("dbms"),
-                "artifact_path": result.get("artifact_path"),
-                "raw_output_path": result.get("raw_output_path"),
-            }
-            current_vulns = self.state.get("vulnerabilities", [])
-            current_vulns.append(vuln)
-            self.state.update(vulnerabilities=current_vulns)
+            self._promote_sqlmap_result(target, result)
             logger.warning(f"[SCANNING] SQLMap found SQLi on {target}")
         elif result.get("error"):
             logger.debug(f"[SCANNING] sqlmap error for {target}: {result['error'][:120]}")

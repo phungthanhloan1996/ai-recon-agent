@@ -299,7 +299,7 @@ class ToolkitScanner:
         jobs: List[tuple[str, Callable]] = []
         
         # Whatweb - advanced technology detection with CVE matching (optimized timeout)
-        jobs.append(("whatweb", lambda: self._scan_whatweb(url, progress_cb, timeout=60)))
+        jobs.append(("whatweb", lambda: self._scan_whatweb(url, progress_cb, timeout=90)))
         
         # Wappalyzer - comprehensive tech fingerprinting
         jobs.append(("wappalyzer", lambda: self._scan_wappalyzer(url, progress_cb)))
@@ -589,9 +589,9 @@ class ToolkitScanner:
         self,
         url: str,
         progress_cb: Optional[Callable[[str, str, str], None]] = None,
-        timeout: int = 300
+        timeout: int = 600
     ) -> Optional[Dict[str, Any]]:
-        """Run nikto vulnerability scanner - FIXED with better error handling"""
+        """Run nikto vulnerability scanner - FIXED with better error handling and increased timeout"""
         self._notify_progress(progress_cb, "nikto", "running", "nikto: probing web server misconfigurations...")
         
         try:
@@ -599,10 +599,11 @@ class ToolkitScanner:
             safe_url = url.replace(':', '_').replace('/', '_').replace('.', '_')[:50]
             output_file = os.path.join(self.output_dir, f"nikto_{safe_url}.json")
             
-            # FIXED: Use -maxtime 3m and -timeout 30 for slow hosts
+            # FIXED: Use -maxtime 5m and -timeout 45 for slow hosts
             # FIXED: Added -no404 to reduce noise and speed up scanning
+            # FIXED: Added -Cgidirs all to scan all CGI directories
             ret, stdout, stderr = run_command(
-                ["nikto", "-host", url, "-maxtime", "3m", "-timeout", "30", "-Format", "json", "-o", output_file, "-no404"],
+                ["nikto", "-host", url, "-maxtime", "5m", "-timeout", "45", "-Format", "json", "-o", output_file, "-no404", "-Cgidirs", "all"],
                 timeout=timeout
             )
             
@@ -630,15 +631,29 @@ class ToolkitScanner:
                     "error": f"nikto failed (exit code: {ret})"
                 }
             else:
-                logger.warning(f"[NIKTO] Scan incomplete for {url} (return code: {ret})")
-                self._notify_progress(progress_cb, "nikto", "failed", f"nikto: exit code {ret}")
-                return {
-                    "tool": "nikto",
-                    "url": url,
-                    "severity": "LOW",
-                    "output": (stdout or "")[:1000] + (stderr or "")[:500],
-                    "success": False
-                }
+                # Check if we got partial results
+                has_output = bool(stdout) or os.path.exists(output_file)
+                if has_output:
+                    logger.warning(f"[NIKTO] Scan incomplete but got partial results for {url} (return code: {ret})")
+                    self._notify_progress(progress_cb, "nikto", "partial", f"nikto: partial results")
+                    return {
+                        "tool": "nikto",
+                        "url": url,
+                        "severity": "LOW",
+                        "output": (stdout or "")[:1000] + (stderr or "")[:500],
+                        "success": True,  # Partial success
+                        "partial": True
+                    }
+                else:
+                    logger.warning(f"[NIKTO] Scan incomplete for {url} (return code: {ret})")
+                    self._notify_progress(progress_cb, "nikto", "failed", f"nikto: exit code {ret}")
+                    return {
+                        "tool": "nikto",
+                        "url": url,
+                        "severity": "LOW",
+                        "output": (stdout or "")[:1000] + (stderr or "")[:500],
+                        "success": False
+                    }
         except subprocess.TimeoutExpired:
             logger.warning(f"[NIKTO] Timeout for {url}")
             self._notify_progress(progress_cb, "nikto", "timeout", "nikto: timed out")
