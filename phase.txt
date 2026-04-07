@@ -1,0 +1,84 @@
+## 📋 DANH SÁCH CHÍNH XÁC 47 PHASES
+
+### TỔNG: **47 PHASES**
+
+```
+ 1. recon                  - Subdomain enumeration
+ 2. live                   - Live hosts detection
+ 3. wp                     - WordPress scanning
+ 4. toolkit                - Kali toolkit scanning
+ 5. crawl                  - URL discovery & crawling
+ 6. wp_detect_state        - WordPress detection state
+ 7. js_hunter              - JavaScript endpoint hunting
+ 8. param_mine             - Parameter mining
+ 9. auth                   - Authentication scanning
+10. ml_classify            - ML-based classification
+11. classify               - Endpoint classification
+12. rank                   - Endpoint ranking
+13. scan                   - Vulnerability scanning
+14. analyze                - AI analysis
+15. cve_analysis           - CVE matching
+16. pivot                  - Privilege pivot
+17. graph                  - Attack graph
+18. chain                  - Chain planning
+19. select                 - Exploit selection
+20. exploit                - Main exploitation
+21. sqli_exploit           - SQL injection
+22. upload_bypass          - File upload RCE
+23. reverse_shell          - Reverse shell
+24. privesc                - Privilege escalation
+25. waf_bypass             - WAF bypass
+26. boolean_sqli           - Boolean SQLi detection
+27. xss                    - XSS detection
+28. idor                   - IDOR detection
+29. default_creds          - Default credentials
+30. cve_exploit            - CVE exploitation
+31. api_vuln               - API vulnerability
+32. subdomain_takeover     - Subdomain takeover
+33. mfa_bypass             - MFA bypass
+34. oauth_saml             - OAuth/SAML
+35. persistence            - Persistence
+36. lateral_movement       - Lateral movement
+37. ssl_pinning            - SSL pinning bypass
+38. zero_day               - Zero-day detection
+39. container_escape       - Container escape
+40. custom_exploit         - Custom exploits
+41. log_evasion            - Log evasion
+42. burp_scan              - Burp Suite integration
+43. msf_exploit            - Metasploit exploitation
+44. llm_analysis           - LLM analysis
+45. learn                  - Learning engine
+46. ddos                   - DDoS testing
+47. report                 - Report generation
+
+
+
+┌─────────────────────────────────────────────────────────────┐
+│                    RECONNAISSANCE (1-6)                     │
+│  init → recon → live → wp_detect → wp → toolkit            │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    DISCOVERY (7-10)                         │
+│  crawl → js_hunter → param_mine → auth                     │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    ANALYSIS (11-16)                         │
+│  classify → rank → scan → analyze → cve_analysis → pivot   │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    PLANNING (17-19)                         │
+│  graph → chain → select                                     │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                  EXPLOITATION (20-40)                       │
+│  exploit → sqli → upload → shell → privesc → ... → custom  │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│               POST-EXPLOITATION (41-47)                     │
+│  log_evasion → learn → ddos → report → validate → filter   │
+└─────────────────────────────────────────────────────────────┘

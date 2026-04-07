@@ -1,6 +1,9 @@
 """
 modules/parameter_miner.py - Parameter Miner
 Discover hidden or undocumented parameters for known endpoints.
+
+FIX: Added soft-404 detection to prevent false positives when server
+returns the same response for all parameters (soft-404 trap).
 """
 
 import logging
@@ -17,6 +20,10 @@ from core.state_manager import StateManager
 from core.scan_budget import ScanBudget
 
 logger = logging.getLogger("recon.param_miner")
+
+# Soft-404 detection thresholds
+SOFT_404_SIMILARITY_THRESHOLD = 0.85  # 85% similarity = likely soft-404
+SOFT_404_MIN_RESPONSES = 5  # Minimum responses to compare before declaring soft-404
 
 
 class ParameterMiner:
@@ -165,6 +172,76 @@ class ParameterMiner:
             return True
         return host.endswith((".local", ".localhost", ".internal", ".lan", ".home", ".test"))
 
+    def _check_soft_404(self, endpoint_url: str, method: str, baseline: Dict[str, Any]) -> bool:
+        """
+        Detect soft-404 trap by comparing multiple parameter responses.
+        
+        FIX: This prevents false positives when server returns the same
+        response for all parameters (soft-404 trap).
+        
+        Args:
+            endpoint_url: Target URL
+            method: HTTP method
+            baseline: Baseline response
+            
+        Returns:
+            True if this appears to be a soft-404 trap
+        """
+        try:
+            # Test with several random parameters
+            test_params = [
+                f"random_{self._get_random_id()}",
+                f"fake_{self._get_random_id()}",
+                f"nonexistent_{self._get_random_id()}",
+                f"dummy_{self._get_random_id()}",
+                f"test_{self._get_random_id()}",
+            ]
+            
+            responses = []
+            baseline_content = baseline.get('content', '')
+            
+            for param in test_params:
+                try:
+                    if method == 'GET':
+                        separator = '&' if '?' in endpoint_url else '?'
+                        test_url = f"{endpoint_url}{separator}{param}=randomvalue"
+                        response = self.http_client.get(test_url, timeout=self.request_timeout)
+                    else:
+                        response = self.http_client.post(
+                            endpoint_url,
+                            data={param: 'randomvalue'},
+                            timeout=self.request_timeout
+                        )
+                    
+                    response_content = response.text[:2000]
+                    # Calculate similarity with baseline
+                    similarity = difflib.SequenceMatcher(
+                        None, 
+                        baseline_content, 
+                        response_content
+                    ).ratio()
+                    responses.append(similarity)
+                    
+                except Exception:
+                    continue
+            
+            if len(responses) < SOFT_404_MIN_RESPONSES:
+                return False
+            
+            # If all responses are very similar to baseline, it's likely a soft-404
+            avg_similarity = sum(responses) / len(responses)
+            is_soft_404 = avg_similarity > SOFT_404_SIMILARITY_THRESHOLD
+            
+            if is_soft_404:
+                logger.debug(f"[PARAM_MINER] Soft-404 detected on {endpoint_url} "
+                           f"(avg similarity: {avg_similarity:.2f})")
+            
+            return is_soft_404
+            
+        except Exception as e:
+            logger.debug(f"[PARAM_MINER] Error checking soft-404: {e}")
+            return False
+
     def _mine_endpoint_params(self, endpoint: Dict[str, Any]) -> Dict[str, Any]:
         """
         Mine parameters for a single endpoint.
@@ -198,19 +275,34 @@ class ParameterMiner:
                     'suspicious_parameters': []
                 }
             
+            # FIX: Check for soft-404 trap before mining
+            is_soft_404 = self._check_soft_404(endpoint_url, method, baseline)
+            
             discovered = set()
             reflected = set()
             suspicious = set()
             
             # Test each parameter candidate
             candidates = self.PARAMETER_CANDIDATES[:self.local_max_candidates] if self._is_local_target() else self.PARAMETER_CANDIDATES[:self.max_candidates]
+            
             for param in candidates:
                 test_result = self._test_parameter(
                     endpoint_url, method, param, baseline
                 )
                 
+                # FIX: If soft-404 detected, require stronger evidence for interesting params
                 if test_result['is_interesting']:
-                    discovered.add(param)
+                    if is_soft_404:
+                        # In soft-404 mode, only consider interesting if:
+                        # 1. Parameter is reflected, OR
+                        # 2. Status code changed, OR
+                        # 3. Response length changed significantly (>200 chars)
+                        if (test_result['is_reflected'] or 
+                            test_result['status_code'] != baseline.get('status_code') or
+                            abs(test_result['content_length'] - baseline.get('content_length', 0)) > 200):
+                            discovered.add(param)
+                    else:
+                        discovered.add(param)
                 
                 if test_result['is_reflected']:
                     reflected.add(param)
@@ -224,7 +316,8 @@ class ParameterMiner:
                 'reflected_parameters': list(reflected),
                 'suspicious_parameters': list(suspicious),
                 'baseline_status': baseline.get('status_code'),
-                'baseline_length': baseline.get('content_length')
+                'baseline_length': baseline.get('content_length'),
+                'soft_404_detected': is_soft_404
             }
         except Exception as e:
             logger.debug(f"[PARAM_MINER] Error mining {endpoint_url}: {e}")

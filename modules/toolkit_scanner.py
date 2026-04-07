@@ -170,8 +170,56 @@ class ToolkitScanner:
         self.toolkit_metrics = metrics
         self.state.update_scan_metadata(toolkit_metrics=self.toolkit_metrics.copy())
 
+    def _normalize_url_to_root(self, url: str) -> str:
+        """
+        Normalize URL to root domain path for dirbusting.
+        
+        FIX: This prevents dirbusting on WordPress archive paths like
+        /2021/03/ or /2022/10/ which are static and not useful targets.
+        
+        Args:
+            url: Original URL
+            
+        Returns:
+            URL normalized to root path
+        """
+        parsed = urlparse(url)
+        
+        # WordPress year/month archive pattern: /YYYY/MM/ or /YYYY/MM/DD/
+        wp_archive_pattern = re.compile(r'^/\d{4}/\d{2}(/d{2})?/?$')
+        
+        # If path matches WordPress archive pattern, normalize to root
+        if parsed.path and wp_archive_pattern.match(parsed.path):
+            logger.debug(f"[TOOLKIT] Normalizing WordPress archive path: {url} -> root")
+            return f"{parsed.scheme}://{parsed.netloc}/"
+        
+        # WordPress category/tag paths: /category/xxx, /tag/xxx
+        wp_taxonomy_paths = ['/category/', '/tag/', '/author/']
+        path_lower = parsed.path.lower()
+        
+        for wp_path in wp_taxonomy_paths:
+            if wp_path in path_lower:
+                # Check if it's a deeply nested taxonomy path
+                path_parts = parsed.path.strip('/').split('/')
+                if len(path_parts) > 2:
+                    logger.debug(f"[TOOLKIT] Normalizing WordPress taxonomy path: {url} -> root")
+                    return f"{parsed.scheme}://{parsed.netloc}/"
+                break
+        
+        # If path is deeply nested (>3 levels), normalize to root
+        if parsed.path:
+            path_depth = len([p for p in parsed.path.split('/') if p])
+            if path_depth > 3:
+                logger.debug(f"[TOOLKIT] Normalizing deeply nested path (depth={path_depth}): {url} -> root")
+                return f"{parsed.scheme}://{parsed.netloc}/"
+        
+        return url
+    
     def _select_high_value_hosts(self, live_hosts: List[Dict[str, Any]]) -> List[str]:
-        """Select high-value hosts for scanning, with deduplication, static file filtering, and optimizer blacklist check"""
+        """Select high-value hosts for scanning, with deduplication, static file filtering, and optimizer blacklist check.
+        
+        FIX: Added URL normalization to prevent dirbusting on WordPress archive paths.
+        """
         scored: List[tuple[int, str]] = []
         optimizer = get_optimizer()
         
@@ -181,14 +229,57 @@ class ToolkitScanner:
         # WordPress static paths to skip (but allow PHP files)
         wp_static_paths = ['/wp-content/uploads/', '/wp-includes/', '/wp-content/cache/']
         
+        # WordPress archive patterns to normalize to root
+        wp_archive_patterns = [
+            re.compile(r'^/\d{4}/\d{2}(/d{2})?/?$'),  # /YYYY/MM/ or /YYYY/MM/DD/
+        ]
+        
+        # WordPress taxonomy paths that should be normalized
+        wp_taxonomy_prefixes = ['/category/', '/tag/', '/author/']
+        
         for h in live_hosts:
             u = h.get("url", "")
             if not u:
                 continue
             
             parsed = urlparse(u)
-            path = parsed.path.lower()
+            original_path = parsed.path
+            path = original_path.lower()
             url_lower = u.lower()
+            
+            # FIX: Normalize URL to root if it matches problematic patterns
+            should_normalize = False
+            
+            # Check WordPress archive patterns
+            for pattern in wp_archive_patterns:
+                if pattern.match(original_path):
+                    should_normalize = True
+                    logger.debug(f"[TOOLKIT] Detected WordPress archive path: {u}")
+                    break
+            
+            # Check WordPress taxonomy paths (deeply nested)
+            if not should_normalize:
+                for prefix in wp_taxonomy_prefixes:
+                    if prefix in path:
+                        path_parts = original_path.strip('/').split('/')
+                        if len(path_parts) > 2:
+                            should_normalize = True
+                            logger.debug(f"[TOOLKIT] Detected WordPress taxonomy path: {u}")
+                            break
+            
+            # Check deeply nested paths
+            if not should_normalize and original_path:
+                path_depth = len([p for p in original_path.split('/') if p])
+                if path_depth > 3:
+                    should_normalize = True
+                    logger.debug(f"[TOOLKIT] Detected deeply nested path (depth={path_depth}): {u}")
+            
+            # Normalize to root if needed
+            if should_normalize:
+                u = f"{parsed.scheme}://{parsed.netloc}/"
+                parsed = urlparse(u)
+                path = "/"
+                url_lower = u.lower()
             
             # Skip already scanned hosts (deduplication)
             hostname = parsed.hostname or parsed.netloc
@@ -218,10 +309,6 @@ class ToolkitScanner:
                     break
             if skip_wp_static:
                 logger.debug(f"[TOOLKIT] Skipping WordPress static path: {u}")
-                continue
-            
-            # Skip deeply nested paths
-            if len(path.split('/')) > 5:
                 continue
             
             # Skip API-only endpoints that are better handled by API scanner
@@ -256,7 +343,7 @@ class ToolkitScanner:
             scored.append((s, u))
         
         scored.sort(key=lambda x: x[0], reverse=True)
-        selected = [u for _, u in scored]
+        selected = list(dict.fromkeys([u for _, u in scored]))  # Remove duplicates while preserving order
         
         logger.info(f"[TOOLKIT] Selected {len(selected)}/{len(live_hosts)} high-value hosts for scanning")
         return selected
