@@ -7,3 +7,5 @@ __pycache__/
 .aider*
 *.md
 *.sh
+*.txt
+
