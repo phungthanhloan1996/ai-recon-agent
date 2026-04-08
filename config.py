@@ -18,6 +18,7 @@ CIRCUIT_BREAKER_WINDOW = int(os.getenv('CIRCUIT_BREAKER_WINDOW', 300))  # Time w
 # AI Configuration
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
 ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
 
 # WordPress Scanning - API token removed (no longer using WPScan API)
 

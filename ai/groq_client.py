@@ -1,6 +1,6 @@
 """
-ai/groq_client.py - Enhanced Groq API Client
-With circuit breaker, exponential backoff, and rate limiting
+ai/groq_client.py - Enhanced Groq API Client with OpenRouter Fallback
+With circuit breaker, exponential backoff, rate limiting, and real-time OpenRouter backup
 """
 
 import time
@@ -9,25 +9,26 @@ import logging
 import urllib.request
 import urllib.error
 import json as json_module
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 from enum import Enum
-
+import requests 
 logger = logging.getLogger("recon.groq_client")
 
 
 class CircuitState(Enum):
     CLOSED = "closed"       # Normal operation
-    OPEN = "open"           # Failing, reject requests
+    OPEN = "open"           # Failing, use fallback
     HALF_OPEN = "half_open" # Testing if service recovered
 
 
 class GroqClient:
     """
     Enhanced Groq API client with:
-    - Circuit breaker pattern for 429 errors
+    - Circuit breaker pattern for 429/5xx errors
     - Exponential backoff with jitter
     - Global rate limiting
-    - Fallback to static templates when circuit is open
+    - Real-time fallback to OpenRouter when Groq fails
+    - Static fallback payloads when all providers fail
     """
 
     # ─── CIRCUIT BREAKER CONFIGURATION ──────────────────────────────────────────
@@ -39,11 +40,23 @@ class GroqClient:
     JITTER_RANGE = 0.5              # Random jitter range (0-0.5 seconds)
 
     # ─── RATE LIMITING CONFIGURATION ────────────────────────────────────────────
-    MAX_CALLS_PER_MINUTE = 10       # Global rate limit
-    MIN_CALL_INTERVAL = 1.0         # Minimum seconds between calls
+    MAX_CALLS_PER_MINUTE = 10       # Global rate limit for Groq
+    MIN_CALL_INTERVAL = 1.0         # Minimum seconds between Groq calls
+
+    # ─── OPENROUTER CONFIGURATION ───────────────────────────────────────────────
+    OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
+    OPENROUTER_SITE_URL = ""
+    OPENROUTER_SITE_NAME = "ai-recon-agent"
+    OPENROUTER_MODELS = [
+        "meta-llama/llama-3.1-70b-instruct",
+        "meta-llama/llama-3.1-8b-instruct", 
+        "google/gemini-flash-1.5",
+        "mistralai/mistral-large",
+        "openai/gpt-3.5-turbo",
+    ]
 
     # ─── STATIC FALLBACK PAYLOADS ───────────────────────────────────────────────
-    # Used when circuit is open to avoid calling Groq
+    # Used when ALL providers (Groq + OpenRouter) fail
     FALLBACK_PAYLOADS = {
         'sqli': [
             "' OR '1'='1",
@@ -71,18 +84,22 @@ class GroqClient:
         ],
     }
 
-    def __init__(self, api_key: str, model: str = "llama-3.3-70b-versatile"):
+    def __init__(self, api_key: str, model: str = "llama-3.3-70b-versatile",
+                 openrouter_api_key: str = None):
         self.api_key = api_key
         self.model = model
+        self.openrouter_api_key = openrouter_api_key
+        self._openrouter_enabled = bool(openrouter_api_key)
+        self._openrouter_model_index = 0  # Round-robin through OpenRouter models
         
-        # Circuit breaker state
+        # Circuit breaker state for Groq
         self._circuit_state = CircuitState.CLOSED
         self._failure_count = 0
         self._success_count = 0
         self._last_failure_time = 0.0
         self._current_backoff = self.INITIAL_BACKOFF
         
-        # Rate limiting state
+        # Rate limiting state for Groq
         self._call_timestamps = []
         self._last_call_time = 0.0
         
@@ -90,47 +107,59 @@ class GroqClient:
         self._total_calls = 0
         self._total_failures = 0
         self._total_fallbacks = 0
+        self._total_openrouter_calls = 0
+        self._total_static_fallbacks = 0
+        
+        # Track which provider is active
+        self._current_provider = "groq"
 
     def generate(self, prompt: str, system: str = None, temperature: float = 0.3) -> str:
         """
-        Generate response from Groq API with circuit breaker protection.
-        
-        Returns fallback content if circuit is open.
+        Generate response with real-time failover:
+        1. Try Groq (if circuit allows)
+        2. Fallback to OpenRouter if Groq fails
+        3. Fallback to static payloads if all fail
         """
-        # Check circuit breaker
+        # Check Groq circuit breaker
         if self._circuit_state == CircuitState.OPEN:
             if self._should_attempt_reset():
                 self._circuit_state = CircuitState.HALF_OPEN
                 logger.info("[GROQ] Circuit breaker half-open, attempting reset")
             else:
-                self._total_fallbacks += 1
-                logger.warning(f"[GROQ] Circuit open, using fallback. Fallbacks: {self._total_fallbacks}")
-                return self._get_fallback_response(prompt)
+                # Circuit is open, skip Groq and go directly to OpenRouter
+                logger.warning(f"[GROQ] Circuit open, skipping to OpenRouter fallback")
+                return self._call_openrouter(prompt, system, temperature)
         
-        # Apply rate limiting
+        # Apply Groq rate limiting
         self._enforce_rate_limit()
         
-        # Attempt API call with retries
-        return self._call_with_retry(prompt, system, temperature)
+        # Try Groq first
+        try:
+            response = self._call_groq_with_retry(prompt, system, temperature)
+            self._current_provider = "groq"
+            return response
+        except Exception as e:
+            logger.warning(f"[GROQ] Failed, attempting OpenRouter fallback: {e}")
+            # Groq failed, try OpenRouter
+            return self._call_openrouter(prompt, system, temperature)
 
-    def _call_with_retry(self, prompt: str, system: str, temperature: float, 
-                         max_retries: int = 3) -> str:
+    def _call_groq_with_retry(self, prompt: str, system: str, temperature: float, 
+                               max_retries: int = 3) -> str:
         """Call Groq API with exponential backoff and retries."""
         last_error = None
         
         for attempt in range(max_retries):
             try:
-                response = self._make_api_call(prompt, system, temperature)
+                response = self._make_groq_api_call(prompt, system, temperature)
                 self._on_success()
                 return response
             except urllib.error.HTTPError as e:
                 if e.code == 403:
                     # 403 Forbidden - API key invalid or expired
-                    logger.error(f"[GROQ] API key rejected (403 Forbidden). Disabling AI features.")
+                    logger.error(f"[GROQ] API key rejected (403 Forbidden). Switching to OpenRouter.")
                     self._circuit_state = CircuitState.OPEN
                     self._current_backoff = self.MAX_BACKOFF  # Long backoff for auth failures
-                    self._total_fallbacks += 1
-                    return self._get_fallback_response(prompt)
+                    raise  # Re-raise to trigger OpenRouter fallback
                 elif e.code == 429:
                     self._on_failure()
                     if attempt < max_retries - 1:
@@ -166,37 +195,112 @@ class GroqClient:
         
         # All retries exhausted
         self._on_failure()
-        self._total_fallbacks += 1
-        logger.warning(f"[GROQ] All retries exhausted, using fallback")
-        return self._get_fallback_response(prompt)
+        raise last_error or Exception("Groq API call failed after all retries")
 
-    def _make_api_call(self, prompt: str, system: str, temperature: float) -> str:
+    def _make_groq_api_call(self, prompt: str, system: str, temperature: float) -> str:
         """Make actual API call to Groq."""
         url = "https://api.groq.com/openai/v1/chat/completions"
-
+        
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
-
+        
         messages = []
         if system:
             messages.append({"role": "system", "content": system})
-        
         messages.append({"role": "user", "content": prompt})
-
+        
         data = {
             "model": self.model,
             "messages": messages,
-            "temperature": temperature
+            "temperature": temperature,
+            "max_tokens": 500
         }
-
-        payload = json_module.dumps(data).encode("utf-8")
-        req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
         
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            response_data = json_module.loads(resp.read().decode("utf-8"))
-            return response_data["choices"][0]["message"]["content"]
+        response = requests.post(url, headers=headers, json=data, timeout=30)
+        
+        if response.status_code == 403:
+            logger.error(f"[GROQ] 403 Forbidden: {response.text}")
+            raise urllib.error.HTTPError(url, 403, response.text, response.headers, None)
+        
+        response.raise_for_status()
+        return response.json()["choices"][0]["message"]["content"]
+
+    def _call_openrouter(self, prompt: str, system: str, temperature: float) -> str:
+        """
+        Real-time fallback to OpenRouter API.
+        Tries multiple models in round-robin fashion.
+        """
+        if not self._openrouter_enabled:
+            logger.warning("[OPENROUTER] Not configured, using static fallback")
+            self._total_static_fallbacks += 1
+            return self._get_fallback_response(prompt)
+        
+        last_error = None
+        max_models = len(self.OPENROUTER_MODELS)
+        
+        for i in range(max_models):
+            # Round-robin model selection
+            model_index = (self._openrouter_model_index + i) % max_models
+            model = self.OPENROUTER_MODELS[model_index]
+            
+            try:
+                logger.info(f"[OPENROUTER] Attempting with model: {model}")
+                response = self._make_openrouter_call(prompt, system, temperature, model)
+                self._openrouter_model_index = (model_index + 1) % max_models
+                self._total_openrouter_calls += 1
+                self._current_provider = "openrouter"
+                logger.info(f"[OPENROUTER] Success with model: {model}")
+                return response
+            except Exception as e:
+                logger.warning(f"[OPENROUTER] Model {model} failed: {e}")
+                last_error = e
+                continue
+        
+        # All OpenRouter models failed
+        logger.error(f"[OPENROUTER] All models failed, using static fallback")
+        self._total_static_fallbacks += 1
+        return self._get_fallback_response(prompt)
+
+    def _make_openrouter_call(self, prompt: str, system: str, temperature: float, 
+                               model: str) -> str:
+        """Make actual API call to OpenRouter."""
+        headers = {
+            "Authorization": f"Bearer {self.openrouter_api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": self.OPENROUTER_SITE_URL,
+            "X-Title": self.OPENROUTER_SITE_NAME,
+        }
+        
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+        
+        data = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": 500
+        }
+        
+        response = requests.post(
+            self.OPENROUTER_API_URL, 
+            headers=headers, 
+            json=data, 
+            timeout=30
+        )
+        
+        response.raise_for_status()
+        result = response.json()
+        
+        if "choices" in result and len(result["choices"]) > 0:
+            return result["choices"][0]["message"]["content"]
+        elif "error" in result:
+            raise Exception(f"OpenRouter error: {result['error']}")
+        else:
+            raise Exception(f"Unexpected OpenRouter response: {result}")
 
     def _calculate_backoff(self, attempt: int) -> float:
         """Calculate backoff delay with exponential increase and jitter."""
@@ -221,7 +325,7 @@ class GroqClient:
         return time_since_failure >= self._current_backoff
 
     def _on_success(self):
-        """Handle successful API call."""
+        """Handle successful Groq API call."""
         self._success_count += 1
         self._failure_count = 0  # Reset failure count
         
@@ -235,7 +339,7 @@ class GroqClient:
         logger.debug(f"[GROQ] Success (state={self._circuit_state.value})")
 
     def _on_failure(self):
-        """Handle failed API call."""
+        """Handle failed Groq API call."""
         self._failure_count += 1
         self._total_failures += 1
         self._last_failure_time = time.time()
@@ -261,7 +365,7 @@ class GroqClient:
                     f"backoff={self._current_backoff:.1f}s)")
 
     def _enforce_rate_limit(self):
-        """Enforce global rate limiting."""
+        """Enforce global rate limiting for Groq."""
         now = time.time()
         
         # Remove timestamps older than 1 minute
@@ -290,7 +394,7 @@ class GroqClient:
         self._total_calls += 1
 
     def _get_fallback_response(self, prompt: str) -> str:
-        """Generate fallback response when Groq is unavailable."""
+        """Generate fallback response when ALL providers are unavailable."""
         prompt_lower = prompt.lower()
         
         # Try to detect vulnerability type from prompt
@@ -298,28 +402,41 @@ class GroqClient:
             if vuln_type in prompt_lower:
                 return json_module.dumps({
                     "payloads": payloads,
-                    "source": "fallback",
-                    "note": "Generated from static templates (Groq unavailable)"
+                    "source": "static_fallback",
+                    "note": "Generated from static templates (all AI providers unavailable)",
+                    "provider": "none"
                 })
         
         # Generic fallback
         return json_module.dumps({
             "payloads": ["' OR '1'='1", "<script>alert(1)</script>"],
-            "source": "fallback",
-            "note": "Generic fallback payloads (Groq unavailable)"
+            "source": "static_fallback",
+            "note": "Generic fallback payloads (all AI providers unavailable)",
+            "provider": "none"
         })
 
     def get_status(self) -> Dict[str, Any]:
         """Get circuit breaker status and statistics."""
         return {
             "circuit_state": self._circuit_state.value,
-            "failure_count": self._failure_count,
-            "success_count": self._success_count,
-            "current_backoff": self._current_backoff,
-            "total_calls": self._total_calls,
-            "total_failures": self._total_failures,
-            "total_fallbacks": self._total_fallbacks,
-            "rate_limit_calls_last_minute": len(self._call_timestamps),
+            "current_provider": self._current_provider,
+            "groq": {
+                "failure_count": self._failure_count,
+                "success_count": self._success_count,
+                "current_backoff": self._current_backoff,
+                "total_calls": self._total_calls,
+                "total_failures": self._total_failures,
+                "rate_limit_calls_last_minute": len(self._call_timestamps),
+            },
+            "openrouter": {
+                "enabled": self._openrouter_enabled,
+                "total_calls": self._total_openrouter_calls,
+                "current_model_index": self._openrouter_model_index,
+            },
+            "fallbacks": {
+                "total_fallbacks": self._total_fallbacks,
+                "static_fallbacks": self._total_static_fallbacks,
+            }
         }
 
     def reset(self):
@@ -331,3 +448,34 @@ class GroqClient:
         self._call_timestamps = []
         self._last_call_time = 0.0
         logger.info("[GROQ] Circuit breaker reset")
+
+    def is_groq_available(self) -> bool:
+        """Check if Groq is currently available (circuit closed or half-open)."""
+        return self._circuit_state in [CircuitState.CLOSED, CircuitState.HALF_OPEN]
+
+    def get_current_provider(self) -> str:
+        """Get the name of the current active provider."""
+        return self._current_provider
+
+
+# ─── FACTORY FUNCTION ───────────────────────────────────────────────────────────
+
+def create_groq_client(api_key: str = None, openrouter_api_key: str = None,
+                       model: str = None) -> GroqClient:
+    """
+    Factory function to create GroqClient with configuration from environment.
+    """
+    import os
+    
+    if api_key is None:
+        api_key = os.getenv('GROQ_API_KEY')
+    if openrouter_api_key is None:
+        openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
+    if model is None:
+        model = os.getenv('PRIMARY_AI_MODEL', 'llama-3.3-70b-versatile')
+    
+    return GroqClient(
+        api_key=api_key,
+        model=model,
+        openrouter_api_key=openrouter_api_key
+    )

@@ -1405,7 +1405,10 @@ class ScanningEngine:
             return
 
         if not hasattr(self, "_groq"):
-            self._groq = GroqClient(os.getenv("GROQ_API_KEY"))
+            self._groq = GroqClient(
+                api_key=os.getenv("GROQ_API_KEY"),
+                openrouter_api_key=os.getenv("OPENROUTER_API_KEY")
+            )
 
         try:
             self._ai_response_scan_calls += 1

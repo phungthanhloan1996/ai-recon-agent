@@ -178,19 +178,301 @@ from integrations.burp_api import BurpAPI, BurpScanner
 from ai.llm_analyzer import LLMAnalyzer
 
 
-# ─── API Key Check ───────────────────────────────────────────────────────────
-def check_api_keys() -> dict:
-    """Kiểm tra trạng thái các API key cần thiết."""
-    groq_key = os.environ.get("GROQ_API_KEY", "") or os.environ.get("GROQ_APIKEY", "")
-    nvd_key = os.environ.get("NVD_API_KEY", "") or os.environ.get("NVDAPI_KEY", "")
+# ─── API Key Validation ──────────────────────────────────────────────────────
+import json as _json
+import urllib.request as _ureq
+import urllib.error as _uerr
 
-    def status(key):
-        return "✓" if key else "✗"
+def _test_groq_key(key: str) -> tuple:
+    """Test Groq API key by making a minimal request. Returns (status, message)"""
+    if not key or "xxx" in key.lower() or key == "-":
+        return False, "Not configured"
+    
+    try:
+        import requests
+        response = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": "llama-3.1-8b-instant",
+                "messages": [{"role": "user", "content": "hi"}],
+                "max_tokens": 5
+            },
+            timeout=15
+        )
+        
+        if response.status_code in (401, 403):
+            return False, f"Invalid key ({response.status_code})"
+        elif response.status_code == 200:
+            result = response.json()
+            if "choices" in result:
+                return True, "Valid"
+            return False, "Unexpected response"
+        else:
+            return False, f"HTTP {response.status_code}"
+    except Exception as e:
+        return False, f"Error: {str(e)[:30]}"
 
-    return {
-        "Groq": status(groq_key),
-        "NVD": status(nvd_key),
-    }
+def _test_wpscan_key(token: str) -> tuple:
+    """Test WPScan API token. Returns (status, message)"""
+    if not token or "xxx" in token.lower() or token == "-":
+        return False, "Not configured"
+    
+    try:
+        req = _ureq.Request(
+            "https://wpscan.com/api/v1/token_status",
+            headers={"Authorization": f"Token token={token}"},
+            method="GET"
+        )
+        
+        with _ureq.urlopen(req, timeout=10) as resp:
+            result = _json.loads(resp.read().decode("utf-8"))
+            if result.get("valid") is True:
+                return True, "Valid"
+            return False, "Invalid token"
+    except _uerr.HTTPError as e:
+        if e.code in (401, 403):
+            return False, "Invalid token"
+        return False, f"HTTP {e.code}"
+    except Exception as e:
+        return False, f"Error: {str(e)[:30]}"
+
+def _test_nvd_key(key: str) -> tuple:
+    """Test NVD API key. Returns (status, message)"""
+    if not key or "xxx" in key.lower() or key == "-":
+        return False, "Not configured"
+    
+    try:
+        url = "https://services.nvd.nist.gov/rest/json/cves/2.0?cpeName=cpe:2.3:o:microsoft:windows_10:-:*:*:*:*:*:*:*&apiKey=" + key
+        req = _ureq.Request(url, method="GET")
+        
+        with _ureq.urlopen(req, timeout=10) as resp:
+            result = _json.loads(resp.read().decode("utf-8"))
+            if "totalResults" in result:
+                return True, "Valid"
+            return False, "Unexpected response"
+    except _uerr.HTTPError as e:
+        if e.code == 403:
+            return False, "Invalid key (403)"
+        return False, f"HTTP {e.code}"
+    except Exception as e:
+        return False, f"Error: {str(e)[:30]}"
+
+def _test_google_key(key: str) -> tuple:
+    """Test Google API key. Returns (status, message)"""
+    if not key or "xxx" in key.lower() or key == "-":
+        return False, "Not configured"
+    
+    try:
+        url = f"https://www.googleapis.com/oauth2/v1/tokeninfo?access_token=test&key={key}"
+        req = _ureq.Request(url, method="GET")
+        
+        with _ureq.urlopen(req, timeout=10) as resp:
+            result = _json.loads(resp.read().decode("utf-8"))
+            # Google returns error for invalid token, but if key is valid format, we get a response
+            if "error" in result:
+                if "API key not valid" in str(result) or "Invalid Credentials" in str(result):
+                    return False, "Invalid key"
+                return True, "Valid format"
+            return False, "Unexpected response"
+    except _uerr.HTTPError as e:
+        return False, f"HTTP {e.code}"
+    except Exception as e:
+        return False, f"Error: {str(e)[:30]}"
+
+def _test_openrouter_key(key: str) -> tuple:
+    """Test OpenRouter API key. Returns (status, message)"""
+    if not key or "xxx" in key.lower() or key == "-":
+        return False, "Not configured"
+    
+    try:
+        req = _ureq.Request(
+            "https://openrouter.ai/api/v1/auth/key",
+            headers={"Authorization": f"Bearer {key}"},
+            method="GET"
+        )
+        
+        with _ureq.urlopen(req, timeout=10) as resp:
+            result = _json.loads(resp.read().decode("utf-8"))
+            if "id" in result:
+                return True, "Valid"
+            return False, "Invalid key"
+    except _uerr.HTTPError as e:
+        if e.code in (401, 403):
+            return False, "Invalid key"
+        return False, f"HTTP {e.code}"
+    except Exception as e:
+        return False, f"Error: {str(e)[:30]}"
+
+def _test_deepseek_key(key: str) -> tuple:
+    """Test DeepSeek API key. Returns (status, message)"""
+    if not key or "xxx" in key.lower() or key == "-":
+        return False, "Not configured"
+    
+    try:
+        data = _json.dumps({
+            "model": "deepseek-chat",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 5
+        }).encode("utf-8")
+        
+        req = _ureq.Request(
+            "https://api.deepseek.com/v1/chat/completions",
+            data=data,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            method="POST"
+        )
+        
+        with _ureq.urlopen(req, timeout=15) as resp:
+            result = _json.loads(resp.read().decode("utf-8"))
+            if "choices" in result:
+                return True, "Valid"
+            return False, "Unexpected response"
+    except _uerr.HTTPError as e:
+        if e.code in (401, 403):
+            return False, "Invalid key"
+        return False, f"HTTP {e.code}"
+    except Exception as e:
+        return False, f"Error: {str(e)[:30]}"
+
+def check_api_keys(silent: bool = False) -> dict:
+    """
+    Kiểm tra và validate thực tế tất cả API keys.
+    
+    Returns:
+        dict: {
+            "groq": {"valid": bool, "message": str, "required": True},
+            "wpscan": {"valid": bool, "message": str, "required": False},
+            ...
+        }
+    """
+    # Get all API keys from environment
+    api_configs = [
+        ("groq", "GROQ_API_KEY", _test_groq_key, True, "AI Analysis"),
+        ("wpscan", "WPSCAN_API_TOKEN", _test_wpscan_key, False, "WordPress Scan"),
+        ("nvd", "NVD_API_KEY", _test_nvd_key, False, "CVE Matching"),
+        ("google", "GOOGLE_API_KEY", _test_google_key, False, "Google Search"),
+        ("openrouter", "OPENROUTER_API_KEY", _test_openrouter_key, False, "AI Fallback"),
+        ("deepseek", "DEEPSEEK_API_KEY", _test_deepseek_key, False, "AI Fallback"),
+    ]
+    
+    results = {}
+    
+    for name, env_var, test_func, required, description in api_configs:
+        key = os.environ.get(env_var, "")
+        
+        if not key:
+            results[name] = {
+                "valid": False,
+                "message": "Not set",
+                "required": required,
+                "description": description,
+                "env_var": env_var
+            }
+            continue
+        
+        is_valid, msg = test_func(key)
+        results[name] = {
+            "valid": is_valid,
+            "message": msg,
+            "required": required,
+            "description": description,
+            "env_var": env_var
+        }
+    
+    # Print results if not silent
+    if not silent:
+        _print_api_validation(results)
+    
+    return results
+
+def _print_api_validation(results: dict):
+    """In kết quả validation API keys với màu sắc đẹp"""
+    print(f"\n{Colors.BRIGHT_CYAN}{'═' * 65}{Colors.RESET}")
+    print(f"{Colors.BRIGHT_CYAN}  🔐 API KEY VALIDATION - KIỂM TRA HIỆU LỰC{Colors.RESET}".ljust(65) + f"{Colors.BRIGHT_CYAN}║{Colors.RESET}")
+    print(f"{Colors.BRIGHT_CYAN}{'═' * 65}{Colors.RESET}")
+    
+    for name, info in results.items():
+        display_name = name.upper().ljust(12)
+        env_var = info.get("env_var", "")
+        key = os.environ.get(env_var, "")
+        key_preview = f"{key[:12]}..." if key and len(key) > 12 else key if key else "(empty)"
+        
+        if info["required"]:
+            required_tag = f"{Colors.BRIGHT_RED}[REQUIRED]{Colors.RESET}"
+        else:
+            required_tag = f"{Colors.DIM}[optional]{Colors.RESET}"
+        
+        if not key or key == "-":
+            status_icon = f"{Colors.RED}❌{Colors.RESET}"
+            status_text = f"{Colors.RED}NOT SET{Colors.RESET}"
+        elif info["valid"]:
+            status_icon = f"{Colors.BRIGHT_GREEN}✅{Colors.RESET}"
+            status_text = f"{Colors.BRIGHT_GREEN}VALID{Colors.RESET}"
+        else:
+            status_icon = f"{Colors.RED}💀{Colors.RESET}"
+            status_text = f"{Colors.RED}INVALID{Colors.RESET}"
+        
+        desc = info.get("description", "")
+        desc_str = f"({desc})" if desc else ""
+        
+        print(f"  {status_icon} {display_name} {required_tag} {key_preview:<18} → {status_text} {desc_str}")
+    
+    print(f"{Colors.BRIGHT_CYAN}{'═' * 65}{Colors.RESET}\n")
+
+def validate_and_handle_api_keys() -> tuple:
+    """
+    Validate tất cả API keys và xử lý theo quy tắc:
+    - Groq: BẮT BUỘC - nếu chết thì dừng luôn
+    - Others: TÙY CHỌN - nếu chết thì cảnh báo + skip modules
+    
+    Returns:
+        tuple: (api_results, skip_modules)
+            api_results: dict kết quả validation
+            skip_modules: list các module cần skip
+    """
+    api_results = check_api_keys(silent=False)
+    skip_modules = []
+    
+    # Check Groq - BẮT BUỘC
+    if not api_results["groq"]["valid"]:
+        print(f"\n{Colors.BRIGHT_RED}╔══════════════════════════════════════════════════════════════╗{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}║  ❌ FATAL ERROR: GROQ API KEY KHÔNG HỢP LỆ!                   ║{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}║                                                                ║{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}║  Groq API là BẮT BUỘC để AI Recon Agent hoạt động.           ║{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}║                                                                ║{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}║  Cách khắc phục:                                              ║{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}║  1. Lấy API key tại: https://console.groq.com/keys            ║{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}║  2. Điền vào file .env:                                       ║{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}║     GROQ_API_KEY=your_key_here                                ║{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}║  3. Hoặc export: export GROQ_API_KEY=your_key_here            ║{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}║                                                                ║{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}║  Chi tiết: {api_results['groq']['message']:<52}║{Colors.RESET}")
+        print(f"{Colors.BRIGHT_RED}╚══════════════════════════════════════════════════════════════╝{Colors.RESET}\n")
+        sys.exit(1)
+    
+    # Check optional APIs - nếu chết thì skip modules tương ứng
+    if not api_results["wpscan"]["valid"]:
+        skip_modules.append("wordpress")
+        print(f"{Colors.YELLOW}⚠️  WPScan API không hợp lệ - Sẽ bỏ qua WordPress scanning{Colors.RESET}")
+    
+    if not api_results["nvd"]["valid"]:
+        skip_modules.append("cve_matching")
+        print(f"{Colors.YELLOW}⚠️  NVD API không hợp lệ - Sẽ bỏ qua CVE matching{Colors.RESET}")
+    
+    if not api_results["google"]["valid"]:
+        skip_modules.append("google_search")
+        print(f"{Colors.YELLOW}⚠️  Google API không hợp lệ - Sẽ bỏ qua Google Search{Colors.RESET}")
+    
+    if not api_results["openrouter"]["valid"] and not api_results["deepseek"]["valid"]:
+        skip_modules.append("ai_fallback")
+        print(f"{Colors.YELLOW}⚠️  Không có AI fallback provider - Chỉ dùng Groq{Colors.RESET}")
+    
+    print(f"\n{Colors.BRIGHT_GREEN}✅ Groq API hợp lệ - Bắt đầu scan...{Colors.RESET}\n")
+    
+    return api_results, skip_modules
+
+# ─── ANSI COLOR CODES ───────────────────────────────────────────────────────
 
 
 # ─── ANSI COLOR CODES ───────────────────────────────────────────────────────
@@ -1303,7 +1585,10 @@ class ReconAgent:
         self.endpoint_classifier = EndpointClassifier()
         self.payload_gen = PayloadGenerator(groq_key)
         self.payload_mutator = PayloadMutator()
-        self.groq_client = GroqClient(groq_key) if groq_key else None
+        self.groq_client = GroqClient(
+            api_key=groq_key,
+            openrouter_api_key=os.getenv("OPENROUTER_API_KEY")
+        ) if groq_key else None
         self.vuln_analyzer = AIAnalyzer(self.state, output_dir, self.groq_client)
         self.chain_planner = ChainPlanner(
             self.state,
@@ -9051,7 +9336,10 @@ def process_single_target(domain: str, output_dir: str, options: dict, args, bat
         )
         agent.run()
 
-        groq = GroqClient(os.getenv("GROQ_API_KEY"))
+        groq = GroqClient(
+            api_key=os.getenv("GROQ_API_KEY"),
+            openrouter_api_key=os.getenv("OPENROUTER_API_KEY")
+        )
         analyzer = AIAnalyzer(agent.state, output_dir, ai_client=groq)
 
         try:
@@ -9115,8 +9403,17 @@ def run_batch(targets_file: str, options: dict, args):
         batch_logger.addHandler(file_handler)
     batch_logger.addHandler(stream_handler)
     
+    # Validate API keys before starting
+    # This will exit if Groq is invalid, or warn and skip modules for optional APIs
+    api_results, skip_modules = validate_and_handle_api_keys()
+    
+    # Convert api_results to simple status dict for display
+    api_status = {name: "✓" if info["valid"] else "✗" for name, info in api_results.items()}
+    
+    # Store skip_modules in args for agents to check
+    args.skip_modules = skip_modules
+    
     # Initialize display
-    api_status = check_api_keys()
     display = BatchDisplay(api_status=api_status, max_workers=args.max_workers, targets_file=targets_file)
     
     # Track active scans
