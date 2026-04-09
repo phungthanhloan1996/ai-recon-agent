@@ -129,7 +129,29 @@ REMEMBER:
 
 Return ONLY valid JSON."""
 
+def repair_json(json_str: str) -> str:
+    """Sửa các lỗi JSON phổ biến từ AI response"""
+    # Fix thiếu dấu phẩy giữa các object: }{ -> },{
+    json_str = re.sub(r'}\s*{', '},{', json_str)
+    
+    # Fix thiếu dấu phẩy giữa các array: ][ -> ],[
+    json_str = re.sub(r']\s*\[', '],[', json_str)
+    
+    # Fix thiếu dấu phẩy sau giá trị: "value" "key" -> "value", "key"
+    json_str = re.sub(r'"\s+"', '", "', json_str)
+    json_str = re.sub(r'(\d+|true|false|null)\s+"', r'\1, "', json_str)
+    
+    # Fix thiếu dấu phẩy sau } khi theo sau là { hoặc [
+    json_str = re.sub(r'}\s*(\{|\[)', r'},\1', json_str)
+    
+    # Fix thiếu dấu phẩy sau ] khi theo sau là { hoặc [
+    json_str = re.sub(r']\s*(\{|\[)', r'],\1', json_str)
+    
+    return json_str
 
+
+
+    
 @dataclass
 class ExploitStep:
     name: str
@@ -174,6 +196,48 @@ class ChainPlanner:
         self.learning_engine = learning_engine
         self.groq = groq_client
         self.payload_optimizer = payload_optimizer
+
+
+
+        def _clean_json_response(self, raw_response: str) -> dict:
+            """Làm sạch và parse JSON an toàn từ response của Groq/LLM"""
+            if not raw_response or not isinstance(raw_response, str):
+                logger.warning("[CHAIN] Empty or non-string response from AI")
+                return {}
+
+            text = raw_response.strip()
+
+            # Xóa markdown code block
+            text = re.sub(r'```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+            text = re.sub(r'```\s*$', '', text, flags=re.IGNORECASE)
+
+            # Tìm khối JSON
+            json_match = re.search(r'(\{[\s\S]*\})', text)
+            if json_match:
+                text = json_match.group(1)
+
+            # Thử parse trực tiếp
+            # CODE MỚI (ĐÃ FIX)
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                # Thử sửa lỗi thiếu dấu phẩy trước khi bỏ cuộc
+                try:
+                    repaired = repair_json(text)
+                    return json.loads(repaired)
+                except:
+                    pass
+
+            # Fix phổ biến
+            try:
+                fixed = re.sub(r"(?<!\\)'", '"', text)
+                fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
+                fixed = repair_json(fixed)
+                return json.loads(fixed)
+            except json.JSONDecodeError as e:
+                logger.error(f"[CHAIN] JSON parse failed after cleaning: {e}")
+                logger.debug(f"[CHAIN] Raw cleaned text: {text[:500]}...")
+                return {}
 
     # ─── AI-POWERED PLANNING METHODS ──────────────────────────────────────────────
 
@@ -480,100 +544,86 @@ Return ONLY valid JSON."""
         return prompt
 
     def _parse_ai_plan_response(self, response: str, state: Dict[str, Any]) -> List[ExploitChain]:
-        """Parse AI response into ExploitChain objects.
-        
-        Args:
-            response: Raw response from the LLM
-            state: The planner state for context
+            """Parse AI response into ExploitChain objects with robust JSON cleaning."""
+            chains = []
+            base_url = state.get('base_url', self._get_base_url())
             
-        Returns:
-            List of ExploitChain objects
-        """
-        chains = []
-        base_url = state.get('base_url', self._get_base_url())
-        
-        try:
-            # Try to extract JSON from response
-            json_pattern = r'\[[\s\S]*?\]'
-            json_matches = re.findall(json_pattern, response, re.DOTALL)
-            
-            if not json_matches:
-                # Try to find JSON object pattern
-                json_pattern = r'\{[\s\S]*?"name"[\s\S]*?"steps"[\s\S]*?\}'
-                json_matches = re.findall(json_pattern, response, re.DOTALL)
-            
-            for match in json_matches:
-                try:
-                    chain_data = json.loads(match)
-                    
-                    # Handle both array of chains and single chain
-                    if isinstance(chain_data, dict):
-                        chain_data = [chain_data]
-                    elif not isinstance(chain_data, list):
+            if not response or not isinstance(response, str):
+                logger.warning("[CHAIN] Empty AI response received")
+                return chains
+
+            try:
+                # Sử dụng hàm clean JSON
+                chain_data = self._clean_json_response(response)
+                
+                if not chain_data:
+                    logger.warning("[CHAIN] Failed to parse AI plan response")
+                    return chains
+
+                # Handle both array of chains and single chain
+                if isinstance(chain_data, dict):
+                    chain_data = [chain_data]
+                elif not isinstance(chain_data, list):
+                    logger.warning("[CHAIN] AI response is not a list or dict")
+                    return chains
+
+                for cd in chain_data:
+                    if not isinstance(cd, dict):
                         continue
                     
-                    for cd in chain_data:
-                        if not isinstance(cd, dict):
+                    chain_name = cd.get('name', 'AI Generated Chain')
+                    chain_desc = cd.get('description', '')
+                    risk_level = cd.get('risk_level', 'HIGH')
+                    
+                    if risk_level not in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']:
+                        risk_level = 'HIGH'
+                    
+                    # Parse steps
+                    steps = []
+                    steps_data = cd.get('steps', [])
+                    
+                    for step_data in steps_data:
+                        if not isinstance(step_data, dict):
                             continue
                         
-                        chain_name = cd.get('name', 'AI Generated Chain')
-                        chain_desc = cd.get('description', '')
-                        risk_level = cd.get('risk_level', 'HIGH')
+                        step_name = step_data.get('name') or step_data.get('action') or 'Unknown Step'
+                        step_action = step_data.get('action', step_name)
+                        step_target = self._resolve_step_target(step_data.get('target', base_url), step_name, step_action)
                         
-                        # Validate risk level
-                        if risk_level not in ['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']:
-                            risk_level = 'HIGH'
+                        if not step_name.strip():
+                            continue
                         
-                        # Parse steps
-                        steps = []
-                        steps_data = cd.get('steps', [])
-                        
-                        for step_data in steps_data:
-                            if not isinstance(step_data, dict):
-                                continue
-                            
-                            step_name = step_data.get('name') or step_data.get('action') or 'Unknown Step'
-                            step_action = step_data.get('action', step_name)
-                            step_target = self._resolve_step_target(step_data.get('target', base_url), step_name, step_action)
-                            if not step_name.strip():
-                                continue
-                            
-                            step = ExploitStep(
-                                name=step_name,
-                                action=step_action,
-                                target=step_target,
-                                tool=step_data.get('tool', 'curl'),
-                                payload=step_data.get('payload', ''),
-                                success_indicator=step_data.get('success_indicator', 'success'),
-                                depends_on=step_data.get('depends_on', []),
-                                preconditions=step_data.get('preconditions', []),
-                                postconditions=step_data.get('postconditions', []),
-                                priority=step_data.get('priority', 5)
-                            )
-                            steps.append(step)
-                        
-                        # Only add chain if it has valid steps
-                        if steps and chain_name:
-                            chain = ExploitChain(
-                                name=chain_name,
-                                description=chain_desc,
-                                steps=steps,
-                                risk_level=risk_level,
-                                estimated_time=f"{len(steps) * 5}-{len(steps) * 20} min",
-                                prerequisites=cd.get('prerequisites', []),
-                                preconditions=cd.get('preconditions', []),
-                                postconditions=cd.get('postconditions', [])
-                            )
-                            chains.append(chain)
-                            
-                except (json.JSONDecodeError, KeyError, TypeError) as e:
-                    logger.debug(f"[CHAIN] Failed to parse chain: {e}")
-                    continue
+                        step = ExploitStep(
+                            name=step_name,
+                            action=step_action,
+                            target=step_target,
+                            tool=step_data.get('tool', 'curl'),
+                            payload=step_data.get('payload', ''),
+                            success_indicator=step_data.get('success_indicator', 'success'),
+                            depends_on=step_data.get('depends_on', []),
+                            preconditions=step_data.get('preconditions', []),
+                            postconditions=step_data.get('postconditions', []),
+                            priority=step_data.get('priority', 5)
+                        )
+                        steps.append(step)
                     
-        except Exception as e:
-            logger.error(f"[CHAIN] Failed to parse AI response: {e}")
-        
-        return chains
+                    if steps and chain_name:
+                        chain = ExploitChain(
+                            name=chain_name,
+                            description=chain_desc,
+                            steps=steps,
+                            risk_level=risk_level,
+                            estimated_time=f"{len(steps) * 5}-{len(steps) * 20} min",
+                            prerequisites=cd.get('prerequisites', []),
+                            preconditions=cd.get('preconditions', []),
+                            postconditions=cd.get('postconditions', [])
+                        )
+                        chains.append(chain)
+                        
+            except Exception as e:
+                logger.error(f"[CHAIN] Failed to parse AI plan response: {e}")
+            
+            return chains
 
     # ─── END AI-POWERED PLANNING METHODS ──────────────────────────────────────────
 
@@ -2144,10 +2194,19 @@ Return ONLY a JSON list. Each item must contain:
 """
         try:
             response = self.groq.generate(prompt)
+
             match = re.search(r"\[[\s\S]*\]", response)
             if not match:
                 return []
-            parsed = json.loads(match.group(0))
+            json_str = match.group(0)
+            try:
+                parsed = json.loads(json_str)
+            except json.JSONDecodeError:
+                # Thử sửa lỗi JSON
+                repaired = repair_json(json_str)
+                parsed = json.loads(repaired)
+
+
             return [item for item in parsed if isinstance(item, dict)]
         except Exception as e:
             logger.error(f"[AI-CHAIN] Failed: {e}")
@@ -2220,33 +2279,42 @@ Format each chain as JSON with:
             return []
 
     def _parse_ai_chains_response(self, response: str) -> List[ExploitChain]:
-        """Parse AI-generated chains from response text with proper URL handling."""
-        chains = []
-        base_url = self._get_base_url()
-        
-        try:
-            # Try to extract JSON from response - improved regex for nested JSON
-            json_pattern = r'\{[\s\S]*?"entry_point"[\s\S]*?\}'
-            json_matches = re.findall(json_pattern, response, re.DOTALL)
+            """Parse AI-generated chains from response text with proper JSON cleaning."""
+            chains = []
+            base_url = self._get_base_url()
             
-            for match in json_matches:
-                try:
-                    chain_data = json.loads(match)
+            if not response or not isinstance(response, str):
+                logger.warning("[CHAIN] Empty AI chains response")
+                return chains
+
+            try:
+                # Sử dụng hàm clean JSON
+                parsed_data = self._clean_json_response(response)
+                
+                if not parsed_data:
+                    logger.warning("[CHAIN] Failed to parse AI chains response")
+                    return chains
+
+                # Handle both list and single dict
+                if isinstance(parsed_data, dict):
+                    parsed_data = [parsed_data]
+                elif not isinstance(parsed_data, list):
+                    return chains
+
+                for chain_data in parsed_data:
+                    if not isinstance(chain_data, dict):
+                        continue
                     
-                    # Get entry point and ensure it has proper URL
                     entry_point = chain_data.get('entry_point', '')
                     if entry_point and not entry_point.startswith(('http://', 'https://')):
                         entry_point = self._build_full_url(entry_point)
                     
-                    # Build steps with proper targets
                     steps = []
                     for step_data in chain_data.get('steps', []):
                         if isinstance(step_data, dict):
                             step_name = step_data.get('name', step_data.get('action', 'Unknown Step'))
                             step_action = step_data.get('action', step_name)
                             step_target = self._resolve_step_target(step_data.get('target', entry_point), step_name, step_action)
-                            if not step_name.strip():
-                                continue
                             
                             steps.append(ExploitStep(
                                 name=step_name,
@@ -2259,18 +2327,15 @@ Format each chain as JSON with:
                                 postconditions=step_data.get('postconditions', [])
                             ))
                         elif isinstance(step_data, str):
-                            # Handle string steps
                             steps.append(ExploitStep(
                                 name=step_data,
                                 action=step_data,
-                                target=entry_point or base_url,
-                                success_indicator="success"
+                                target=entry_point or base_url
                             ))
                     
-                    # Only add chain if it has valid steps
                     if steps and entry_point:
                         chain = ExploitChain(
-                            name=chain_data.get('technique', 'ai_generated_chain'),
+                            name=chain_data.get('technique', 'AI Generated Chain'),
                             description=chain_data.get('expected_impact', ''),
                             steps=steps,
                             risk_level="HIGH",
@@ -2279,17 +2344,12 @@ Format each chain as JSON with:
                             preconditions=chain_data.get('preconditions', [])
                         )
                         chains.append(chain)
-                        logger.debug(f"[CHAIN] Parsed chain: {chain.name} with {len(steps)} steps")
-                    else:
-                        logger.warning(f"[CHAIN] Skipping invalid chain - no entry_point or steps")
                         
-                except (json.JSONDecodeError, KeyError) as e:
-                    logger.debug(f"[CHAIN] Failed to parse chain data: {e}")
-                    continue
-        except Exception as e:
-            logger.error(f"[CHAIN] Failed to parse AI response: {e}")
-        
-        return chains
+            except Exception as e:
+                logger.error(f"[CHAIN] Failed to parse AI chains response: {e}")
+            
+            return chains
+
 
     def smart_prioritize(self, chains: List[ExploitChain]) -> List[ExploitChain]:
         """

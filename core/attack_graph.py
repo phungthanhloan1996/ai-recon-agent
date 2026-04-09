@@ -66,8 +66,10 @@ class AttackGraph:
     def add_vulnerability(self, vuln_data: Dict[str, Any]) -> str:
         """Add a vulnerability node to the graph"""
         # Use safe dictionary access to prevent KeyError
+        if vuln_data is None:
+            vuln_data = {}
         endpoint = vuln_data.get('endpoint', 'unknown_endpoint')
-        vuln_type = vuln_data.get('type', 'unknown_type')
+        vuln_type = vuln_data.get('type') or 'unknown_type'
         vuln_id = f"{endpoint}_{vuln_type}_{hash(str(vuln_data))}"
 
         node = VulnerabilityNode(
@@ -128,9 +130,14 @@ class AttackGraph:
                 if i == j:
                     continue
 
+                source_type = (source.vuln_type or "").lower()
+                target_type = (target.vuln_type or "").lower()
+                target_endpoint = (target.endpoint or "").lower()
+                target_consequences = str(target.consequences or "").lower()
+
                 # SQLi → Admin access pattern
-                if (source.vuln_type.lower() == 'sqli' and
-                    'admin' in target.endpoint.lower()):
+                # SQLi → Admin access
+                if source_type == "sqli" and "admin" in target_endpoint:
                     self.add_exploit_relationship(
                         source.id, target.id,
                         {
@@ -142,8 +149,8 @@ class AttackGraph:
                     )
 
                 # File upload → RCE pattern
-                if (source.vuln_type.lower() == 'file_upload' and
-                    target.vuln_type.lower() == 'rce'):
+                # File upload → RCE
+                if source_type == "file_upload" and target_type == "rce":
                     self.add_exploit_relationship(
                         source.id, target.id,
                         {
@@ -154,9 +161,8 @@ class AttackGraph:
                         }
                     )
 
-                # XSS → Session hijack pattern
-                if (source.vuln_type.lower() == 'xss' and
-                    'session' in str(target.consequences).lower()):
+                # XSS → Session hijack
+                if source_type == "xss" and "session" in target_consequences:
                     self.add_exploit_relationship(
                         source.id, target.id,
                         {
@@ -255,22 +261,48 @@ class AttackGraph:
         Extracts host + base path (without query params or trailing slashes).
         """
         from urllib.parse import urlparse
-        parsed = urlparse(endpoint.lower() if '://' in endpoint else f"https://{endpoint}")
-        path = parsed.path.rstrip('/').split('?')[0]
-        return f"{parsed.netloc}{path}"
+        
+        # THÊM 3 DÒNG NÀY
+        if endpoint is None or endpoint == '':
+            return "unknown_host/"
+        
+        try:
+            # Thêm scheme nếu chưa có
+            if '://' not in endpoint:
+                endpoint = f"https://{endpoint}"
+            
+            parsed = urlparse(endpoint.lower())
+            host = parsed.netloc if parsed.netloc else "unknown_host"
+            path = parsed.path.rstrip('/').split('?')[0]
+            if path == '':
+                path = '/'
+            
+            return f"{host}{path}"
+        except Exception:
+            return "unknown_host/"
 
     def _get_endpoint_signature(self, vuln_data: Dict[str, Any]) -> tuple:
         """
         Create a signature for an endpoint to detect duplicates.
         Returns tuple of (host, base_path, vuln_type).
         """
-        endpoint = vuln_data.get('endpoint', '')
-        vuln_type = vuln_data.get('type', 'unknown')
+        # THÊM CHECK NÀY
+        if vuln_data is None:
+            return ("unknown_host", "/", "unknown")
+        
+        endpoint = vuln_data.get('endpoint')
+        if endpoint is None:
+            endpoint = ''
+        
+        vuln_type = vuln_data.get('type')
+        if vuln_type is None:
+            vuln_type = 'unknown'
+        
         normalized = self._normalize_endpoint(endpoint)
         
         # Extract host and base path
         parts = normalized.split('/', 1)
-        host = parts[0]
+        host = parts[0] if parts[0] else "unknown_host"
         base_path = '/' + parts[1] if len(parts) > 1 else '/'
         
         # Normalize base path to first 2 levels
@@ -288,6 +320,8 @@ class AttackGraph:
         Returns:
             True if vulnerability should be added, False if duplicate
         """
+        if vuln_data is None:
+            return False
         signature = self._get_endpoint_signature(vuln_data)
         vuln_type = vuln_data.get('type', 'unknown').lower()
         
@@ -339,6 +373,8 @@ class AttackGraph:
         Add vulnerability only if it's not a duplicate.
         Returns vuln_id if added, None if skipped.
         """
+        if vuln_data is None:
+            return None
         if not self.should_add_vulnerability(vuln_data):
             return None
         
