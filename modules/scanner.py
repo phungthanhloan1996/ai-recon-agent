@@ -26,6 +26,7 @@ from integrations.nuclei_runner import NucleiRunner
 from integrations.sqlmap_runner import SQLMapRunner
 from core.executor import run_command, tool_available
 from core.resource_manager import get_nuclei_pool, get_concurrency_manager
+from core.host_filter import HostFilter
 
 logger = logging.getLogger("recon.scanning")
 
@@ -52,6 +53,25 @@ class ScanningEngine:
 
         self.scan_results_file = os.path.join(output_dir, "scan_results.json")
         self.manifest_file = os.path.join(output_dir, "scanner_manifest.json")
+        allowed_domains = state.get("allowed_domains", []) or []
+        target_hostname = urlparse(self.target).hostname if self.target else None
+        self.host_filter = HostFilter(
+            skip_dev_test=True,
+            target_domain=target_hostname,
+            allowed_domains=allowed_domains,
+        )
+
+    def _is_url_in_scope(self, url: str) -> bool:
+        if not url:
+            return False
+        try:
+            return (
+                not self.host_filter._is_third_party(url)
+                and self.host_filter._is_in_allowed_domains(url)
+                and self.host_filter._is_target_domain(url)
+            )
+        except Exception:
+            return True
 
     def _canonicalize_scan_url(self, url: str) -> str:
         if not url:
@@ -370,19 +390,25 @@ class ScanningEngine:
     def process_endpoint_results(self, responses: List[Dict[str, Any]]):
         """Process and stream endpoint results to file"""
         confirmed = self.state.get("confirmed_vulnerabilities", []) or []
+        new_vulns = []
         
         with open(self.scan_results_file, 'a') as f:
             for response in responses:
+                endpoint = response.get("endpoint") or response.get("url") or ""
+                if not self._is_url_in_scope(endpoint):
+                    logger.debug(f"[SCANNING] Dropping off-scope response: {endpoint}")
+                    continue
                 json.dump(response, f)
                 f.write('\n')  # JSONL format
                 
                 # FIX: Propagate confirmed vulnerabilities to state during scanning
                 if response.get("vulnerable") and response.get("confidence", 0) >= 0.5:
+                    category = response.get("category") or "unknown"
                     vuln = {
-                        "name": f"{response.get('category', 'unknown')} detection",
-                        "endpoint": response.get("endpoint"),
-                        "url": response.get("endpoint"),
-                        "type": response.get("category", "unknown"),
+                        "name": f"{category} detection",
+                        "endpoint": endpoint,
+                        "url": endpoint,
+                        "type": category,
                         "source": "ai_scan",
                         "payload": response.get("payload"),
                         "confidence": response.get("confidence", 0),
@@ -391,29 +417,33 @@ class ScanningEngine:
                         "exploitable": response.get("exploitable", False),
                         "exploit_context": response.get("exploit_context", {})
                     }
-                    confirmed.append(vuln)
-        
+                    new_vulns.append(vuln)
+
         # Update state with propagated vulnerabilities
-        if confirmed:
+        if confirmed or new_vulns:
+            confirmed = self._dedupe_vulnerabilities(confirmed + new_vulns)
             self.state.update(confirmed_vulnerabilities=confirmed)
             # 🔥 FIX: SYNC confirmed_vulnerabilities INTO vulnerabilities
             existing_vulns = self.state.get("vulnerabilities", []) or []
-            deduped = []
-            seen = set()
-            for vuln in existing_vulns + confirmed:
-                key = (
-                    vuln.get("url") or vuln.get("endpoint"),
-                    vuln.get("type"),
-                    vuln.get("payload"),
-                    vuln.get("source"),
-                )
-                if key in seen:
-                    continue
-                seen.add(key)
-                deduped.append(vuln)
-            all_vulns = deduped
+            all_vulns = self._dedupe_vulnerabilities(existing_vulns + confirmed)
             self.state.update(vulnerabilities=all_vulns)
             logger.debug(f"[SCANNING] Synced {len(confirmed)} vulnerabilities to vulnerabilities field")
+
+    def _dedupe_vulnerabilities(self, vulns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        deduped = {}
+        for vuln in vulns:
+            if not isinstance(vuln, dict):
+                continue
+            key = (
+                vuln.get("url") or vuln.get("endpoint"),
+                vuln.get("type") or "unknown",
+                vuln.get("payload"),
+                vuln.get("tool") or vuln.get("source"),
+            )
+            current = deduped.get(key)
+            if current is None or float(vuln.get("confidence", 0) or 0) >= float(current.get("confidence", 0) or 0):
+                deduped[key] = vuln
+        return list(deduped.values())
 
     def _write_manifest(self):
         """Write a lightweight manifest of scanner artifacts for later phases and resume/debug."""
@@ -466,6 +496,9 @@ class ScanningEngine:
 
         if not self._is_valid_url(url):
             logger.warning(f"[SCANNING] Skipping malformed URL: {url[:100]}")
+            return []
+        if not self._is_url_in_scope(url):
+            logger.debug(f"[SCANNING] Skipping off-scope URL: {url}")
             return []
 
         categories = endpoint.get("categories", []) or []
@@ -959,7 +992,23 @@ class ScanningEngine:
                                     if not self._is_waf_blocked(response):
                                         analysis = self.analyze_response(response, safe_baseline, {"value": mutation}, category)
                                         if analysis.get("vulnerable"):
-                                            return {"endpoint": url, "payload": mutation, "vulnerable": True, "confidence": analysis.get("confidence", 0), "param": param_key}
+                                            return {
+                                                "endpoint": url,
+                                                "payload": mutation,
+                                                "method": method,
+                                                "status_code": response.status_code,
+                                                "content_length": len(response.text),
+                                                "response_time": response.elapsed.total_seconds() if hasattr(response, 'elapsed') else 0,
+                                                "baseline_status": safe_baseline.get("status_code", 0),
+                                                "baseline_length": safe_baseline.get("content_length", 0),
+                                                "baseline_time": safe_baseline.get("response_time", 0),
+                                                "category": category,
+                                                "vulnerable": True,
+                                                "confidence": analysis.get("confidence", 0),
+                                                "reason": analysis.get("reason", ""),
+                                                "param": param_key,
+                                                "timestamp": time.time()
+                                            }
                                 except Exception as inner_error:
                                     logger.debug(f"[SCANNING] Parameter payload request failed for {test_url[:100]}: {inner_error}")
                         else:

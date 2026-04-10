@@ -241,6 +241,17 @@ class ChainPlanner:
 
     # ─── AI-POWERED PLANNING METHODS ──────────────────────────────────────────────
 
+    def _get_planning_vulnerabilities(self, include_detected: bool = False) -> List[Dict[str, Any]]:
+        verified = self.state.get("verified_vulnerabilities", []) or []
+        if verified:
+            return verified
+        confirmed = self.state.get("confirmed_vulnerabilities", []) or []
+        if confirmed:
+            return confirmed
+        if include_detected:
+            return self.state.get("vulnerabilities", []) or []
+        return []
+
     def _infer_capabilities(self) -> List[str]:
         """Infer what actions are possible based on discovered vulnerabilities.
         
@@ -252,14 +263,14 @@ class ChainPlanner:
             List of capability strings (e.g., ['sql_injection', 'file_upload', 'http_request'])
         """
         caps = []
-        vulns = self.state.get("confirmed_vulnerabilities", []) or []
+        vulns = self._get_planning_vulnerabilities()
         hints = self.state.get("vulnerability_hints", []) or []
         endpoints = self.state.get("prioritized_endpoints", []) or []
         
         # Check vulnerabilities for capabilities
         for v in vulns:
-            vtype = v.get("type", "").lower()
-            vname = v.get("name", "").lower()
+            vtype = str(v.get("type") or "").lower()
+            vname = str(v.get("name") or "").lower()
             vuln_text = f"{vtype} {vname}"
             
             if "sql" in vuln_text or "sqli" in vuln_text:
@@ -283,7 +294,7 @@ class ChainPlanner:
         
         # Check vulnerability hints
         for hint in hints:
-            hint_lower = hint.lower()
+            hint_lower = str(hint or "").lower()
             if "upload" in hint_lower:
                 caps.append("file_upload")
             if "sqli" in hint_lower or "sql" in hint_lower:
@@ -374,7 +385,7 @@ class ChainPlanner:
                 })
         
         # Build vulnerabilities summary
-        vulns = self.state.get("confirmed_vulnerabilities", []) or []
+        vulns = self._get_planning_vulnerabilities()
         vuln_summary = []
         for v in vulns[:15]:  # Limit to top 15
             if isinstance(v, dict):
@@ -629,7 +640,7 @@ Return ONLY valid JSON."""
 
     def _has_minimum_chain_evidence(self) -> bool:
         """Require some concrete signal before generating high-impact exploit chains."""
-        confirmed_vulns = self.state.get("confirmed_vulnerabilities", []) or []
+        confirmed_vulns = self._get_planning_vulnerabilities()
         wp_vulns = self.state.get("wp_vulnerabilities", []) or self.state.get("wp_vulns", []) or []
         conditioned = self.state.get("wp_conditioned_findings", []) or []
         rce_paths = self.state.get("rce_chain_possibilities", []) or []
@@ -1471,7 +1482,7 @@ Return ONLY valid JSON."""
         Output is intentionally procedural for manual testers.
         """
         playbook: List[Dict] = []
-        vulnerabilities = self.state.get("confirmed_vulnerabilities", []) or []
+        vulnerabilities = self._get_planning_vulnerabilities()
         prioritized = self.state.get("prioritized_endpoints", []) or []
         target = self.state.get("target", "")
 
@@ -1669,14 +1680,17 @@ Return ONLY valid JSON."""
             chains.extend(conditioned_wp)
             
             # Vulnerability-specific chains
-            vulns = self.state.get("vulnerabilities", [])
+            vulns = self._get_planning_vulnerabilities(include_detected=True)
             wp_detected = self.state.get("wordpress_detected", False)
             wp_users = self.state.get("wp_users", [])
             wp_plugins = self.state.get("wp_plugins", [])
             endpoints = self.state.get("prioritized_endpoints", [])
             
             # SQLi chains
-            sqli_vulns = [v for v in vulns if "sql" in v.get("name", "").lower() or v.get("type", "") == "SQLI"]
+            sqli_vulns = [
+                v for v in vulns
+                if "sql" in str(v.get("name") or "").lower() or str(v.get("type") or "").upper() == "SQLI"
+            ]
             if sqli_vulns:
                 chains.append(self._build_sqli_chain(sqli_vulns[0]))
             
@@ -1709,7 +1723,10 @@ Return ONLY valid JSON."""
                 chains.append(self._build_lfi_chain(lfi_endpoints[0]))
             
             # XSS chains
-            xss_vulns = [v for v in vulns if "xss" in v.get("name", "").lower() or "cross-site" in v.get("name", "").lower()]
+            xss_vulns = [
+                v for v in vulns
+                if "xss" in str(v.get("name") or "").lower() or "cross-site" in str(v.get("name") or "").lower()
+            ]
             if xss_vulns:
                 chains.append(self._build_xss_chain(xss_vulns[0]))
             
@@ -2433,9 +2450,9 @@ Format each chain as JSON with:
             score += len(targets & available_targets) * 10
             
             # Vulnerability confirmation bonus
-            vulns = self.state.get("vulnerabilities", [])
-            vuln_names = {v.get("name", "").lower() for v in vulns}
-            vuln_types = {v.get("type", "").lower() for v in vulns}
+            vulns = self._get_planning_vulnerabilities(include_detected=True)
+            vuln_names = {str(v.get("name") or "").lower() for v in vulns}
+            vuln_types = {str(v.get("type") or "").lower() for v in vulns}
             all_vuln_text = ' '.join(vuln_names | vuln_types)
             
             chain_text = f"{chain.name} {chain.description}".lower()
@@ -2617,13 +2634,16 @@ Format each chain as JSON with:
             if "WordPress" in prereq and self.state.get("wordpress_detected"):
                 score += 20
             elif "SQLi" in prereq:
-                vulns = self.state.get("vulnerabilities", [])
-                if any("sql" in v.get("name", "").lower() for v in vulns):
+                vulns = self._get_planning_vulnerabilities(include_detected=True)
+                if any("sql" in str(v.get("name") or "").lower() for v in vulns):
                     score += 15
             elif "authenticated" in prereq:
                 # Assume if we have session or login vulns, higher likelihood
-                vulns = self.state.get("vulnerabilities", [])
-                if any("auth" in v.get("name", "").lower() or "login" in v.get("name", "").lower() for v in vulns):
+                vulns = self._get_planning_vulnerabilities(include_detected=True)
+                if any(
+                    "auth" in str(v.get("name") or "").lower() or "login" in str(v.get("name") or "").lower()
+                    for v in vulns
+                ):
                     score += 10
             elif "file_upload" in prereq:
                 endpoints = self.state.get("prioritized_endpoints", [])
@@ -2671,8 +2691,8 @@ Format each chain as JSON with:
                 if not self.state.get("wordpress_detected"):
                     return False
             elif "SQLi" in prereq:
-                vulns = self.state.get("vulnerabilities", [])
-                if not any("sql" in v.get("name", "").lower() for v in vulns):
+                vulns = self._get_planning_vulnerabilities(include_detected=True)
+                if not any("sql" in str(v.get("name") or "").lower() for v in vulns):
                     return False
             # Add more checks as needed
         return True
@@ -3109,7 +3129,7 @@ Format each chain as JSON with:
         """Detect exploit chain patterns from endpoints and vulns"""
         chains = []
         endpoints = self.state.get("prioritized_endpoints", [])
-        vulns = self.state.get("vulnerabilities", [])
+        vulns = self._get_planning_vulnerabilities(include_detected=True)
 
         # Pattern: Upload + Admin = RCE
         upload_eps = [e for e in endpoints if "upload" in e.get("categories", [])]
@@ -3118,12 +3138,15 @@ Format each chain as JSON with:
             chains.append(self._build_upload_admin_chain(upload_eps[0], admin_eps[0]))
 
         # Pattern: Auth bypass + Admin access
-        auth_vulns = [v for v in vulns if "auth" in v.get("name", "").lower() or "bypass" in v.get("name", "").lower()]
+        auth_vulns = [
+            v for v in vulns
+            if "auth" in str(v.get("name") or "").lower() or "bypass" in str(v.get("name") or "").lower()
+        ]
         if auth_vulns and admin_eps:
             chains.append(self._build_auth_bypass_chain(auth_vulns[0], admin_eps[0]))
 
         # Pattern: LFI + Log poisoning
-        lfi_vulns = [v for v in vulns if "lfi" in v.get("name", "").lower()]
+        lfi_vulns = [v for v in vulns if "lfi" in str(v.get("name") or "").lower()]
         if lfi_vulns:
             chains.append(self._build_lfi_log_poison_chain(lfi_vulns[0]))
 

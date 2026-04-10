@@ -1,0 +1,21 @@
+{
+  "name": "ai-recon-agent",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/phungthanhloan1996/ai-recon-agent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/phungthanhloan1996/ai-recon-agent/issues"
+  },
+  "homepage": "https://github.com/phungthanhloan1996/ai-recon-agent#readme"
+}

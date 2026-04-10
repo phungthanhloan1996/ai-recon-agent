@@ -68,7 +68,7 @@ class AttackGraph:
         # Use safe dictionary access to prevent KeyError
         if vuln_data is None:
             vuln_data = {}
-        endpoint = vuln_data.get('endpoint', 'unknown_endpoint')
+        endpoint = vuln_data.get('endpoint') or vuln_data.get('url') or 'unknown_endpoint'
         vuln_type = vuln_data.get('type') or 'unknown_type'
         vuln_id = f"{endpoint}_{vuln_type}_{hash(str(vuln_data))}"
 
@@ -106,11 +106,13 @@ class AttackGraph:
 
     def build_from_vulnerabilities(self, vulnerabilities: List[Dict[str, Any]]):
         """Build attack graph from list of vulnerabilities"""
+        self.reset_dedup_state()
         # Add all vulnerabilities as nodes
         vuln_ids = []
         for vuln in vulnerabilities:
-            vuln_id = self.add_vulnerability(vuln)
-            vuln_ids.append(vuln_id)
+            vuln_id = self.add_vulnerability_with_dedup(vuln)
+            if vuln_id:
+                vuln_ids.append(vuln_id)
 
         # Build relationships based on vulnerability patterns
         self._build_relationships(vuln_ids)
@@ -290,9 +292,7 @@ class AttackGraph:
         if vuln_data is None:
             return ("unknown_host", "/", "unknown")
         
-        endpoint = vuln_data.get('endpoint')
-        if endpoint is None:
-            endpoint = ''
+        endpoint = vuln_data.get('endpoint') or vuln_data.get('url') or ''
         
         vuln_type = vuln_data.get('type')
         if vuln_type is None:
@@ -323,7 +323,7 @@ class AttackGraph:
         if vuln_data is None:
             return False
         signature = self._get_endpoint_signature(vuln_data)
-        vuln_type = vuln_data.get('type', 'unknown').lower()
+        vuln_type = str(vuln_data.get('type') or 'unknown').lower()
         
         # Check if exact signature already exists
         if signature in self._added_endpoint_types:
@@ -384,7 +384,7 @@ class AttackGraph:
         signature = self._get_endpoint_signature(vuln_data)
         self._added_endpoint_types.add(signature)
         
-        vuln_type = vuln_data.get('type', 'unknown').lower()
+        vuln_type = str(vuln_data.get('type') or 'unknown').lower()
         self._endpoint_type_counts[vuln_type] = self._endpoint_type_counts.get(vuln_type, 0) + 1
         
         logger.debug(f"[GRAPH] Added vulnerability (type counts: {self._endpoint_type_counts})")

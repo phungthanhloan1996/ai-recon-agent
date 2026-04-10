@@ -47,6 +47,8 @@ class ScanState:
     # Phase 5 - Vulnerabilities & Findings
     vulnerabilities: List[Dict] = field(default_factory=list)
     confirmed_vulnerabilities: List[Dict] = field(default_factory=list)
+    verified_vulnerabilities: List[Dict] = field(default_factory=list)
+    verification_stats: Dict[str, Any] = field(default_factory=dict)
     scan_responses: List[Dict] = field(default_factory=list)
     scan_metadata: Dict[str, Any] = field(default_factory=dict)
     
@@ -71,6 +73,7 @@ class ScanState:
 
     # Phase 7 - Exploit results
     exploit_chains: List[Dict] = field(default_factory=list)
+    exploit_recipes: List[Dict] = field(default_factory=list)
     exploit_results: List[Dict] = field(default_factory=list)
     external_findings: List[Dict] = field(default_factory=list)
     mutated_payloads: List[Any] = field(default_factory=list)
@@ -397,4 +400,3 @@ class StateManager:
             "wordpress": s.wordpress_detected,
             "wp_plugins": len(s.wp_plugins),
         }
-

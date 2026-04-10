@@ -3589,6 +3589,134 @@ class ReconAgent:
                         merged[key] = normalized
         return list(merged.values())
 
+    def _normalize_exploit_context(self, vuln):
+        normalized = self._normalize_vulnerability_record(vuln)
+        if not normalized:
+            return None
+
+        endpoint = normalized.get("endpoint") or normalized.get("url") or ""
+        exploit_context = dict(normalized.get("exploit_context") or {})
+        exploit_context.setdefault("target_url", endpoint)
+        exploit_context.setdefault("tool", normalized.get("tool") or normalized.get("source") or "")
+        exploit_context.setdefault("auth_role", normalized.get("auth_role", "anonymous"))
+        if normalized.get("parameter"):
+            exploit_context.setdefault("parameter", normalized.get("parameter"))
+        if normalized.get("payload"):
+            exploit_context.setdefault("payload", normalized.get("payload"))
+
+        normalized["endpoint"] = endpoint
+        normalized["url"] = endpoint
+        normalized["exploit_context"] = exploit_context
+        normalized["verified"] = bool(normalized.get("verified"))
+        normalized["exploitable"] = bool(normalized.get("exploitable") or normalized.get("verified"))
+        return normalized
+
+    def _ensure_verified_findings(self):
+        verified = self.state.get("verified_vulnerabilities", []) or []
+        verification_stats = self.state.get("verification_stats", {}) or {}
+        if verified or verification_stats.get("total"):
+            return verified
+
+        candidates = (
+            self.state.get("confirmed_vulnerabilities", []) or
+            self.state.get("vulnerabilities", []) or
+            []
+        )
+        if not candidates:
+            return []
+
+        try:
+            self.logger.info(f"[VERIFY] Pre-validating {len(candidates)} findings for exploitation readiness")
+            self.exploit_verifier.verify_vulnerabilities(candidates)
+        except Exception as e:
+            self.logger.warning(f"[VERIFY] Pre-validation failed: {e}")
+
+        return self.state.get("verified_vulnerabilities", []) or []
+
+    def _get_exploitation_findings(self):
+        preferred = self.state.get("verified_vulnerabilities", []) or []
+        if preferred:
+            normalized = [self._normalize_exploit_context(v) for v in preferred]
+            return [v for v in normalized if v and (v.get("verified") or v.get("exploitable"))]
+
+        fallback = (
+            self.state.get("confirmed_vulnerabilities", []) or
+            self.state.get("vulnerabilities", []) or
+            []
+        )
+        normalized = [self._normalize_exploit_context(v) for v in fallback]
+        return [v for v in normalized if v]
+
+    def _chain_matches_verified_context(self, chain, findings):
+        chain_name = (chain.get("name", "") or "").lower()
+        steps = chain.get("steps", []) or []
+        for finding in findings:
+            endpoint = str(finding.get("endpoint") or "").lower()
+            vuln_type = str(finding.get("type") or "").lower()
+            if vuln_type and vuln_type in chain_name:
+                return True
+            for step in steps:
+                step_text = " ".join([
+                    str(step.get("name", "")),
+                    str(step.get("action", "")),
+                    str(step.get("target", "")),
+                    str(step.get("payload", "")),
+                ]).lower()
+                if endpoint and endpoint in step_text:
+                    return True
+                if vuln_type and vuln_type in step_text:
+                    return True
+        return False
+
+    def _build_exploit_recipes(self, chains, findings):
+        recipes = []
+        for idx, chain in enumerate(chains, 1):
+            chain_name = chain.get("name", "") or f"Chain-{idx}"
+            matched_findings = [f for f in findings if self._chain_matches_verified_context(chain, [f])]
+            recipe_id = f"recipe_{idx}_{abs(hash(chain_name))}"
+            recipes.append({
+                "recipe_id": recipe_id,
+                "chain_name": chain_name,
+                "description": chain.get("description", ""),
+                "risk_level": chain.get("risk_level", chain.get("risk", "MEDIUM")),
+                "execution_mode": "verified_only" if matched_findings else "manual_review",
+                "preconditions": [
+                    {
+                        "endpoint": f.get("endpoint"),
+                        "vuln_type": f.get("type"),
+                        "verified": f.get("verified", False),
+                        "confidence": f.get("verification_confidence", f.get("confidence", 0)),
+                        "auth_role": (f.get("exploit_context") or {}).get("auth_role", f.get("auth_role", "anonymous")),
+                    }
+                    for f in matched_findings
+                ],
+                "steps": [
+                    {
+                        "order": step_idx,
+                        "name": step.get("name", ""),
+                        "action": step.get("action", ""),
+                        "target": step.get("target", ""),
+                        "tool": step.get("tool", ""),
+                        "payload": step.get("payload", ""),
+                        "success_indicator": step.get("success_indicator", ""),
+                    }
+                    for step_idx, step in enumerate(chain.get("steps", []) or [], 1)
+                ],
+                "replay_hints": {
+                    "requires_verification": not bool(matched_findings),
+                    "verified_finding_count": len(matched_findings),
+                    "recommended_basis": [
+                        {
+                            "endpoint": f.get("endpoint"),
+                            "vuln_type": f.get("type"),
+                            "evidence": str(f.get("evidence", ""))[:200],
+                        }
+                        for f in matched_findings[:5]
+                    ],
+                },
+            })
+        return recipes
+
     def _run_scanning_phase(self):
         before = len(self.state.get("confirmed_vulnerabilities", []))
 
@@ -3791,16 +3919,36 @@ class ReconAgent:
         existing_confirmed = self.state.get("confirmed_vulnerabilities", []) or []
         existing_detected = self.state.get("vulnerabilities", []) or []
         parsed_vulnerabilities = []
+        allowed_domains = self.state.get("allowed_domains", []) or []
+        try:
+            from core.host_filter import HostFilter
+            target_hostname = urlparse(self.target).hostname if getattr(self, "target", None) else None
+            response_host_filter = HostFilter(
+                skip_dev_test=True,
+                target_domain=target_hostname,
+                allowed_domains=allowed_domains,
+            )
+        except Exception:
+            response_host_filter = None
         for response in responses:
+            endpoint = response.get("endpoint") or response.get("url") or ""
+            if response_host_filter and (
+                response_host_filter._is_third_party(endpoint)
+                or not response_host_filter._is_in_allowed_domains(endpoint)
+                or not response_host_filter._is_target_domain(endpoint)
+            ):
+                self.logger.debug(f"[ANALYSIS] Skipping off-scope scan response: {endpoint}")
+                continue
             if response.get("vulnerable"):
                 confidence = self._confidence_value(response.get("confidence", 0), 0.0)
                 severity = "CRITICAL" if confidence >= 0.9 else "HIGH" if confidence >= 0.75 else "MEDIUM"
                 requires_manual = severity in ("CRITICAL", "HIGH")
+                category = response.get("category") or "unknown"
                 vuln = {
-                    "name": f"{response.get('category', 'unknown')} finding",
-                    "endpoint": response.get("endpoint"),
-                    "url": response.get("endpoint"),
-                    "type": response.get("category"),
+                    "name": f"{category} finding",
+                    "endpoint": endpoint,
+                    "url": endpoint,
+                    "type": category,
                     "severity": severity,
                     "payload": response.get("payload"),
                     "confidence": confidence,
@@ -4551,7 +4699,8 @@ class ReconAgent:
     def _run_attack_graph_phase(self, attack_graph: AttackGraph):
         self.phase_detail = "[GRAPH] Building attack graph from vulnerabilities..."
         self._update_display()
-        confirmed = self.state.get("confirmed_vulnerabilities", [])
+        self._ensure_verified_findings()
+        confirmed = self._get_exploitation_findings()
         wp_vulns = self.state.get("wp_vulnerabilities", []) or []
 
         vulnerabilities = list(confirmed)
@@ -4686,6 +4835,7 @@ class ReconAgent:
     def _run_chain_planning_phase(self, attack_graph: AttackGraph):
         self.phase_detail = "[CHAINS] Planning attack chains..."
         self._update_display()
+        verified_findings = self._ensure_verified_findings()
         
         # ========== PROCESS CONDITIONED FINDINGS ==========
         # 1. Xử lý conditioned findings từ WordPress
@@ -4791,11 +4941,17 @@ class ReconAgent:
                         ],
                     }
                 )
+        exploit_basis = self._get_exploitation_findings()
+        exploit_recipes = self._build_exploit_recipes(serializable_chains, exploit_basis)
         self.state.update(exploit_chains=serializable_chains)
+        self.state.update(exploit_recipes=exploit_recipes)
         self.state.update(manual_attack_playbook=manual_playbook)
         playbook_file = os.path.join(self.output_dir, "manual_attack_playbook.json")
         with open(playbook_file, "w") as f:
             json.dump(manual_playbook, f, indent=2)
+        recipes_file = os.path.join(self.output_dir, "exploit_recipes.json")
+        with open(recipes_file, "w") as f:
+            json.dump(exploit_recipes, f, indent=2)
         if chains:
             self.last_action = f"chains: {len(chains)} attack paths"
             self.phase_detail = f"[CHAINS] Generated {len(chains)} attack chain(s)"
@@ -4809,10 +4965,21 @@ class ReconAgent:
     def _run_exploit_phase(self):
         self.phase_detail = "[EXPLOIT] Testing attack chains for exploitation..."
         self._update_display()
+        verified_findings = self._ensure_verified_findings()
         chains = self.state.get("exploit_chains", [])
+        recipes = self.state.get("exploit_recipes", []) or []
         if chains:
             results = []
             exploited_count = 0
+            if verified_findings and recipes:
+                verified_chain_names = {
+                    recipe.get("chain_name")
+                    for recipe in recipes
+                    if recipe.get("execution_mode") == "verified_only" and recipe.get("preconditions")
+                }
+                gated_chains = [c for c in chains if c.get("name") in verified_chain_names]
+                if gated_chains:
+                    chains = gated_chains
             
             # FIX: Test ALL chains (not just first 3) for deeper exploitation
             # Also increased limit to test more chains for comprehensive coverage
