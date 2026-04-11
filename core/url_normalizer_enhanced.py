@@ -1,3 +1,4 @@
+import urllib.parse
 """
 core/url_normalizer_enhanced.py - Enhanced URL Normalization
 Comprehensive URL validation, scheme handling, and redirect following
@@ -31,7 +32,12 @@ class URLNormalizer:
     }
 
     @staticmethod
-    def normalize(url: str, follow_redirects: bool = True, timeout: int = 5) -> Tuple[str, bool, str]:
+    def normalize(
+        url: str,
+        follow_redirects: bool = True,
+        timeout: int = 5,
+        check_alive: bool = True,
+    ) -> Tuple[str, bool, str]:
         """
         Normalize URL to valid scheme://domain format
         
@@ -53,7 +59,7 @@ class URLNormalizer:
 
         # Step 2: Parse and validate
         try:
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
         except Exception as e:
             return "", False, f"Failed to parse URL: {str(e)[:30]}"
 
@@ -79,13 +85,39 @@ class URLNormalizer:
                 if len(redirect_chain) > 1:
                     logger.info(f"Followed {len(redirect_chain)-1} redirect(s): {' -> '.join(redirect_chain[:3])}")
 
-        # Step 7: Validate final URL works (skip for local URLs)
-        if not is_local:
+        # Step 7: Validate final URL works when explicitly requested (skip for local URLs)
+        if check_alive and not is_local:
             is_alive = URLNormalizer._check_url_alive(base_url, timeout)
             if not is_alive:
                 return "", False, f"URL does not respond: {base_url}"
 
         return base_url, True, ""
+
+    @staticmethod
+    def check_reachable(url: str, timeout: int = 5) -> Tuple[bool, str]:
+        """
+        Soft reachability check used by the agent.
+        This must never be used as a URL validity gate.
+        """
+        if not url:
+            return False, "Invalid URL: empty"
+
+        try:
+            parsed = urllib.parse.urlparse(url)
+        except Exception as e:
+            return False, f"Failed to parse URL: {str(e)[:30]}"
+
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            return False, "Missing scheme or domain"
+
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        if URLNormalizer._is_local_url(base_url):
+            return True, ""
+
+        if URLNormalizer._check_url_alive(base_url, timeout):
+            return True, ""
+
+        return False, f"URL does not respond: {base_url}"
 
     @staticmethod
     def normalize_endpoint(base_url: str, path: str) -> str:
@@ -162,7 +194,7 @@ class URLNormalizer:
         
         # Extract hostname from URL
         try:
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             netloc = parsed.netloc.split(':')[0].lower()  # Remove port
         except Exception:
             return False
@@ -201,7 +233,7 @@ class URLNormalizer:
                     if location:
                         # Handle relative redirects
                         if location.startswith('/'):
-                            parsed = urlparse(current)
+                            parsed = urllib.parse.urlparse(current)
                             location = f"{parsed.scheme}://{parsed.netloc}{location}"
                         
                         redirect_chain.append(location)

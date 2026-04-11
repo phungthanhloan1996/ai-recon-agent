@@ -1,3 +1,4 @@
+import urllib.parse
 """
 modules/false_positive_filter.py - False Positive Filter
 
@@ -336,7 +337,7 @@ class FalsePositiveFilter:
         
         # Static file extensions (unlikely to be vulnerable)
         static_extensions = {'.css', '.js', '.png', '.jpg', '.jpeg', '.gif', '.ico', '.woff', '.woff2', '.ttf', '.svg', '.map'}
-        parsed = urlparse(endpoint)
+        parsed = urllib.parse.urlparse(endpoint)
         path = parsed.path.lower()
         
         if any(path.endswith(ext) for ext in static_extensions):

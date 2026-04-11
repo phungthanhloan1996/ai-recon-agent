@@ -40,15 +40,31 @@ class ReportGenerator:
 
     def _generate_json_report(self):
         """Generate structured JSON report"""
-        # FILTER: Only include high-confidence vulnerabilities
-        all_vulns = self.state.get("vulnerabilities", [])
+        # FILTER: confirmed/verified vulnerabilities only
+        all_vulns = self._merged_vulnerabilities()
         valid_vulns = [v for v in all_vulns if self._confidence_sort_value(v.get('confidence', 0)) >= 0.5]
+        unique_vulnerable_endpoints = {
+            str(v.get("url") or v.get("endpoint") or "").strip()
+            for v in valid_vulns
+            if str(v.get("url") or v.get("endpoint") or "").strip()
+        }
         
         logger.info(f"[REPORT] Filtering: {len(all_vulns)} → {len(valid_vulns)} valid vulns")
         
-        # Build summary with FILTERED vulns
+        # Build summary from the canonical deduped set used by the human-readable report.
         summary = self._build_summary()
-        summary["vulnerabilities_found"] = len(valid_vulns)  # Override with filtered count
+        risk_level = self._calculate_risk_level(summary)
+        risk_assessment = {
+            "overall_risk_level": risk_level,
+            "basis": {
+                "confirmed_vulnerabilities": int(summary.get("confirmed_vulns", 0) or 0),
+                "verified_vulnerabilities": int(summary.get("verified_vulns", 0) or 0),
+                "critical_vulnerabilities": int(summary.get("critical_vulns", 0) or 0),
+                "high_vulnerabilities": int(summary.get("high_vulns", 0) or 0),
+                "attack_surface_signals": int(summary.get("signals_observed", 0) or 0),
+                "candidate_chains": int(summary.get("exploit_chains_planned", 0) or 0),
+            },
+        }
         
         report_data = {
             "assessment_info": {
@@ -72,20 +88,33 @@ class ReportGenerator:
             "attack_surface": {
                 "total_endpoints": len(self.state.get("endpoints", [])),
                 "prioritized_endpoints": len(self.state.get("prioritized_endpoints", [])),
-                "vulnerable_endpoints": len(valid_vulns),
+                "signals_observed": len(self.state.get("security_findings", []) or []),
+                "vulnerable_endpoints": len(unique_vulnerable_endpoints),
                 "attack_chains": len(self.state.get("exploit_chains", []))
             },
+            "candidate_chains": self._format_chains_for_json(),
+            "confirmed_vulnerabilities": valid_vulns,
+            "risk_assessment": risk_assessment,
             "technical_details": {
-                "scan_responses": len(self.state.get("scan_responses", [])),
+                "scan_responses": max(
+                    len(self.state.get("scan_responses", [])),
+                    int(((self.state.get("scan_metadata", {}) or {}).get("scan_responses_count", 0) or 0)),
+                ),
                 "iterations_performed": getattr(self.state, 'iteration_count', 1),
                 "learning_data": self._get_learning_summary(),
                 "manual_validation": {
-                    "pending": self.state.get("manual_validation_required", []),
-                    "completed": self.state.get("manual_validation_completed", [])
+                    "pending": self._dedupe_records_by_fields(
+                        self.state.get("manual_validation_required", []) or [],
+                        ["endpoint", "type", "severity", "status"],
+                    ),
+                    "completed": self._dedupe_records_by_fields(
+                        self.state.get("manual_validation_completed", []) or [],
+                        ["endpoint", "type", "severity", "status"],
+                    ),
                 },
                 "manual_attack_playbook": self.state.get("manual_attack_playbook", []),
                 "wordpress_advanced_scan": self.state.get("technical_details", {}).get("wordpress_advanced_scan", {})
-            }
+            },
         }
 
         with open(self.json_file, 'w') as f:
@@ -162,36 +191,28 @@ class ReportGenerator:
 
         # Write to file
         with open(self.report_file, 'w') as f:
-            f.write('\n'.join(lines))
+            f.write('\n'.join(self._coerce_markdown_lines(lines)))
 
     def _build_summary(self) -> Dict[str, Any]:
         """Build summary statistics"""
-        vulns = self.state.get("confirmed_vulnerabilities", [])
+        confirmed_vulns = self._dedupe_vulnerabilities(self.state.get("confirmed_vulnerabilities", []) or [])
+        verified_vulns = self._dedupe_vulnerabilities(self.state.get("verified_vulnerabilities", []) or [])
+        verified_only_vulns = self._subtract_vulnerability_sets(verified_vulns, confirmed_vulns)
         chains = self.state.get("exploit_chains", [])
         endpoints = self.state.get("prioritized_endpoints", [])
-        all_vulns = self.state.get("vulnerabilities", []) or []
-        merged_vulns = []
-        seen = set()
-        for vuln in (vulns or []) + all_vulns:
-            key = (
-                vuln.get("url") or vuln.get("endpoint"),
-                vuln.get("type"),
-                vuln.get("payload"),
-                vuln.get("source"),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            merged_vulns.append(vuln)
+        merged_vulns = self._dedupe_vulnerabilities(confirmed_vulns + verified_only_vulns)
 
         return {
             "subdomains_discovered": len(self.state.get("subdomains", [])),
             "live_hosts_found": len(self.state.get("live_hosts", [])),
             "endpoints_analyzed": len(endpoints),
+            "signals_observed": len(self.state.get("security_findings", []) or []),
             "vulnerabilities_found": len(merged_vulns),
+            "confirmed_vulns": len(confirmed_vulns),
+            "verified_vulns": len(verified_only_vulns),
             "exploit_chains_planned": len(chains),
-            "critical_vulns": len([v for v in vulns if v.get("severity") == "CRITICAL"]),
-            "high_vulns": len([v for v in vulns if v.get("severity") == "HIGH"]),
+            "critical_vulns": len([v for v in merged_vulns if v.get("severity") == "CRITICAL"]),
+            "high_vulns": len([v for v in merged_vulns if v.get("severity") == "HIGH"]),
             "successful_exploits": len(self._meaningful_successful_exploits())
         }
 
@@ -227,15 +248,19 @@ class ReportGenerator:
             f"| Subdomains Discovered | {summary['subdomains_discovered']} |",
             f"| Live Hosts Found | {summary['live_hosts_found']} |",
             f"| Endpoints Analyzed | {summary['endpoints_analyzed']} |",
+            f"| Attack Surface Signals | {summary['signals_observed']} |",
             f"| Vulnerabilities Found | {summary['vulnerabilities_found']} |",
             f"| Exploit Chains Planned | {summary['exploit_chains_planned']} |",
             f"| Successful Exploits | {summary['successful_exploits']} |",
             "",
             "### Risk Assessment",
             "",
+            f"- **Confirmed Vulnerabilities:** {summary['confirmed_vulns']}",
+            f"- **Verified Vulnerabilities:** {summary['verified_vulns']}",
             f"- **Critical Vulnerabilities:** {summary['critical_vulns']}",
             f"- **High-Risk Vulnerabilities:** {summary['high_vulns']}",
-            f"- **Attack Vectors Identified:** {summary['exploit_chains_planned']}",
+            f"- **Candidate Chains Identified:** {summary['exploit_chains_planned']}",
+            f"- **Attack Surface Signals (non-vuln):** {summary['signals_observed']}",
             "",
             f"**Overall Risk Level:** {self._calculate_risk_level(summary)}",
             ""
@@ -274,16 +299,19 @@ class ReportGenerator:
         security_findings = self.state.get("security_findings", []) or []
         rce_chains = self.state.get("rce_chain_possibilities", []) or []
 
-        lines.append("### Security Findings (Non-CVE)")
+        lines.append("### Attack Surface Signals / Exposures (Non-Vulnerability)")
         if security_findings:
             for idx, f in enumerate(security_findings, 1):
                 title = f.get("title", f.get("type", "Unknown"))
                 endpoint = f.get("endpoint", "")
                 evidence = (f.get("evidence", "") or "").strip()
                 severity = f.get("severity", "INFO")
+                signal_type = f.get("signal_type", "")
                 lines.extend([
                     f"**{idx}. {title}**",
-                    f"- **Severity:** {severity}",
+                    f"- **Type:** {f.get('type', 'signal')}",
+                    f"- **Signal:** {signal_type or 'n/a'}",
+                    f"- **Severity:** {severity} (surface/signal only)",
                     f"- **Endpoint:** {endpoint}",
                     f"- **Evidence:** {evidence[:2000]}",
                     "",
@@ -317,13 +345,15 @@ class ReportGenerator:
     def _build_findings_section(self) -> List[str]:
         """Build critical findings section"""
         lines = [
-            "## 🚨 CRITICAL FINDINGS",
+            "## 🚨 CONFIRMED VULNERABILITIES",
             ""
         ]
 
-        vulns = self.state.get("confirmed_vulnerabilities", [])
+        confirmed = self.state.get("confirmed_vulnerabilities", []) or []
+        verified = self.state.get("verified_vulnerabilities", []) or []
+        vulns = self._dedupe_vulnerabilities(confirmed + verified)
         if not vulns:
-            lines.append("No critical vulnerabilities found.")
+            lines.append("No confirmed/verified vulnerabilities found.")
             return lines
 
         for i, vuln in enumerate(vulns, 1):
@@ -345,18 +375,10 @@ class ReportGenerator:
         """Build section for high-potential findings that need manual verification"""
         lines = ["## 🎯 HIGH-POTENTIAL FINDINGS", "", "*These findings have high exploit potential but require manual verification. Prioritize these for manual testing.*", ""]
         high_potential = []
-        vulns = self.state.get("vulnerabilities", [])
+        vulns = self._merged_vulnerabilities()
         for v in vulns:
             if self._confidence_sort_value(v.get("confidence", 0)) >= 0.7 and not v.get("confirmed", False):
                 high_potential.append({"source": "vulnerability_scan", "name": v.get("name", "Unknown"), "endpoint": v.get("endpoint", ""), "type": v.get("type", ""), "severity": v.get("severity", "MEDIUM"), "confidence": v.get("confidence", 0), "evidence": v.get("evidence", ""), "manual_steps": v.get("manual_verification_steps", [])})
-        rce_chains = self.state.get("rce_chain_possibilities", [])
-        for c in rce_chains:
-            if c.get("severity") in ["CRITICAL", "HIGH"]:
-                high_potential.append({"source": "rce_chain", "name": c.get("title", "RCE Chain"), "endpoint": c.get("endpoint", ""), "type": "RCE Chain", "severity": c.get("severity", "HIGH"), "confidence": 0.6, "evidence": c.get("evidence", ""), "components": c.get("components", []), "manual_steps": c.get("manual_verification_steps", [])})
-        security_findings = self.state.get("security_findings", [])
-        for f in security_findings:
-            if f.get("severity") in ["CRITICAL", "HIGH"] and f.get("requires_validation", True):
-                high_potential.append({"source": "security_finding", "name": f.get("title", f.get("type", "Unknown")), "endpoint": f.get("endpoint", ""), "type": f.get("type", ""), "severity": f.get("severity", "HIGH"), "confidence": 0.5, "evidence": f.get("evidence", ""), "manual_steps": f.get("manual_verification_steps", [])})
         if not high_potential:
             lines.append("No high-potential findings requiring manual verification.")
             return lines
@@ -470,8 +492,14 @@ class ReportGenerator:
             "## ✅ MANUAL VALIDATION STATUS",
             ""
         ]
-        pending = self.state.get("manual_validation_required", [])
-        completed = self.state.get("manual_validation_completed", [])
+        pending = self._dedupe_records_by_fields(
+            self.state.get("manual_validation_required", []) or [],
+            ["endpoint", "type", "severity", "status"],
+        )
+        completed = self._dedupe_records_by_fields(
+            self.state.get("manual_validation_completed", []) or [],
+            ["endpoint", "type", "severity", "status"],
+        )
 
         if not pending and not completed:
             lines.append("No manual validation items were generated.")
@@ -590,11 +618,11 @@ class ReportGenerator:
 
 
     def _build_security_findings_section(self) -> List[str]:
-        """Build section for security findings (non-CVE)"""
+        """Build section for attack surface signals/exposures (non-CVE, non-vulnerability)."""
         lines = [
-            "## 📋 SECURITY FINDINGS (Non-CVE)",
+            "## 📋 ATTACK SURFACE SIGNALS (Non-CVE, Non-Vulnerability)",
             "",
-            "*These are security observations, misconfigurations, and informational findings that may not have CVEs but indicate security posture issues.*",
+            "*These are signals/exposures and do not count as confirmed vulnerabilities by themselves.*",
             ""
         ]
         
@@ -624,14 +652,16 @@ class ReportGenerator:
         for sev in ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO"]:
             if not by_severity[sev]:
                 continue
-            lines.append(f"### {sev} Severity Findings")
+            lines.append(f"### {sev} Severity Signals")
             lines.append("")
             for i, finding in enumerate(by_severity[sev], 1):
                 title = finding.get("title", finding.get("type", "Unknown"))
                 endpoint = finding.get("endpoint", "")
                 evidence = finding.get("evidence", "")[:200]
+                signal_type = finding.get("signal_type", "")
                 lines.extend([
                     f"**{i}. {title}**",
+                    f"- **Signal Type:** {signal_type or 'n/a'}",
                     f"- **Endpoint:** {endpoint}",
                     f"- **Evidence:** {evidence}",
                     ""
@@ -722,28 +752,29 @@ class ReportGenerator:
 
     def _calculate_risk_level(self, summary: Dict[str, Any]) -> str:
         """Calculate overall risk level"""
-        critical = summary.get('critical_vulns', 0)
-        high = summary.get('high_vulns', 0)
-        chains = summary.get('exploit_chains_planned', 0)
-        pending_manual = self.state.get("manual_validation_required", [])
-        pending_critical = any(item.get("severity") == "CRITICAL" for item in pending_manual)
-        
-        # 🔥 THÊM: RCE chains detection
-        rce_chains = self.state.get("rce_chain_possibilities", [])
-        high_rce_chains = len([c for c in rce_chains if c.get("severity") == "HIGH"])
-        med_rce_chains = len([c for c in rce_chains if c.get("severity") == "MEDIUM"])
-        
-        if pending_critical:
-            return "CRITICAL (PENDING MANUAL VALIDATION)"
+        critical = int(summary.get('critical_vulns', 0) or 0)
+        high = int(summary.get('high_vulns', 0) or 0)
+        confirmed = int(summary.get("confirmed_vulns", 0) or 0)
+        verified = int(summary.get("verified_vulns", 0) or 0)
 
-        if critical > 0 or chains > 3 or high_rce_chains > 0:
+        # Hard guard: no confirmed/verified vulnerabilities => never HIGH/CRITICAL from surface/signals/chains.
+        if confirmed == 0 and verified == 0:
+            validated_misconfig = any(
+                isinstance(f, dict)
+                and f.get("type") == "misconfig"
+                and (f.get("validated") or f.get("requires_validation") is False)
+                and str(f.get("severity", "")).upper() in {"MEDIUM", "HIGH", "CRITICAL"}
+                for f in (self.state.get("security_findings", []) or [])
+            )
+            return "MEDIUM" if validated_misconfig else "LOW"
+
+        if critical > 0:
             return "CRITICAL"
-        elif high > 2 or chains > 1 or med_rce_chains > 2:
+        if high > 1:
             return "HIGH"
-        elif high > 0 or chains > 0 or rce_chains:
+        if high > 0:
             return "MEDIUM"
-        else:
-            return "LOW"
+        return "LOW"
 
     def _format_chains_for_json(self) -> List[Dict[str, Any]]:
         """Format chains for JSON export"""
@@ -802,3 +833,81 @@ class ReportGenerator:
         except (ValueError, TypeError):
             pass
         return 0.0
+
+    def _coerce_markdown_lines(self, lines: List[Any]) -> List[str]:
+        """Flatten nested line fragments and coerce every item to a string."""
+        normalized: List[str] = []
+        for item in lines:
+            if isinstance(item, (list, tuple)):
+                normalized.extend(self._coerce_markdown_lines(list(item)))
+            elif item is None:
+                normalized.append("")
+            elif isinstance(item, dict):
+                normalized.append(json.dumps(item, ensure_ascii=False, default=str))
+            else:
+                normalized.append(str(item))
+        return normalized
+
+    def _merged_vulnerabilities(self) -> List[Dict[str, Any]]:
+        confirmed = self.state.get("confirmed_vulnerabilities", []) or []
+        verified = self.state.get("verified_vulnerabilities", []) or []
+        return self._dedupe_vulnerabilities(confirmed + verified)
+
+    def _dedupe_vulnerabilities(self, vulns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Collapse repeated payload variants of the same finding into one report entry."""
+        deduped: Dict[Any, Dict[str, Any]] = {}
+        ordered_keys: List[Any] = []
+        for vuln in vulns or []:
+            if not isinstance(vuln, dict):
+                continue
+            key = self._vulnerability_key(vuln)
+            current = deduped.get(key)
+            if current is None:
+                deduped[key] = dict(vuln)
+                ordered_keys.append(key)
+                continue
+            keep_new = self._confidence_sort_value(vuln.get("confidence", 0)) > self._confidence_sort_value(current.get("confidence", 0))
+            merged = dict(vuln) if keep_new else dict(current)
+            merged["evidence"] = self._merge_text_values(current.get("evidence"), vuln.get("evidence"))
+            deduped[key] = merged
+        return [deduped[key] for key in ordered_keys]
+
+    def _subtract_vulnerability_sets(self, primary: List[Dict[str, Any]], baseline: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        baseline_keys = {self._vulnerability_key(vuln) for vuln in baseline or [] if isinstance(vuln, dict)}
+        return [
+            vuln for vuln in primary or []
+            if isinstance(vuln, dict) and self._vulnerability_key(vuln) not in baseline_keys
+        ]
+
+    def _vulnerability_key(self, vuln: Dict[str, Any]) -> Any:
+        return (
+            str(vuln.get("url") or vuln.get("endpoint") or "").strip().lower(),
+            str(vuln.get("type") or vuln.get("name") or "").strip().lower(),
+        )
+
+    def _dedupe_records_by_fields(self, records: List[Dict[str, Any]], fields: List[str]) -> List[Dict[str, Any]]:
+        deduped: Dict[Any, Dict[str, Any]] = {}
+        ordered_keys: List[Any] = []
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            key = tuple(str(record.get(field) or "").strip().lower() for field in fields)
+            if key not in deduped:
+                deduped[key] = record
+                ordered_keys.append(key)
+        return [deduped[key] for key in ordered_keys]
+
+    def _merge_text_values(self, left: Any, right: Any) -> str:
+        parts: List[str] = []
+        for value in [left, right]:
+            if value is None:
+                continue
+            if isinstance(value, list):
+                candidates = [str(item).strip() for item in value if str(item).strip()]
+            else:
+                text = str(value).strip()
+                candidates = [text] if text else []
+            for item in candidates:
+                if item not in parts:
+                    parts.append(item)
+        return " | ".join(parts)

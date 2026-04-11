@@ -1,3 +1,4 @@
+import urllib.parse
 """
 core/scan_deduplicator.py - Scan Deduplication Engine
 Tracks what has been scanned to prevent redundant scanning.
@@ -86,7 +87,7 @@ class ScanDeduplicator:
     
     def _generate_url_hash(self, url: str) -> str:
         """Generate a normalized hash for a URL"""
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         # Normalize: lowercase scheme and host, sort query params
         normalized = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}{parsed.path}"
         if parsed.query:
@@ -242,7 +243,7 @@ class ScanDeduplicator:
             host_url = host.get('url', '')
             if not host_url:
                 continue
-            parsed = urlparse(host_url)
+            parsed = urllib.parse.urlparse(host_url)
             hostname = parsed.hostname or parsed.netloc
             
             if not self.is_host_scanned(hostname):
@@ -280,7 +281,7 @@ class ScanDeduplicator:
         Returns:
             True if the URL is a static file, False otherwise
         """
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         path_lower = parsed.path.lower()
         
         # Check file extension
@@ -315,7 +316,7 @@ class ScanDeduplicator:
         Returns:
             True if URL has scanable parameters, False otherwise
         """
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         
         # Check for query parameters
         if parsed.query:
@@ -376,7 +377,7 @@ class ScanDeduplicator:
         if not self.has_scanable_parameters(url):
             return ('low', 'no_parameters')
         
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         path_lower = parsed.path.lower()
         
         # High priority patterns

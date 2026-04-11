@@ -1,3 +1,4 @@
+import urllib.parse
 """
 integrations/sqlmap_runner.py - SQLMap Integration
 Wrapper for SQLMap SQL injection detection and exploitation tool.
@@ -92,6 +93,58 @@ class SQLMapRunner:
         if self.sqlmap_path:
             return os.path.exists(self.sqlmap_path)
         return False
+
+    def _normalize_target_input(self, target: Any, kwargs: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        kwargs = dict(kwargs or {})
+        normalized = {
+            "url": "",
+            "endpoint": "",
+            "params": [],
+            "method": str(kwargs.get("method") or "GET").upper(),
+            "vulnerability_type": kwargs.get("vulnerability_type") or "",
+            "evidence": kwargs.get("evidence") or "",
+            "confidence": kwargs.get("confidence") or 0.0,
+            "source": kwargs.get("source") or "sqlmap_runner",
+            "data": kwargs.get("data"),
+            "headers": kwargs.get("headers"),
+            "cookies": kwargs.get("cookies"),
+        }
+
+        current = target
+        if isinstance(current, list):
+            current = next((item for item in current if isinstance(item, (dict, str))), "")
+        if isinstance(current, dict):
+            normalized["url"] = str(current.get("url") or current.get("endpoint") or "").strip()
+            normalized["endpoint"] = normalized["url"]
+            params = current.get("params") or current.get("parameters") or []
+            if isinstance(params, dict):
+                normalized["params"] = list(params.keys())
+            elif isinstance(params, list):
+                normalized["params"] = [str(item) for item in params]
+            normalized["method"] = str(current.get("method") or normalized["method"]).upper()
+            normalized["vulnerability_type"] = current.get("vulnerability_type") or current.get("type") or normalized["vulnerability_type"]
+            normalized["evidence"] = current.get("evidence") or normalized["evidence"]
+            normalized["confidence"] = current.get("confidence", normalized["confidence"])
+            normalized["source"] = current.get("source") or current.get("tool") or normalized["source"]
+            normalized["data"] = current.get("data") or normalized["data"]
+            normalized["headers"] = current.get("headers") or normalized["headers"]
+            normalized["cookies"] = current.get("cookies") or normalized["cookies"]
+        else:
+            normalized["url"] = str(current or "").strip()
+            normalized["endpoint"] = normalized["url"]
+
+        if normalized["url"] and not normalized["endpoint"]:
+            normalized["endpoint"] = normalized["url"]
+        return normalized
+
+    def _iter_artifact_entries(self, payload: Any):
+        if isinstance(payload, dict):
+            yield payload
+            for value in payload.values():
+                yield from self._iter_artifact_entries(value)
+        elif isinstance(payload, list):
+            for item in payload:
+                yield from self._iter_artifact_entries(item)
     
     def run_sqlmap(
         self,
@@ -126,8 +179,18 @@ class SQLMapRunner:
         Returns:
             Dictionary with SQLMap results
         """
+        target_info = self._normalize_target_input(url, {
+            "data": data,
+            "cookies": cookies,
+            "headers": headers,
+        })
+        url = target_info["url"]
+        data = target_info["data"]
+        cookies = target_info["cookies"]
+        headers = target_info["headers"]
         result = {
             "url": url,
+            "endpoint": target_info["endpoint"],
             "success": False,
             "vulnerable": False,
             "findings": [],
@@ -322,6 +385,12 @@ class SQLMapRunner:
         """
         Run SQLMap and try to get JSON output.
         """
+        target_info = self._normalize_target_input(url, kwargs)
+        url = target_info["url"]
+        kwargs["data"] = target_info["data"]
+        kwargs["cookies"] = target_info["cookies"]
+        kwargs["headers"] = target_info["headers"]
+
         # First run to detect vulnerability
         basic_result = self.run_sqlmap(url, **kwargs)
         parsed_artifact_paths: List[str] = []
@@ -332,7 +401,7 @@ class SQLMapRunner:
         # Try to get more detailed results from JSON output
         try:
             # SQLMap stores results in ~/.local/share/sqlmap/output/
-            parsed_url = urlparse(url)
+            parsed_url = urllib.parse.urlparse(url)
             hostname = parsed_url.hostname or "unknown"
             
             # FIXED: Correct output directories
@@ -372,15 +441,12 @@ class SQLMapRunner:
                                     if file.endswith('.json'):
                                         try:
                                             json_data = json.loads(content)
-                                            if isinstance(json_data, dict):
-                                                if json_data.get("vulnerable"):
+                                            for entry in self._iter_artifact_entries(json_data):
+                                                if not isinstance(entry, dict):
+                                                    continue
+                                                if entry.get("vulnerable"):
                                                     basic_result["vulnerable"] = True
-                                                    basic_result["findings"].append(json_data)
-                                            elif isinstance(json_data, list):
-                                                for entry in json_data:
-                                                    if entry.get("vulnerable"):
-                                                        basic_result["vulnerable"] = True
-                                                        basic_result["findings"].append(entry)
+                                                    basic_result["findings"].append(entry)
                                         except json.JSONDecodeError:
                                             pass
                                     
@@ -439,7 +505,7 @@ class SQLMapRunner:
         url: str,
         params: List[str] = None,
         timeout: int = 60
-    ) -> List[Dict[str, Any]]:
+    ) -> Dict[str, Any]:
         """
         Quick SQLi test for specific parameters.
         
@@ -449,12 +515,19 @@ class SQLMapRunner:
             timeout: Timeout in seconds
             
         Returns:
-            List of findings
+            Summary dictionary for the first confirmed SQLi, or a non-vulnerable summary.
         """
-        findings = []
+        quick_result = {
+            "url": url,
+            "vulnerable": False,
+            "details": "",
+            "findings": [],
+            "tested_params": [],
+            "dbms": None,
+        }
         
         if not self.is_sqlmap_available():
-            return findings
+            return quick_result
         
         if not params:
             # Try to detect parameters from URL
@@ -465,21 +538,26 @@ class SQLMapRunner:
         
         for param in params[:5]:  # Limit to 5 parameters
             try:
+                quick_result["tested_params"].append(param)
                 result = self.run_sqlmap(
                     url=url,
                     level=2,
                     risk=1,
                     timeout=timeout,
-                    additional_args=["--param", param]
+                    additional_args=["-p", param]
                 )
                 
                 if result["vulnerable"]:
-                    findings.extend(result["findings"])
+                    quick_result["vulnerable"] = True
+                    quick_result["findings"] = result.get("findings", [])
+                    quick_result["details"] = result.get("evidence") or result.get("output", "")[:500]
+                    quick_result["dbms"] = result.get("dbms")
+                    return quick_result
                     
             except Exception as e:
                 logger.debug(f"[SQLMAP] Error testing param {param}: {e}")
         
-        return findings
+        return quick_result
     
     def dump_database(
         self,

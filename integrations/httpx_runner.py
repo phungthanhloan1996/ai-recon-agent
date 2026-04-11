@@ -13,6 +13,14 @@ from pathlib import Path
 logger = logging.getLogger("recon.httpx")
 
 
+def _decode_output(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value)
+
+
 class HttpxRunner:
     """Run httpx for fast HTTP probing - optimized for live host detection"""
 
@@ -160,17 +168,17 @@ class HttpxRunner:
             input_data = "\n".join(targets)
             result = subprocess.run(
                 cmd,
-                input=input_data,
+                input=input_data.encode("utf-8"),
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=max(timeout * len(targets) // threads + 30, 300)  # Adaptive timeout
             )
 
             if result.returncode == 0:
-                results = self._parse_json_output(result.stdout)
+                results = self._parse_json_output(_decode_output(result.stdout))
                 logger.info(f"[HTTPX] Probed {len(targets)} targets, found {len(results)} live hosts")
             else:
-                logger.warning(f"[HTTPX] httpx returned non-zero: {result.stderr[:200]}")
+                logger.warning(f"[HTTPX] httpx returned non-zero: {_decode_output(result.stderr)[:200]}")
 
         except subprocess.TimeoutExpired:
             logger.warning("[HTTPX] httpx timed out, returning partial results")
@@ -389,14 +397,14 @@ class HttpxRunner:
             input_data = "\n".join(targets)
             result = subprocess.run(
                 cmd,
-                input=input_data,
+                input=input_data.encode("utf-8"),
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=max(timeout * len(targets) // threads + 30, 180)
             )
             
             if result.returncode == 0:
-                for line in result.stdout.strip().split("\n"):
+                for line in _decode_output(result.stdout).strip().split("\n"):
                     if not line.strip():
                         continue
                     try:
@@ -419,7 +427,7 @@ class HttpxRunner:
                     except Exception as e:
                         logger.debug(f"[HTTPX] DNS verify parse error: {e}")
             else:
-                logger.warning(f"[HTTPX] DNS verify failed: {result.stderr[:200]}")
+                logger.warning(f"[HTTPX] DNS verify failed: {_decode_output(result.stderr)[:200]}")
                 
         except subprocess.TimeoutExpired:
             logger.warning("[HTTPX] DNS verify timed out")
@@ -483,14 +491,14 @@ class HttpxRunner:
             input_data = "\n".join(targets)
             result = subprocess.run(
                 cmd,
-                input=input_data,
+                input=input_data.encode("utf-8"),
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=120
             )
             
             if result.returncode == 0:
-                for line in result.stdout.strip().split("\n"):
+                for line in _decode_output(result.stdout).strip().split("\n"):
                     if not line.strip():
                         continue
                     try:

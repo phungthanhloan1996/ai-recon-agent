@@ -1,3 +1,4 @@
+import urllib.parse
 """
 modules/toolkit_scanner.py - External Kali toolkit orchestration.
 Runs high-value scanners on selected live hosts.
@@ -183,7 +184,7 @@ class ToolkitScanner:
         Returns:
             URL normalized to root path
         """
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         
         # WordPress year/month archive pattern: /YYYY/MM/ or /YYYY/MM/DD/
         wp_archive_pattern = re.compile(r'^/\d{4}/\d{2}(/d{2})?/?$')
@@ -242,7 +243,7 @@ class ToolkitScanner:
             if not u:
                 continue
             
-            parsed = urlparse(u)
+            parsed = urllib.parse.urlparse(u)
             original_path = parsed.path
             path = original_path.lower()
             url_lower = u.lower()
@@ -277,7 +278,7 @@ class ToolkitScanner:
             # Normalize to root if needed
             if should_normalize:
                 u = f"{parsed.scheme}://{parsed.netloc}/"
-                parsed = urlparse(u)
+                parsed = urllib.parse.urlparse(u)
                 path = "/"
                 url_lower = u.lower()
             
@@ -423,7 +424,7 @@ class ToolkitScanner:
         return out
 
     def _extract_host_and_port(self, url: str) -> tuple[str, Optional[int]]:
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         host = parsed.hostname or parsed.netloc or url
         try:
             port = parsed.port

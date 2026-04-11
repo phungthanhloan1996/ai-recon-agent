@@ -1,3 +1,4 @@
+import urllib.parse
 """
 core/ml_classifier.py - ML-based endpoint classification
 
@@ -216,7 +217,7 @@ class MLClassifier:
         """Extract features from URL and response data"""
         from urllib.parse import urlparse, parse_qs
         
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         path = parsed.path
         query_params = parse_qs(parsed.query)
         

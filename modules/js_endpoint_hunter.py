@@ -9,6 +9,7 @@ import json
 from typing import Dict, List, Any, Set
 from urllib.parse import urljoin, urlparse
 from core.http_engine import HTTPClient
+from core.phase_admission import PhaseAdmission
 from core.state_manager import StateManager
 
 logger = logging.getLogger("recon.js_hunter")
@@ -52,6 +53,7 @@ class JSEndpointHunter:
         self.state = state
         self.http_client = http_client or HTTPClient()
         self.target = state.get("target") if state else ""
+        self.phase_admission = PhaseAdmission(state)
         self.discovered_endpoints = {}
         self.discovered_parameters = set()
 
@@ -167,17 +169,14 @@ class JSEndpointHunter:
             endpoint = match.group(1)
             endpoints.add(endpoint)
         
-        # Normalize relative URLs
+        # Normalize relative URLs into canonical in-scope absolute URLs
         normalized = set()
         for endpoint in endpoints:
-            if endpoint.startswith('/'):
-                normalized.add(endpoint)
-            elif endpoint.startswith('http'):
-                # Extract path from full URL
-                parsed = urlparse(endpoint)
-                if parsed.path:
-                    normalized.add(parsed.path + ('?' + parsed.query if parsed.query else ''))
-        
+            record = self.phase_admission.register(endpoint, base_url=base_url)
+            if not record or not self.phase_admission.is_valid_endpoint(record):
+                continue
+            normalized.add(record["url"])
+
         return normalized
 
     def _extract_parameters_from_js(self, js_content: str) -> Set[str]:

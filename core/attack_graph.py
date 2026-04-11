@@ -1,3 +1,4 @@
+import urllib.parse
 """
 core/attack_graph.py - Attack Graph Engine
 Model vulnerabilities as nodes and exploit relationships as edges
@@ -273,7 +274,7 @@ class AttackGraph:
             if '://' not in endpoint:
                 endpoint = f"https://{endpoint}"
             
-            parsed = urlparse(endpoint.lower())
+            parsed = urllib.parse.urlparse(endpoint.lower())
             host = parsed.netloc if parsed.netloc else "unknown_host"
             path = parsed.path.rstrip('/').split('?')[0]
             if path == '':

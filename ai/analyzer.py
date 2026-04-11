@@ -1,3 +1,4 @@
+import urllib.parse
 """
 ai/analyzer.py - AI Report Generator and Response Analyzer
 Tổng hợp toàn bộ scan results và tạo báo cáo cuối
@@ -637,7 +638,7 @@ class AIAnalyzer:
         Normalize URL for failure tracking.
         Groups similar URLs together for aggregate failure counting.
         """
-        parsed = urlparse(url.lower())
+        parsed = urllib.parse.urlparse(url.lower())
         path = parsed.path or "/"
         
         # Normalize path - remove trailing slashes and query params for grouping

@@ -11,8 +11,10 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 from core.executor import run_command  # Thêm import để exec tools
+from core.url_normalizer import URLNormalizer
 
 logger = logging.getLogger("recon.chain_planner")
 
@@ -196,6 +198,7 @@ class ChainPlanner:
         self.learning_engine = learning_engine
         self.groq = groq_client
         self.payload_optimizer = payload_optimizer
+        self._url_normalizer = URLNormalizer()
 
 
 
@@ -793,6 +796,419 @@ Return ONLY valid JSON."""
             url = '/' + url
         
         return url
+
+    def _to_recon_shape(self, endpoint: Any) -> Optional[Dict[str, Any]]:
+        normalized = self._url_normalizer.normalize_endpoint(endpoint, base_url=self._get_base_url())
+        if not normalized:
+            return None
+        params = normalized.get("query_params") or normalized.get("parameters") or {}
+        return {
+            "url": normalized.get("url", ""),
+            "canonical_url": normalized.get("normalized_url") or normalized.get("url", ""),
+            "host": normalized.get("host", ""),
+            "scheme": normalized.get("scheme", ""),
+            "port": normalized.get("port"),
+            "path": normalized.get("path", "/"),
+            "method": normalized.get("method"),
+            "params": params if isinstance(params, (dict, list)) else [],
+            "source": normalized.get("source") or normalized.get("tool") or "recon",
+            "tech_hints": normalized.get("tech_hints", []) or normalized.get("categories", []) or [],
+            "auth_hints": normalized.get("auth_hints", []) or [],
+            "signals": normalized.get("signals", []) or [],
+            "confidence": float(normalized.get("confidence", 0.0) or 0.0),
+        }
+
+    def _derive_recon_signals(self, endpoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        signals: List[Dict[str, Any]] = []
+        signal_map: Dict[str, Dict[str, Any]] = {}
+
+        def touch(signal_type: str, score: float, evidence: str):
+            current = signal_map.get(signal_type)
+            if not current:
+                signal_map[signal_type] = {"type": signal_type, "score": score, "evidence": [evidence]}
+                return
+            current["score"] = max(float(current.get("score", 0.0)), score)
+            if evidence not in current["evidence"]:
+                current["evidence"].append(evidence)
+
+        for ep in endpoints:
+            url = (ep.get("canonical_url") or ep.get("url") or "").lower()
+            path = (ep.get("path") or "").lower()
+            params = ep.get("params") or {}
+            param_keys = []
+            if isinstance(params, dict):
+                param_keys = [str(k).lower() for k in params.keys()]
+            elif isinstance(params, list):
+                param_keys = [str(k).lower() for k in params]
+
+            if any(k in path or k in url for k in ("login", "signin", "auth", "session")):
+                touch("auth_surface", 0.8, f"path:{path}")
+            if any(k in path or k in url for k in ("upload", "file-upload", "multipart")):
+                touch("upload_surface", 0.85, f"path:{path}")
+            if any(k in path or k in url for k in ("/api/", "graphql", "rest", "swagger")):
+                touch("api_surface", 0.75, f"path:{path}")
+            if any(k in path or k in url for k in ("user", "enum", "search", "list", "wp-json/wp/v2/users")):
+                touch("enum_surface", 0.65, f"path:{path}")
+            if any(k in path or k in url for k in ("create", "update", "delete", "edit", "submit", "post", "save")):
+                touch("state_change_surface", 0.7, f"path:{path}")
+            if any(k in path or k in url for k in ("redirect", "callback", "next", "return", "url=")):
+                touch("redirect_surface", 0.7, f"path:{path}")
+            if any(k in param_keys for k in ("file", "path", "page", "template", "include", "doc", "download")):
+                touch("file_param_surface", 0.78, f"params:{','.join(param_keys[:4])}")
+            if param_keys:
+                touch("enum_surface", 0.45, f"params:{','.join(param_keys[:3])}")
+
+        for value in signal_map.values():
+            value["score"] = max(0.0, min(1.0, float(value.get("score", 0.0))))
+            signals.append(value)
+        return signals
+
+    def _derive_primitives(self, signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        signal_types = {s.get("type"): s for s in signals}
+        primitives: List[Dict[str, Any]] = []
+
+        def add_primitive(
+            p_type: str,
+            required: List[str],
+            optional: List[str],
+            base_confidence: float,
+        ):
+            present_required = [t for t in required if t in signal_types]
+            missing_required = [t for t in required if t not in signal_types]
+            present_optional = [t for t in optional if t in signal_types]
+            if not present_required:
+                return
+            signal_scores = [float(signal_types[t]["score"]) for t in present_required + present_optional if t in signal_types]
+            confidence = (sum(signal_scores) / max(1, len(signal_scores))) * base_confidence
+            primitives.append(
+                {
+                    "type": p_type,
+                    "derived_from": present_required + present_optional,
+                    "confidence": max(0.0, min(1.0, confidence)),
+                    "preconditions_met": present_required + present_optional,
+                    "preconditions_missing": missing_required,
+                }
+            )
+
+        add_primitive("identity_flow_candidate", ["auth_surface", "enum_surface"], ["api_surface"], 0.95)
+        add_primitive("content_ingestion_candidate", ["upload_surface", "state_change_surface"], ["api_surface"], 0.95)
+        add_primitive("api_object_access_candidate", ["api_surface", "enum_surface"], ["state_change_surface"], 0.9)
+        add_primitive("redirect_control_candidate", ["redirect_surface"], ["auth_surface"], 0.8)
+        add_primitive("file_resolution_candidate", ["file_param_surface"], ["state_change_surface"], 0.88)
+        return primitives
+
+    def _derive_direct_exploit_primitives(self, recon_endpoints: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        primitives: List[Dict[str, Any]] = []
+        seen = set()
+        findings = self._get_planning_vulnerabilities(include_detected=True)
+
+        def add_direct(primitive_type: str, endpoint: str, evidence: List[str], confidence: float, force_chain: bool = True):
+            key = (primitive_type, endpoint)
+            if key in seen:
+                return
+            seen.add(key)
+            primitives.append({
+                "type": primitive_type,
+                "derived_from": evidence[:4],
+                "confidence": max(0.0, min(1.0, confidence)),
+                "preconditions_met": evidence[:4],
+                "preconditions_missing": [],
+                "endpoint": endpoint,
+                "force_chain": force_chain,
+                "planner_mode": "deterministic",
+                "evidence_sources": evidence[:6],
+                "usability_score": max(0.0, min(1.0, confidence)),
+                "missing_preconditions": [],
+            })
+
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            endpoint = str(finding.get("endpoint") or finding.get("url") or "").strip()
+            vuln_type = str(finding.get("type") or "").lower()
+            confidence = float(finding.get("verification_confidence", finding.get("confidence", 0.0)) or 0.0)
+            evidence = [vuln_type]
+            if endpoint:
+                evidence.append(endpoint)
+            if vuln_type in {"sql_injection", "sqli", "injection"}:
+                add_direct("sql_injection", endpoint, evidence, max(confidence, 0.82))
+            if vuln_type in {"command_injection", "rce", "code_injection"}:
+                add_direct("command_injection", endpoint, evidence, max(confidence, 0.9))
+            if vuln_type in {"file_upload", "upload"}:
+                add_direct("upload_rce", endpoint, evidence, max(confidence, 0.85))
+            if vuln_type in {"lfi", "file_inclusion", "path_traversal"}:
+                add_direct("lfi_rce", endpoint, evidence, max(confidence, 0.84))
+            if vuln_type == "ssrf":
+                add_direct("ssrf_pivot", endpoint, evidence, max(confidence, 0.8))
+            if vuln_type in {"auth_bypass", "idor", "object_access"}:
+                add_direct("auth_object", endpoint, evidence, max(confidence, 0.78), force_chain=False)
+
+        for ep in recon_endpoints:
+            if not isinstance(ep, dict):
+                continue
+            url = str(ep.get("url") or "").lower()
+            params = ep.get("params") or {}
+            param_names = list(params.keys()) if isinstance(params, dict) else [str(p) for p in params] if isinstance(params, list) else []
+            if param_names and any(p in ",".join(param_names).lower() for p in ["id", "item", "user", "cat", "page"]):
+                add_direct("sql_injection", ep.get("url", ""), ["parameter_rich", ",".join(param_names[:4])], 0.72, force_chain=False)
+
+        return primitives
+
+    def _build_direct_chain(self, primitive: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        p_type = primitive.get("type", "")
+        endpoint = primitive.get("endpoint") or "recon_surface"
+        if p_type == "sql_injection":
+            return {
+                "chain_id": f"direct_sql_{abs(hash(endpoint))}",
+                "goal": f"exploit SQL injection at {endpoint}",
+                "steps": [{
+                    "name": "sql_injection",
+                    "action": "test_sqli",
+                    "target": endpoint,
+                    "tool": "deterministic_planner",
+                    "payload": "",
+                    "success_indicator": "SQL injection confirmed",
+                    "description": "direct SQL injection exploitation path",
+                }],
+                "evidence": primitive.get("evidence_sources", []),
+                "confidence": float(primitive.get("confidence", 0.0)),
+                "preconditions_met": primitive.get("preconditions_met", []),
+                "preconditions_missing": [],
+                "next_step": "test_sqli",
+                "terminal_reason": None,
+                "primitive": p_type,
+                "name": "Verified sql_injection exploitation",
+                "severity": "HIGH",
+                "risk_level": "HIGH",
+                "force_chain": bool(primitive.get("force_chain")),
+                "planner_mode": "deterministic",
+            }
+        if p_type == "command_injection":
+            return {
+                "chain_id": f"direct_cmdi_{abs(hash(endpoint))}",
+                "goal": f"exploit command injection at {endpoint}",
+                "steps": [{
+                    "name": "command_injection",
+                    "action": "execute_commands",
+                    "target": endpoint,
+                    "tool": "deterministic_planner",
+                    "payload": "",
+                    "success_indicator": "command_injection confirmed",
+                    "description": "direct command injection exploitation path",
+                }],
+                "evidence": primitive.get("evidence_sources", []),
+                "confidence": float(primitive.get("confidence", 0.0)),
+                "preconditions_met": primitive.get("preconditions_met", []),
+                "preconditions_missing": [],
+                "next_step": "execute_commands",
+                "terminal_reason": None,
+                "primitive": p_type,
+                "name": "Verified command_injection exploitation",
+                "severity": "CRITICAL",
+                "risk_level": "CRITICAL",
+                "force_chain": bool(primitive.get("force_chain")),
+                "planner_mode": "deterministic",
+            }
+        if p_type == "upload_rce":
+            return {
+                "chain_id": f"direct_upload_{abs(hash(endpoint))}",
+                "goal": f"exploit upload-to-rce path at {endpoint}",
+                "steps": [{
+                    "name": "upload_rce",
+                    "action": "upload_file",
+                    "target": endpoint,
+                    "tool": "deterministic_planner",
+                    "payload": "",
+                    "success_indicator": "file upload confirmed",
+                    "description": "direct upload to execution path",
+                }],
+                "evidence": primitive.get("evidence_sources", []),
+                "confidence": float(primitive.get("confidence", 0.0)),
+                "preconditions_met": primitive.get("preconditions_met", []),
+                "preconditions_missing": [],
+                "next_step": "upload_file",
+                "terminal_reason": None,
+                "primitive": p_type,
+                "name": "Verified upload_rce exploitation",
+                "severity": "CRITICAL",
+                "risk_level": "CRITICAL",
+                "force_chain": bool(primitive.get("force_chain")),
+                "planner_mode": "deterministic",
+            }
+        if p_type == "lfi_rce":
+            return {
+                "chain_id": f"direct_lfi_{abs(hash(endpoint))}",
+                "goal": f"exploit file read / LFI pivot at {endpoint}",
+                "steps": [{
+                    "name": "lfi_rce",
+                    "action": "test_lfi",
+                    "target": endpoint,
+                    "tool": "deterministic_planner",
+                    "payload": "",
+                    "success_indicator": "LFI or traversal confirmed",
+                    "description": "direct local file inclusion or traversal verification path",
+                }],
+                "evidence": primitive.get("evidence_sources", []),
+                "confidence": float(primitive.get("confidence", 0.0)),
+                "preconditions_met": primitive.get("preconditions_met", []),
+                "preconditions_missing": [],
+                "next_step": "test_lfi",
+                "terminal_reason": None,
+                "primitive": p_type,
+                "name": "Verified lfi_rce exploitation",
+                "severity": "HIGH",
+                "risk_level": "HIGH",
+                "force_chain": bool(primitive.get("force_chain")),
+                "planner_mode": "deterministic",
+            }
+        if p_type == "ssrf_pivot":
+            return {
+                "chain_id": f"direct_ssrf_{abs(hash(endpoint))}",
+                "goal": f"validate SSRF pivot path at {endpoint}",
+                "steps": [{
+                    "name": "ssrf_pivot",
+                    "action": "probe",
+                    "target": endpoint,
+                    "tool": "deterministic_planner",
+                    "payload": "",
+                    "success_indicator": "SSRF pivot surface remains reachable",
+                    "description": "direct SSRF preflight path",
+                }],
+                "evidence": primitive.get("evidence_sources", []),
+                "confidence": float(primitive.get("confidence", 0.0)),
+                "preconditions_met": primitive.get("preconditions_met", []),
+                "preconditions_missing": [],
+                "next_step": "probe",
+                "terminal_reason": None,
+                "primitive": p_type,
+                "name": "Verified ssrf_pivot exploitation",
+                "severity": "HIGH",
+                "risk_level": "HIGH",
+                "force_chain": bool(primitive.get("force_chain")),
+                "planner_mode": "deterministic",
+            }
+        if p_type == "auth_object":
+            return {
+                "chain_id": f"direct_auth_{abs(hash(endpoint))}",
+                "goal": f"validate auth/object access abuse at {endpoint}",
+                "steps": [{
+                    "name": "auth_object",
+                    "action": "auth_bypass",
+                    "target": endpoint,
+                    "tool": "deterministic_planner",
+                    "payload": "",
+                    "success_indicator": "authorization bypass confirmed",
+                    "description": "direct auth/object exploit path",
+                }],
+                "evidence": primitive.get("evidence_sources", []),
+                "confidence": float(primitive.get("confidence", 0.0)),
+                "preconditions_met": primitive.get("preconditions_met", []),
+                "preconditions_missing": [],
+                "next_step": "auth_bypass",
+                "terminal_reason": None,
+                "primitive": p_type,
+                "name": "Verified auth_object exploitation",
+                "severity": "HIGH",
+                "risk_level": "HIGH",
+                "force_chain": bool(primitive.get("force_chain")),
+                "planner_mode": "deterministic",
+            }
+        return None
+
+    def plan_recon_chains_deterministic(self) -> Dict[str, Any]:
+        """Deterministic chain planning from recon-only signals/primitives (no CVE/vulnerability dependency)."""
+        raw_endpoints = (
+            self.state.get("prioritized_endpoints", [])
+            or self.state.get("endpoints", [])
+            or []
+        )
+        recon_endpoints = [ep for ep in (self._to_recon_shape(item) for item in raw_endpoints) if ep]
+        signals = self._derive_recon_signals(recon_endpoints)
+        direct_primitives = self._derive_direct_exploit_primitives(recon_endpoints)
+        primitives = direct_primitives + self._derive_primitives(signals)
+        signal_map = {s["type"]: s for s in signals}
+
+        if not recon_endpoints:
+            return {"endpoints": [], "signals": signals, "primitives": primitives, "chains": [], "terminal_reason": "no_recon_endpoints"}
+        if not primitives:
+            return {"endpoints": recon_endpoints, "signals": signals, "primitives": [], "chains": [], "terminal_reason": "insufficient_signal_for_primitives"}
+
+        chains: List[Dict[str, Any]] = []
+        for primitive in primitives:
+            p_type = primitive.get("type", "")
+            direct_chain = self._build_direct_chain(primitive)
+            if direct_chain:
+                chains.append(direct_chain)
+                continue
+            missing = primitive.get("preconditions_missing", []) or []
+            if len(missing) >= 6:
+                continue
+
+            goal = ""
+            next_step = ""
+            if p_type == "identity_flow_candidate":
+                goal = "validate identity and authorization boundary transitions"
+                next_step = "enumerate_auth_flow"
+            elif p_type == "content_ingestion_candidate":
+                goal = "validate content ingestion path and execution boundaries"
+                next_step = "test_upload_state_transition"
+            elif p_type == "api_object_access_candidate":
+                goal = "validate object-level access controls in API surface"
+                next_step = "test_api_object_authorization"
+            elif p_type == "redirect_control_candidate":
+                goal = "validate redirect target control and trust boundaries"
+                next_step = "test_redirect_target_validation"
+            elif p_type == "file_resolution_candidate":
+                goal = "validate file resolution boundary and path handling"
+                next_step = "test_file_param_resolution"
+            if not goal:
+                continue
+
+            derived = primitive.get("derived_from", []) or []
+            evidence = []
+            for d in derived:
+                sig = signal_map.get(d)
+                if sig:
+                    evidence.extend(sig.get("evidence", [])[:2])
+
+            chains.append(
+                {
+                    "goal": goal,
+                    "steps": [
+                        {
+                            "name": p_type,
+                            "action": next_step,
+                            "target": "recon_surface",
+                            "tool": "deterministic_planner",
+                            "payload": "",
+                            "success_indicator": "preconditions remain satisfied with additional recon",
+                            "description": goal,
+                        }
+                    ],
+                    "evidence": evidence[:5],
+                    "confidence": float(primitive.get("confidence", 0.0)),
+                    "preconditions_met": primitive.get("preconditions_met", []) or [],
+                    "preconditions_missing": missing,
+                    "next_step": next_step,
+                    "terminal_reason": None,
+                    "primitive": p_type,
+                    "name": f"Recon chain: {p_type}",
+                    "severity": "MEDIUM",
+                    "risk_level": "MEDIUM",
+                }
+            )
+
+        if not chains:
+            return {
+                "endpoints": recon_endpoints,
+                "signals": signals,
+                "primitives": primitives,
+                "chains": [],
+                "terminal_reason": "primitive_preconditions_missing",
+            }
+
+        chains.sort(key=lambda c: (1 if c.get("force_chain") else 0, float(c.get("confidence", 0.0))), reverse=True)
+        return {"endpoints": recon_endpoints, "signals": signals, "primitives": primitives, "chains": chains, "terminal_reason": None}
 
     def plan_chains_from_graph(self, attack_graph) -> List[ExploitChain]:
         """Plan chains from attack graph analysis"""
@@ -2230,6 +2646,43 @@ Return ONLY a JSON list. Each item must contain:
             return []
 
     def _merge_and_rank(self, chains: List[Dict]) -> List[Dict]:
+        def normalize_step(step: Any) -> Optional[Dict[str, Any]]:
+            if isinstance(step, dict):
+                action = str(step.get("action") or step.get("name") or "").strip()
+                if not action:
+                    return None
+                normalized = dict(step)
+                normalized["action"] = action
+                normalized.setdefault("name", action.replace("_", " ").title())
+                normalized.setdefault("target", "")
+                normalized.setdefault("tool", "")
+                normalized.setdefault("payload", "")
+                normalized.setdefault("success_indicator", "")
+                return normalized
+            return None
+
+        def normalize_chain(chain: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+            if not isinstance(chain, dict):
+                return None
+            name = str(chain.get("name") or "").strip()
+            if not name:
+                return None
+
+            normalized_steps = []
+            for step in chain.get("steps", []) or []:
+                normalized_step = normalize_step(step)
+                if normalized_step:
+                    normalized_steps.append(normalized_step)
+
+            if not normalized_steps:
+                logger.debug(f"[AI-CHAIN] Dropping malformed chain without executable steps: {name}")
+                return None
+
+            normalized = dict(chain)
+            normalized["name"] = name
+            normalized["steps"] = normalized_steps
+            return normalized
+
         def rank(chain: Dict) -> float:
             severity_score = {"CRITICAL": 100, "HIGH": 70, "MEDIUM": 40, "LOW": 10}.get(
                 str(chain.get("severity", "MEDIUM")).upper(),
@@ -2241,6 +2694,9 @@ Return ONLY a JSON list. Each item must contain:
         unique: List[Dict] = []
         seen = set()
         for chain in chains:
+            chain = normalize_chain(chain)
+            if not chain:
+                continue
             name = chain.get("name", "")
             if not name or name in seen:
                 continue

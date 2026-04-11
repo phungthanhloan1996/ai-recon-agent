@@ -233,7 +233,7 @@ class WordPressScannerEngine:
         Cache hit = same domain, same WP version, same plugin versions → skip rescan.
         """
         import hashlib
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         domain = parsed.netloc.lower()
         
         # Build plugin version signature
@@ -349,7 +349,7 @@ class WordPressScannerEngine:
             if not u.startswith(("http://", "https://")):
                 u = "https://" + u
             try:
-                p = urlparse(u)
+                p = urllib.parse.urlparse(u)
             except Exception:
                 continue
             host = (p.netloc or "").strip().lower()

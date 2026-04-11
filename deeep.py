@@ -1,3 +1,4 @@
+import urllib.parse
 import time
 import random
 import json
@@ -401,7 +402,7 @@ def extract_domain_func(url):
         if not url.startswith(('http://', 'https://')):
             url = 'http://' + url
             
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         domain = parsed.netloc.lower()
         
         if domain.startswith('www.'):

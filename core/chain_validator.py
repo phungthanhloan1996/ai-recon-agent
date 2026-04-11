@@ -1,3 +1,4 @@
+import urllib.parse
 """
 core/chain_validator.py - Attack Chain Validator
 
@@ -371,7 +372,7 @@ class ChainValidator:
         
         # Check for valid URL structure
         try:
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
         except Exception as e:
             return f"Step {step_num}: URL parse error: {e}"
         
@@ -458,7 +459,7 @@ class ChainValidator:
             target = step.get("target", "")
             if target:
                 try:
-                    parsed = urlparse(target)
+                    parsed = urllib.parse.urlparse(target)
                     # Normalize to host + base path
                     path = parsed.path.rstrip('/').split('?')[0]
                     path_parts = path.strip('/').split('/')

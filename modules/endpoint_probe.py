@@ -1,3 +1,4 @@
+import urllib.parse
 import json
 import logging
 import os
@@ -9,6 +10,7 @@ from urllib.parse import urlparse, parse_qs
 from core.state_manager import StateManager
 from core.endpoint_analyzer import EndpointAnalyzer
 from core.cve_matcher import get_hints_for_endpoint
+from core.phase_admission import PhaseAdmission
 from core.scan_optimizer import get_optimizer
 
 logger = logging.getLogger("recon.endpoint_probe")
@@ -40,18 +42,63 @@ def run_endpoint_probe(
     - Priority 3 (low): Dead/unresponsive hosts (limited probing)
     """
     optimizer = get_optimizer()
+    phase_admission = PhaseAdmission(state)
+    admitted: List[Dict[str, Any]] = []
+    seen_fingerprints: Dict[str, int] = {}
+    logged_blacklisted = set()
+    reductions = {"invalid": 0, "duplicate": 0, "blacklisted": 0, "rejected": 0}
+
+    for endpoint in endpoints:
+        raw = _normalize_target(endpoint)
+        record = phase_admission.register(raw)
+        if not record or not phase_admission.is_valid_endpoint(record):
+            reductions["invalid"] += 1
+            continue
+
+        fingerprint = record.get("fingerprint")
+        if fingerprint in seen_fingerprints:
+            reductions["duplicate"] += 1
+            admitted[seen_fingerprints[fingerprint]] = phase_admission.registry.merge_records(
+                admitted[seen_fingerprints[fingerprint]],
+                record,
+            )
+            continue
+        seen_fingerprints[fingerprint] = len(admitted)
+
+        hostname = record.get("host") or ""
+        if hostname and optimizer.is_host_blacklisted(hostname):
+            reductions["blacklisted"] += 1
+            if hostname not in logged_blacklisted:
+                logger.info(f"[PROBE] Pruned blacklisted host before scheduling: {hostname}")
+                logged_blacklisted.add(hostname)
+            continue
+
+        if not phase_admission.is_phase_candidate(record, "probe"):
+            reductions["rejected"] += 1
+            continue
+
+        admitted.append(record)
+
+    if reductions["invalid"] or reductions["duplicate"] or reductions["blacklisted"] or reductions["rejected"]:
+        logger.info(
+            "[PROBE] Scheduling reduced %s -> %s (invalid=%s duplicate=%s blacklisted=%s rejected=%s)",
+            len(endpoints or []),
+            len(admitted),
+            reductions["invalid"],
+            reductions["duplicate"],
+            reductions["blacklisted"],
+            reductions["rejected"],
+        )
     
     # Group endpoints by host for prioritization
     host_endpoints: Dict[str, List[Dict[str, Any]]] = {}
-    for endpoint in endpoints:
-        normalized = _normalize_target(endpoint)
-        if normalized:
-            url = normalized["url"]
-            parsed = urlparse(url)
-            hostname = parsed.hostname or ""
-            if hostname not in host_endpoints:
-                host_endpoints[hostname] = []
-            host_endpoints[hostname].append(normalized)
+    for normalized in admitted:
+        url = normalized["url"]
+        parsed = urllib.parse.urlparse(url)
+        hostname = parsed.hostname or ""
+        if hostname not in host_endpoints:
+            host_endpoints[hostname] = []
+        host_endpoints[hostname].append(normalized)
     
     # Prioritize hosts
     selected: List[Dict[str, Any]] = []
@@ -153,7 +200,7 @@ def extract_endpoints_with_context(
         enriched_ep = dict(endpoint)  # Keep existing data
         
         # Extract URL components
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         
         # Extract query string parameters
         query_params = parse_qs(parsed.query)

@@ -1,3 +1,4 @@
+import urllib.parse
 """
 modules/parameter_miner.py - Parameter Miner
 Discover hidden or undocumented parameters for known endpoints.
@@ -131,7 +132,7 @@ class ParameterMiner:
                 continue
             seen.add(url)
 
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             if parsed.scheme not in ("http", "https") or not parsed.netloc:
                 continue
 
@@ -157,7 +158,7 @@ class ParameterMiner:
         return selected[:self.max_endpoints]
 
     def _is_local_target(self) -> bool:
-        host = (urlparse(self.target).hostname if self.target else "") or self.target or ""
+        host = (urllib.parse.urlparse(self.target).hostname if self.target else "") or self.target or ""
         host = host.strip().lower()
         if not host:
             return False

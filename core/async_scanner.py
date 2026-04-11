@@ -1,3 +1,4 @@
+import urllib.parse
 """
 core/async_scanner.py - Parallel scanning with asyncio support
 
@@ -207,7 +208,7 @@ class AsyncScanner:
         
         # Check circuit breaker
         from urllib.parse import urlparse
-        host = urlparse(task.url).netloc
+        host = urllib.parse.urlparse(task.url).netloc
         if self._is_circuit_open(host):
             task.status = ScanStatus.FAILED
             task.error = "Circuit breaker open"

@@ -10,11 +10,15 @@ from typing import Dict, List, Any
 import time
 import base64
 import concurrent.futures
+import threading
 import urllib.parse
 from urllib.parse import urlparse
 import config
 from urllib3.exceptions import NameResolutionError
 
+from core.endpoint_registry import EndpointRegistry
+from core.finding_normalizer import normalize_finding, finding_identity
+from core.phase_admission import PhaseAdmission
 from core.state_manager import StateManager
 from core.http_engine import HTTPClient
 from ai.groq_client import GroqClient
@@ -27,6 +31,7 @@ from integrations.sqlmap_runner import SQLMapRunner
 from core.executor import run_command, tool_available
 from core.resource_manager import get_nuclei_pool, get_concurrency_manager
 from core.host_filter import HostFilter
+from core.scan_optimizer import get_optimizer
 
 logger = logging.getLogger("recon.scanning")
 
@@ -53,25 +58,149 @@ class ScanningEngine:
 
         self.scan_results_file = os.path.join(output_dir, "scan_results.json")
         self.manifest_file = os.path.join(output_dir, "scanner_manifest.json")
-        allowed_domains = state.get("allowed_domains", []) or []
-        target_hostname = urlparse(self.target).hostname if self.target else None
+        allowed_domains = list(state.get("allowed_domains", []) or [])
+        if self.target:
+            allowed_domains.append(self.target)
+            parsed_target = urllib.parse.urlparse(self.target if "://" in str(self.target) else f"https://{self.target}")
+            if parsed_target.netloc:
+                allowed_domains.append(parsed_target.netloc)
+            if parsed_target.hostname:
+                allowed_domains.append(parsed_target.hostname)
         self.host_filter = HostFilter(
             skip_dev_test=True,
-            target_domain=target_hostname,
+            target_domain=self.target,
             allowed_domains=allowed_domains,
         )
+        self.endpoint_registry = EndpointRegistry()
+        self.phase_admission = PhaseAdmission(state, registry=self.endpoint_registry, host_filter=self.host_filter)
+        self._baseline_cache: Dict[str, Dict[str, Any]] = {}
+        self._host_last_scan_at: Dict[str, float] = {}
+        self._host_gate_lock = threading.Lock()
+        self._blacklisted_hosts_logged = set()
 
     def _is_url_in_scope(self, url: str) -> bool:
         if not url:
             return False
         try:
-            return (
-                not self.host_filter._is_third_party(url)
-                and self.host_filter._is_in_allowed_domains(url)
-                and self.host_filter._is_target_domain(url)
-            )
+            if self.host_filter._is_third_party(url):
+                return False
+            if self.host_filter.allowed_domains:
+                return self.host_filter._is_in_allowed_domains(url)
+            return self.host_filter._is_target_domain(url)
         except Exception:
             return True
+
+    def _log_blacklisted_host_once(self, hostname: str, stage: str):
+        if not hostname or hostname in self._blacklisted_hosts_logged:
+            return
+        self._blacklisted_hosts_logged.add(hostname)
+        logger.info(f"[SCANNING] Pruned blacklisted host before {stage}: {hostname}")
+
+    def _apply_host_backpressure(self, hostname: str, min_interval: float = 0.15):
+        if not hostname:
+            return
+        with self._host_gate_lock:
+            last_scan = self._host_last_scan_at.get(hostname, 0.0)
+            now = time.time()
+            sleep_for = min_interval - (now - last_scan)
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            self._host_last_scan_at[hostname] = time.time()
+
+    def _set_scan_incomplete(self, reason: str):
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        reasons = scan_meta.get("scan_incomplete_reasons", []) or []
+        if reason not in reasons:
+            reasons.append(reason)
+        scan_meta["scan_incomplete_reasons"] = reasons[-10:]
+        self.state.update(scan_incomplete=True, scan_metadata=scan_meta)
+        logger.warning(f"[SCANNING] Marked scan incomplete: {reason}")
+
+    def _mark_endpoint_state(self, url: str, **updates):
+        record = self.endpoint_registry.register({"url": url, **updates})
+        if not record:
+            return
+        self.state.upsert_endpoint(record)
+
+    def _prepare_scan_candidates(self, endpoints: List[Any]) -> List[Dict[str, Any]]:
+        optimizer = get_optimizer()
+        seen: Dict[str, int] = {}
+        scanned = set(self.state.get("scanned_endpoints", []) or [])
+        candidates: List[Dict[str, Any]] = []
+        fallback_pool: List[Dict[str, Any]] = []
+        reductions = {
+            "invalid": 0,
+            "duplicate": 0,
+            "blacklisted": 0,
+            "already_scanned": 0,
+            "rejected": 0,
+        }
+
+        for endpoint in endpoints or []:
+            record = self.phase_admission.register(endpoint)
+            if not record or not self.phase_admission.is_valid_endpoint(record):
+                reductions["invalid"] += 1
+                continue
+
+            if self._is_url_in_scope(record.get("url", "")) and self._is_valid_url(record.get("url", "")):
+                fallback_pool.append(record)
+
+            fingerprint = record.get("fingerprint")
+            if fingerprint in seen:
+                reductions["duplicate"] += 1
+                candidates[seen[fingerprint]] = self.endpoint_registry.merge_records(candidates[seen[fingerprint]], record)
+                continue
+            seen[fingerprint] = len(candidates)
+
+            hostname = record.get("host") or ""
+            if hostname and optimizer.is_host_blacklisted(hostname):
+                reductions["blacklisted"] += 1
+                self._log_blacklisted_host_once(hostname, "scan scheduling")
+                continue
+
+            if record["url"] in scanned:
+                reductions["already_scanned"] += 1
+                continue
+
+            if not self.phase_admission.is_phase_candidate(record, "scan"):
+                reductions["rejected"] += 1
+                continue
+
+            candidates.append(record)
+
+        if not candidates and endpoints:
+            canonical_fallback = [
+                record for record in self.phase_admission.canonical_seed_records()
+                if self._is_url_in_scope(record.get("url", "")) and self._is_valid_url(record.get("url", ""))
+            ]
+            fallback_candidates = canonical_fallback or fallback_pool
+            deduped_fallback = []
+            fallback_seen = set()
+            for record in fallback_candidates:
+                fingerprint = record.get("exact_fingerprint") or record.get("url")
+                if fingerprint in fallback_seen:
+                    continue
+                fallback_seen.add(fingerprint)
+                deduped_fallback.append(record)
+            if deduped_fallback:
+                candidates = deduped_fallback
+                logger.warning(
+                    "[SCANNING] Preserved %s canonical/fallback endpoint(s) to avoid empty scan scheduling",
+                    len(candidates),
+                )
+
+        if any(reductions.values()):
+            logger.info(
+                "[SCANNING] Scheduling reduced %s -> %s (invalid=%s duplicate=%s blacklisted=%s already_scanned=%s rejected=%s)",
+                len(endpoints or []),
+                len(candidates),
+                reductions["invalid"],
+                reductions["duplicate"],
+                reductions["blacklisted"],
+                reductions["already_scanned"],
+                reductions["rejected"],
+            )
+        return candidates
 
     def _canonicalize_scan_url(self, url: str) -> str:
         if not url:
@@ -114,6 +243,9 @@ class ScanningEngine:
         return mapping.get(str(severity or "INFO").upper(), 0.5)
 
     def _append_unique_vulnerability(self, vuln: Dict[str, Any], confirmed: bool = False):
+        vuln = normalize_finding(vuln, self.endpoint_registry.normalizer)
+        if not vuln:
+            return
         vulnerabilities = self.state.get("vulnerabilities", []) or []
         key = (
             vuln.get("url") or vuln.get("endpoint"),
@@ -207,12 +339,15 @@ class ScanningEngine:
                 or "xss" in hints
             )
         )
+        nuclei_platform_signal = (
+            bool({"wordpress", "authentication", "api_injection", "file_upload", "rpc", "admin"} & category_set)
+            or any(token in url_lower for token in ["wp-admin", "xmlrpc", "api", "login", "admin", "upload", "graphql"])
+        )
         nuclei_interest = (
             endpoint_score >= max(config.NUCLEI_MIN_ENDPOINT_SCORE - 2, 5)
             and (
-                bool(parameters)
-                or bool({"wordpress", "authentication", "api_injection", "file_upload", "rpc", "admin"} & category_set)
-                or any(token in url_lower for token in ["wp-admin", "xmlrpc", "api", "login", "admin", "upload", "graphql"])
+                nuclei_platform_signal
+                or (bool(parameters) and not (sqli_interest or xss_interest))
             )
         )
 
@@ -310,7 +445,7 @@ class ScanningEngine:
         if len(url) > config.MAX_URL_LENGTH:
             return False
         try:
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             if parsed.scheme not in ("http", "https"):
                 return False
             hostname = parsed.netloc or parsed.hostname or ''
@@ -332,6 +467,9 @@ class ScanningEngine:
     def run(self, progress_cb=None):
         """Execute vulnerability scanning pipeline"""
         logger.info("[SCANNING] Starting AI-driven vulnerability scanning")
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        scan_meta.pop("scan_incomplete_reasons", None)
+        self.state.update(scan_incomplete=False, scan_metadata=scan_meta)
         # Reset per-run tool dedup so a new scan iteration can rescan endpoints intentionally.
         if hasattr(self.dalfox_runner, "seen_urls"):
             self.dalfox_runner.seen_urls.clear()
@@ -349,40 +487,53 @@ class ScanningEngine:
             logger.error("[SCANNING] No endpoints to scan → exiting")
             return
 
+        try:
+            if not os.path.exists(self.scan_results_file):
+                with open(self.scan_results_file, "w", encoding="utf-8"):
+                    pass
+        except Exception as e:
+            logger.error(f"[SCANNING] Cannot prepare scan_results.json: {e}")
+
+        candidates = self._prepare_scan_candidates(prioritized_endpoints)
+        if not candidates:
+            logger.warning("[SCANNING] No normalized endpoints available after fallback preservation")
+            return
+
         budget = (self.state.get("scan_metadata", {}) or {}).get("budget", {})
         self.max_endpoints = int(
             self.state.get("max_endpoints", budget.get("scan_prioritized_endpoints", 140))
         )
-
-        # Ensure file exists (tránh missing file)
-        try:
-            open(self.scan_results_file, "a").close()
-        except Exception as e:
-            logger.error(f"[SCANNING] Cannot create scan_results.json: {e}")
+        scheduled = candidates[:self.max_endpoints]
+        self.state.update(scan_targets=scheduled)
 
         # Use parallel execution
-        with concurrent.futures.ThreadPoolExecutor(max_workers=config.SCANNING_MAX_WORKERS) as executor:
+        max_workers = max(1, min(config.SCANNING_MAX_WORKERS, len(scheduled)))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [
                 executor.submit(self.scan_endpoint, endpoint)
-                for endpoint in prioritized_endpoints[:self.max_endpoints]
+                for endpoint in scheduled
             ]
 
             completed = 0  # FIX: Initialize completed variable before loop
-            for future in concurrent.futures.as_completed(futures, timeout=300):
-                try:
-                    result = future.result()
-
-                    if result:
-                        self.process_endpoint_results(result)
-                        completed = sum(1 for f in futures if f.done())
+            try:
+                for future in concurrent.futures.as_completed(futures, timeout=300):
+                    try:
+                        result = future.result()
+                        completed += 1
                         self.state.update(payloads_tested=completed)
-                    if progress_cb:
-                        progress_cb(completed)
-                except concurrent.futures.TimeoutError:
-                    logger.error("[SCANNING] Endpoint scan timed out")
-
-                except Exception as e:
-                    logger.error(f"[SCANNING] Failed to scan endpoint: {e}")
+                        if result:
+                            self.process_endpoint_results(result)
+                        if progress_cb:
+                            progress_cb(completed)
+                    except concurrent.futures.TimeoutError:
+                        self._set_scan_incomplete("endpoint future timeout")
+                        logger.error("[SCANNING] Endpoint scan timed out")
+                    except Exception as e:
+                        self._set_scan_incomplete(f"endpoint future error: {str(e)[:120]}")
+                        logger.error(f"[SCANNING] Failed to scan endpoint: {e}")
+            except concurrent.futures.TimeoutError:
+                self._set_scan_incomplete("scanner worker pool timeout")
+                logger.warning("[SCANNING] Not all endpoint workers completed cleanly before timeout")
 
         logger.info("[SCANNING] Completed scanning - results streamed to file")
         self._write_manifest()
@@ -394,7 +545,12 @@ class ScanningEngine:
         
         with open(self.scan_results_file, 'a') as f:
             for response in responses:
-                endpoint = response.get("endpoint") or response.get("url") or ""
+                endpoint = self.endpoint_registry.normalizer.normalize_url(
+                    response.get("endpoint") or response.get("url") or ""
+                )
+                if endpoint:
+                    response["endpoint"] = endpoint
+                    response.setdefault("url", endpoint)
                 if not self._is_url_in_scope(endpoint):
                     logger.debug(f"[SCANNING] Dropping off-scope response: {endpoint}")
                     continue
@@ -432,17 +588,13 @@ class ScanningEngine:
     def _dedupe_vulnerabilities(self, vulns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         deduped = {}
         for vuln in vulns:
-            if not isinstance(vuln, dict):
+            normalized_vuln = normalize_finding(vuln, self.endpoint_registry.normalizer)
+            if not normalized_vuln:
                 continue
-            key = (
-                vuln.get("url") or vuln.get("endpoint"),
-                vuln.get("type") or "unknown",
-                vuln.get("payload"),
-                vuln.get("tool") or vuln.get("source"),
-            )
+            key = finding_identity(normalized_vuln, self.endpoint_registry.normalizer)
             current = deduped.get(key)
-            if current is None or float(vuln.get("confidence", 0) or 0) >= float(current.get("confidence", 0) or 0):
-                deduped[key] = vuln
+            if current is None or float(normalized_vuln.get("confidence", 0) or 0) >= float(current.get("confidence", 0) or 0):
+                deduped[key] = normalized_vuln
         return list(deduped.values())
 
     def _write_manifest(self):
@@ -479,13 +631,20 @@ class ScanningEngine:
 
     def scan_endpoint(self, endpoint: Dict[str, Any]) -> List[Dict[str, Any]]:
         """Scan a single endpoint with AI-generated payloads"""
-        # Defensive: normalize endpoint structure
-        if not isinstance(endpoint, dict):
-            logger.warning(f"[SCANNING] Invalid endpoint type: {type(endpoint)}, skipping")
+        record = self.phase_admission.register(endpoint)
+        if not record or not self.phase_admission.is_phase_candidate(record, "scan"):
             return []
-        
-        url = self._canonicalize_scan_url(endpoint.get("url", ""))
-        
+
+        url = self._canonicalize_scan_url(record.get("url", ""))
+        record = self.endpoint_registry.register({**record, "url": url})
+        if not record or not self.phase_admission.is_phase_candidate(record, "scan"):
+            return []
+
+        hostname = record.get("host") or ""
+        if hostname and get_optimizer().is_host_blacklisted(hostname):
+            self._log_blacklisted_host_once(hostname, "scan execution")
+            return []
+
         # FIX: Track scanned endpoints for resume functionality
         # Check if this endpoint was already scanned in a previous session
         scanned_endpoints = self.state.get("scanned_endpoints", [])
@@ -501,8 +660,8 @@ class ScanningEngine:
             logger.debug(f"[SCANNING] Skipping off-scope URL: {url}")
             return []
 
-        categories = endpoint.get("categories", []) or []
-        parameters = endpoint.get("parameters", []) or []
+        categories = record.get("categories", []) or []
+        parameters = record.get("parameters", []) or []
         
         # FIX: If no URL, skip
         if not url or not isinstance(url, str):
@@ -510,9 +669,8 @@ class ScanningEngine:
             return []
         
         # BUG 4 FIX: Skip static assets
-        _SKIP_EXT = {'.css','.js','.png','.jpg','.jpeg','.gif','.ico','.woff','.woff2','.ttf','.svg','.map','.webp'}
         _parsed = urllib.parse.urlparse(url)
-        if any(_parsed.path.endswith(ext) for ext in _SKIP_EXT):
+        if self.endpoint_registry.normalizer.is_static_asset(record):
             logger.debug(f"[SCANNING] Skipping static asset: {url}")
             return []
         
@@ -558,7 +716,7 @@ class ScanningEngine:
         
         logger.debug(f"[SCANNING] Scanning {url} (categories: {categories}, params: {parameters})")
 
-        host = _parsed.netloc or _parsed.hostname or url
+        host = _parsed.hostname or _parsed.netloc or url
         if host in getattr(self.http_client, "_dead_hosts", set()):
             logger.debug(f"[SCANNING] Skipping dead host before scan: {host}")
             return []
@@ -573,33 +731,52 @@ class ScanningEngine:
         auth_contexts = self._get_auth_contexts()
 
         # Get baseline response (normal request without payload)
+        self._apply_host_backpressure(host)
         baseline_response = self.get_baseline_response(url)
         if not baseline_response:
             logger.debug(f"[SCANNING] Failed to get baseline for {url}")
-            baseline_response = {
-                "status_code": 0,
-                "content_length": 0,
-                "response_time": 0,
-                "content": "",
-                "headers": {},
-                "tech": []
-            }
-            # FIX: Save scanned endpoint to state for resume functionality
+            self._mark_endpoint_state(
+                url,
+                baseline_unreliable=True,
+                reachable=False,
+                categories=categories,
+                parameters=parameters,
+            )
+        else:
+            self._mark_endpoint_state(
+                url,
+                baseline_unreliable=False,
+                reachable=True,
+                baseline_status=baseline_response.get("status_code", 0),
+                baseline_response_time=baseline_response.get("response_time", 0),
+                categories=categories,
+                parameters=parameters,
+            )
+
         scanned_endpoints = self.state.get("scanned_endpoints", [])
         if url not in scanned_endpoints:
             scanned_endpoints.append(url)
             self.state.update(scanned_endpoints=scanned_endpoints)
 
+        if not baseline_response:
+            return []
+
         endpoint_score = self._estimate_endpoint_score(url, categories, parameters)
 
-        tool_plan = self._build_tool_plan(endpoint, url, categories, parameters, endpoint_score)
+        tool_plan = self._build_tool_plan(record, url, categories, parameters, endpoint_score)
 
         # Decision logic: build tool execution from endpoint metadata and prior recon context.
         if tool_plan["sqlmap"]:
-            self._run_sqlmap(url, parameters, timeout=tool_plan["sqlmap_timeout"])
+            self._apply_host_backpressure(host)
+            sqlmap_result = self._run_sqlmap(url, parameters, timeout=tool_plan["sqlmap_timeout"])
+            if sqlmap_result.get("error") and "timeout" in str(sqlmap_result.get("error", "")).lower():
+                self._set_scan_incomplete(f"sqlmap timeout on {url}")
         if tool_plan["dalfox"]:
+            self._apply_host_backpressure(host)
             dalfox_result = self.dalfox_runner.run(url, timeout=tool_plan["dalfox_timeout"])
             self._promote_dalfox_result(url, dalfox_result)
+            if dalfox_result.get("error") == "timeout":
+                self._set_scan_incomplete(f"dalfox timeout on {url}")
                     
         # Resource Management: Initialize nuclei pool and concurrency manager on first use
         if not hasattr(self, '_nuclei_pool'):
@@ -619,6 +796,7 @@ class ScanningEngine:
             operation_id = f"nuclei_scan_{hash(url)}"
             if self._nuclei_concurrency.acquire(operation_id, timeout=300):
                 try:
+                    self._apply_host_backpressure(host)
                     # Submit scan to the worker pool for managed execution
                     scan = self._nuclei_pool.submit_scan(
                         url,
@@ -633,13 +811,18 @@ class ScanningEngine:
                     try:
                         nuclei_result = scan['future'].result(timeout=300)
                         self._promote_nuclei_result(url, nuclei_result)
+                        if not nuclei_result.get("success") and nuclei_result.get("error"):
+                            self._set_scan_incomplete(f"nuclei issue on {url}: {str(nuclei_result.get('error'))[:80]}")
                     except concurrent.futures.TimeoutError:
+                        self._set_scan_incomplete(f"nuclei timeout on {url}")
                         logger.warning(f"[SCANNING] Nuclei scan timed out for {url}")
                 except Exception as e:
+                    self._set_scan_incomplete(f"nuclei pool error on {url}: {str(e)[:80]}")
                     logger.error(f"[SCANNING] Nuclei pool error for {url}: {e}")
                 finally:
                     self._nuclei_concurrency.release(operation_id)
             else:
+                self._set_scan_incomplete(f"nuclei concurrency saturation on {url}")
                 logger.warning(f"[SCANNING] Could not acquire concurrency slot for nuclei on {url}")
 
         # Generate payloads based on endpoint type
@@ -743,6 +926,24 @@ class ScanningEngine:
         else:
             logger.debug(f"[SCANNING] Skipping payload generation for {url} - no parameters detected (00-param endpoint)")
 
+        if not responses and baseline_response:
+            responses.append({
+                "endpoint": url,
+                "url": url,
+                "method": "GET",
+                "status_code": baseline_response.get("status_code", 0),
+                "content_length": baseline_response.get("content_length", 0),
+                "response_time": baseline_response.get("response_time", 0),
+                "baseline_status": baseline_response.get("status_code", 0),
+                "baseline_length": baseline_response.get("content_length", 0),
+                "baseline_time": baseline_response.get("response_time", 0),
+                "category": "baseline",
+                "vulnerable": False,
+                "confidence": 0,
+                "reason": "baseline_only_seed_scan",
+                "timestamp": time.time(),
+            })
+
         return responses
 
     def _estimate_endpoint_score(self, url: str, categories: List[str], parameters: List[str]) -> int:
@@ -771,12 +972,15 @@ class ScanningEngine:
 
     def get_baseline_response(self, url: str) -> Dict[str, Any]:
         """Get baseline response for comparison and tech fingerprinting"""
-        if not self._is_valid_url(url):
+        normalized_url = self.endpoint_registry.normalizer.normalize_url(url)
+        if not normalized_url or not self._is_valid_url(normalized_url):
             logger.debug(f"[SCANNING] Skipping baseline for invalid URL: {url[:100]}")
             return None
+        if normalized_url in self._baseline_cache:
+            return self._baseline_cache[normalized_url]
 
         try:
-            response = self.http_client.get(url, timeout=10)
+            response = self.http_client.get(normalized_url, timeout=10)
             
             # Detect tech stack
             tech_detected = self._detect_tech_stack(response)
@@ -785,7 +989,7 @@ class ScanningEngine:
                 current_tech.update(tech_detected)
                 self.state.update(tech_stack=list(current_tech))
             
-            return {
+            baseline = {
                 "status_code": response.status_code,
                 "content_length": len(response.text),
                 "response_time": response.elapsed.total_seconds() if hasattr(response, 'elapsed') else 0,
@@ -793,14 +997,19 @@ class ScanningEngine:
                 "headers": dict(response.headers),
                 "tech": tech_detected
             }
+            self._baseline_cache[normalized_url] = baseline
+            return baseline
         except ConnectionError as e:
             if self._is_name_resolution_error(e) or "Skipping dead host:" in str(e):
-                logger.warning(f"[SCANNING] Skipping unreachable host {url}: {e}")
+                logger.warning(f"[SCANNING] Skipping unreachable host {normalized_url}: {e}")
+                self._baseline_cache[normalized_url] = None
                 return None
-            logger.debug(f"[SCANNING] Baseline request failed for {url}: {e}")
+            logger.debug(f"[SCANNING] Baseline request failed for {normalized_url}: {e}")
+            self._baseline_cache[normalized_url] = None
             return None
         except Exception as e:
-            logger.debug(f"[SCANNING] Baseline request failed for {url}: {e}")
+            logger.debug(f"[SCANNING] Baseline request failed for {normalized_url}: {e}")
+            self._baseline_cache[normalized_url] = None
             return None
 
     def _is_name_resolution_error(self, error: Exception) -> bool:
@@ -909,7 +1118,7 @@ class ScanningEngine:
         # FILTER: Skip non-scannable URLs (mailto:, tel:, javascript:, data:, etc.)
         # These URLs cannot be exploited and waste WAF bypass attempts
         from urllib.parse import urlparse
-        parsed_url = urlparse(url)
+        parsed_url = urllib.parse.urlparse(url)
         if parsed_url.scheme in ['mailto', 'tel', 'javascript', 'data', 'file', 'ftp']:
             logger.debug(f"[SCANNING] Skipping non-scannable URL scheme: {url[:100]}")
             return {
@@ -1077,11 +1286,11 @@ class ScanningEngine:
 
                             current_vulns = self.state.get("vulnerabilities", [])
                             current_vulns.append(vuln)
-                            self.state.update(vulnerabilities=current_vulns)
+                            self.state.update(vulnerabilities=self._dedupe_vulnerabilities(current_vulns))
                             
                             confirmed = self.state.get("confirmed_vulnerabilities", [])
                             confirmed.append(vuln)
-                            self.state.update(confirmed_vulnerabilities=confirmed)
+                            self.state.update(confirmed_vulnerabilities=self._dedupe_vulnerabilities(confirmed))
 
                     return {
                         "endpoint": url,
@@ -1399,14 +1608,14 @@ class ScanningEngine:
                 break
         return contexts
 
-    def _run_sqlmap(self, url: str, parameters: List[str], timeout: int = 180):
+    def _run_sqlmap(self, url: str, parameters: List[str], timeout: int = 180) -> Dict[str, Any]:
         """Best-effort sqlmap execution for high-signal parameterized endpoints using SQLMapRunner."""
         if not self.sqlmap_runner.is_sqlmap_available():
-            return
+            return {"success": False, "error": "sqlmap unavailable"}
         # FIX: Skip sqlmap on placeholder parameters like FUZZ
         if any(p == "FUZZ" for p in parameters):
             logger.debug("[SCANNING] Skipping sqlmap on placeholder parameters")
-            return
+            return {"success": False, "error": "placeholder parameter"}
         marker = parameters[0] if parameters else "id"
         target = url if "?" in url else f"{url}?{marker}=1"
         
@@ -1425,6 +1634,7 @@ class ScanningEngine:
             logger.warning(f"[SCANNING] SQLMap found SQLi on {target}")
         elif result.get("error"):
             logger.debug(f"[SCANNING] sqlmap error for {target}: {result['error'][:120]}")
+        return result
 
     def _detect_xss_context(self, response_text: str) -> str:
         """Detect XSS context from response"""

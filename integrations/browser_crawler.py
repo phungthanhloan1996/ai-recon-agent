@@ -1,3 +1,4 @@
+import urllib.parse
 """
 integrations/browser_crawler.py - Lightweight HTTP-based crawler (FALLBACK ONLY).
 
@@ -34,6 +35,8 @@ class BrowserCrawler:
         self.target_scheme = target_scheme or "https"
         self.max_depth = 2  # OPTIMIZATION: Limited depth (was unlimited)
         self.rate_limit_delay = 0.1  # OPTIMIZATION: Small delay between requests
+        self._logged_blacklisted_hosts = set()
+        self._logged_blacklisted_urls = set()
 
     def _is_host_blacklisted(self, url: str) -> bool:
         """
@@ -47,12 +50,14 @@ class BrowserCrawler:
         """
         try:
             optimizer = get_optimizer()
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             hostname = parsed.hostname or parsed.netloc
             
             if optimizer and optimizer.is_host_blacklisted(hostname):
                 reason = optimizer.get_skip_reason(hostname) if hasattr(optimizer, 'get_skip_reason') else "blacklisted"
-                logger.debug(f"[BROWSER] Skipping blacklisted host: {hostname} ({reason})")
+                if hostname not in self._logged_blacklisted_hosts:
+                    logger.debug(f"[BROWSER] Skipping blacklisted host: {hostname} ({reason})")
+                    self._logged_blacklisted_hosts.add(hostname)
                 return True
         except Exception as e:
             # If optimizer fails, don't block crawling
@@ -76,11 +81,13 @@ class BrowserCrawler:
         """
         # FIX #2: Check blacklist before crawling
         if self._is_host_blacklisted(url):
-            logger.debug(f"[BROWSER] Skipping crawl for blacklisted URL: {url}")
+            if url not in self._logged_blacklisted_urls:
+                logger.debug(f"[BROWSER] Skipping crawl for blacklisted URL: {url}")
+                self._logged_blacklisted_urls.add(url)
             return []
         
         findings: List[Dict[str, Any]] = []
-        parsed_base = urlparse(url)
+        parsed_base = urllib.parse.urlparse(url)
         try:
             # OPTIMIZATION: Use shorter timeout and simpler headers
             resp = requests.get(url, timeout=self.timeout, verify=False,
@@ -99,7 +106,7 @@ class BrowserCrawler:
         # OPTIMIZATION: Process fewer links
         for raw in raw_links[:max_links]:
             abs_url = urljoin(url, raw)
-            parsed = urlparse(abs_url)
+            parsed = urllib.parse.urlparse(abs_url)
             
             # FIX #2: Also check blacklist for discovered URLs
             if self._is_host_blacklisted(abs_url):

@@ -1,3 +1,4 @@
+import urllib.parse
 """
 core/endpoint_ranker.py - Risk Scoring Engine
 Đánh giá endpoint nguy hiểm, AI hỗ trợ phân loại
@@ -7,6 +8,7 @@ import re
 import logging
 from typing import List, Dict, Optional, Set
 from urllib.parse import urlparse, parse_qs
+from core.url_normalizer import URLNormalizer
 
 logger = logging.getLogger("recon.ranker")
 
@@ -101,6 +103,7 @@ EXTENSION_SCORES = {
 class EndpointRanker:
     def __init__(self, ai_client=None):
         self.ai_client = ai_client
+        self._normalizer = URLNormalizer()
 
     def validate_url_structure(self, url: str) -> bool:
         """Kiểm tra URL có cấu trúc hợp lệ, không chứa ký tự HTML"""
@@ -110,7 +113,7 @@ class EndpointRanker:
         invalid_patterns = ['<', '>', '"', "'", '&lt;', '&gt;', 'script', 'alert']
 
         try:
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             hostname = parsed.netloc or parsed.hostname or ''
 
             for pattern in invalid_patterns:
@@ -143,7 +146,7 @@ class EndpointRanker:
         reasons = []
 
         try:
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             path = parsed.path.lower()
             query = parsed.query.lower()
             full = (path + "?" + query).lower() if query else path
@@ -203,9 +206,13 @@ class EndpointRanker:
     def rank_endpoints(self, urls: List[str], top_n: Optional[int] = None) -> List[Dict]:
         """Score and rank all endpoints"""
         logger.info(f"[RANKER] Scoring {len(urls)} endpoints...")
+
+        # Canonical dedup before ranking (input >= deduped >= ranked)
+        normalized_inputs = self._normalizer.normalize_urls(urls or [])
+        logger.info(f"[RANKER] Deduped canonical endpoints: {len(normalized_inputs)}")
         
         scored = []
-        for url in urls:
+        for url in normalized_inputs:
             result = self.score_endpoint(url)
             scored.append(result)
 
@@ -222,7 +229,8 @@ class EndpointRanker:
         if top_n:
             scored = scored[:top_n]
 
-        return scored
+        # Return a finalized copy to avoid accidental downstream mutation
+        return [dict(item) for item in scored]
 
     def filter_high_risk(self, ranked: List[Dict], min_score: int = 6) -> List[Dict]:
         """Filter only high-risk endpoints"""
@@ -249,7 +257,7 @@ class EndpointRanker:
         if not url:
             return True
         
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         path = parsed.path.lower()
         url_lower = url.lower()
         
@@ -289,7 +297,7 @@ class EndpointRanker:
         """Check if URL has query parameters"""
         if not url:
             return False
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         return bool(parsed.query)
 
     def filter_endpoints(

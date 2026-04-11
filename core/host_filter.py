@@ -1,3 +1,4 @@
+import urllib.parse
 """
 core/host_filter.py - Intelligent Host Filtering and Deduplication
 Lọc và phân loại hosts để ưu tiên scan production, loại bỏ sub-paths, deduplicate
@@ -5,6 +6,7 @@ Lọc và phân loại hosts để ưu tiên scan production, loại bỏ sub-pa
 
 import re
 import logging
+import socket
 from typing import List, Dict, Set, Tuple, Optional
 from urllib.parse import urlparse
 from collections import defaultdict
@@ -133,18 +135,17 @@ class HostFilter:
         self.skip_dev_test = skip_dev_test
         self.target_domain = target_domain  # Kept for backward compatibility
         self.allowed_domains: Set[str] = set()
+        self.allowed_host_ports: Set[str] = set()
+        self.target_aliases: Set[str] = set()
+        self.target_host_ports: Set[str] = set()
+        target_host, target_port = self._normalize_scope_seed(target_domain)
+        if target_host:
+            self.target_domain = target_host
+            self._register_scope_host(target_host, target_port, target=True)
         if allowed_domains:
             for d in allowed_domains:
-                d_clean = d.strip().lower()
-                # Remove scheme and www prefix for normalization
-                if d_clean.startswith('http://') or d_clean.startswith('https://'):
-                    from urllib.parse import urlparse
-                    parsed = urlparse(d_clean)
-                    d_clean = parsed.hostname or d_clean
-                if d_clean.startswith('www.'):
-                    d_clean = d_clean[4:]
-                if d_clean:
-                    self.allowed_domains.add(d_clean)
+                host, port = self._normalize_scope_seed(d)
+                self._register_scope_host(host, port)
         self.seen_hosts: Set[str] = set()  # Track seen hostname:port combos
         self.host_groups: Dict[str, List[str]] = defaultdict(list)  # Group related hosts
         self._blacklisted_log_sent: Set[str] = set()  # Track which hosts we've logged for blacklist
@@ -157,13 +158,73 @@ class HostFilter:
             'passed': 0,
             'domain_filtered': 0,  # NEW: Track domain-filtered hosts
         }
+
+    def _normalize_scope_seed(self, value: Optional[str]) -> Tuple[str, Optional[int]]:
+        text = str(value or "").strip().lower()
+        if not text:
+            return "", None
+
+        if "://" not in text:
+            text = f"http://{text}"
+
+        try:
+            parsed = urllib.parse.urlparse(text)
+            return (parsed.hostname or "").lower(), parsed.port
+        except Exception:
+            return "", None
+
+    def _expand_host_aliases(self, host: str) -> Set[str]:
+        aliases: Set[str] = set()
+        host = (host or "").strip().lower()
+        if not host:
+            return aliases
+
+        aliases.add(host)
+        if host.startswith("www."):
+            aliases.add(host[4:])
+
+        try:
+            for info in socket.getaddrinfo(host, None):
+                ip = (info[4][0] or "").strip().lower()
+                if ip:
+                    aliases.add(ip)
+        except socket.gaierror:
+            pass
+        except Exception:
+            pass
+
+        return aliases
+
+    def _register_scope_host(self, host: str, port: Optional[int], target: bool = False):
+        if not host:
+            return
+
+        aliases = self._expand_host_aliases(host)
+        self.allowed_domains.update(aliases)
+        if port:
+            self.allowed_host_ports.update({f"{alias}:{port}" for alias in aliases})
+
+        if target:
+            self.target_aliases.update(aliases)
+            if port:
+                self.target_host_ports.update({f"{alias}:{port}" for alias in aliases})
+
+    def _matches_scope(self, hostname: str, port: Optional[int], aliases: Set[str], scoped_host_ports: Set[str]) -> bool:
+        hostname = (hostname or "").strip().lower()
+        if not hostname:
+            return False
+        if hostname not in aliases:
+            return False
+        if not scoped_host_ports or port is None:
+            return True
+        return f"{hostname}:{port}" in scoped_host_ports
     
     def _normalize_url(self, url: str) -> Tuple[str, str, str]:
         """
         Normalize URL to extract base host, port, and path.
         Returns: (hostname:port, scheme, path)
         """
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         hostname = parsed.hostname or parsed.netloc or ''
         port = parsed.port
         scheme = parsed.scheme or 'http'
@@ -195,7 +256,7 @@ class HostFilter:
         Sub-paths are like /wp-admin/, /author/, etc. - they should be treated as 
         endpoints of the parent host, not separate scan targets.
         """
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         path = parsed.path.lower()
         
         # Check if path has multiple segments (indicating it's a path, not root)
@@ -229,7 +290,7 @@ class HostFilter:
     def _is_production(self, url: str) -> bool:
         """Check if URL appears to be a production environment"""
         url_lower = url.lower()
-        hostname = urlparse(url).hostname or ''
+        hostname = urllib.parse.urlparse(url).hostname or ''
         
         # Check production indicators
         for pattern in PRODUCTION_INDICATORS:
@@ -244,7 +305,7 @@ class HostFilter:
     
     def _is_third_party(self, url: str) -> bool:
         """Check if URL belongs to a third-party domain (not target scope)"""
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         hostname = (parsed.hostname or '').lower()
         
         # Check exact match
@@ -265,7 +326,7 @@ class HostFilter:
         but NOT the platform's own main domain (e.g., wordpress.com itself)
         or its www subdomain (e.g., www.wordpress.com).
         """
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         hostname = (parsed.hostname or '').lower()
         
         # Only check if it's a SUBDOMAIN of a free hosting platform
@@ -286,7 +347,7 @@ class HostFilter:
     
     def _is_suspicious_subdomain(self, url: str) -> bool:
         """Check if URL has auto-generated or suspicious subdomain patterns"""
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         hostname = (parsed.hostname or '').lower()
         
         # Check total hostname length
@@ -322,30 +383,30 @@ class HostFilter:
         if not self.target_domain:
             return True
         
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         hostname = (parsed.hostname or '').lower()
-        target = self.target_domain.lower()
-        
-        # Exact match
-        if hostname == target:
+        port = parsed.port
+
+        if self._matches_scope(hostname, port, self.target_aliases, self.target_host_ports):
             return True
-        
-        # Subdomain match (e.g., www.elo.edu.vn, mail.elo.edu.vn)
-        if hostname.endswith('.' + target):
+
+        target = (self.target_domain or "").lower()
+        if not target:
+            return False
+
+        if hostname == target or hostname.endswith('.' + target):
             return True
-        
-        # Handle www prefix
+
         if target.startswith('www.'):
             target_no_www = target[4:]
             if hostname == target_no_www or hostname.endswith('.' + target_no_www):
                 return True
-        
-        # If target doesn't have www, also check with www
+
         if not target.startswith('www.'):
             target_with_www = 'www.' + target
             if hostname == target_with_www or hostname.endswith('.' + target_with_www):
                 return True
-        
+
         return False
 
     def _is_in_allowed_domains(self, url: str) -> bool:
@@ -364,23 +425,20 @@ class HostFilter:
         if not self.allowed_domains:
             return True
         
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         hostname = (parsed.hostname or '').lower()
-        
-        # Check against each allowed domain
+        port = parsed.port
+
+        if self._matches_scope(hostname, port, self.allowed_domains, self.allowed_host_ports):
+            return True
+
         for domain in self.allowed_domains:
-            # Exact match
-            if hostname == domain:
+            if hostname == domain or hostname.endswith('.' + domain):
                 return True
-            # Subdomain match (e.g., www.elo.edu.vn, mail.elo.edu.vn)
-            if hostname.endswith('.' + domain):
-                return True
-            # Handle www prefix
             if domain.startswith('www.'):
                 domain_no_www = domain[4:]
                 if hostname == domain_no_www or hostname.endswith('.' + domain_no_www):
                     return True
-            # If domain doesn't have www, also check with www
             if not domain.startswith('www.'):
                 domain_with_www = 'www.' + domain
                 if hostname == domain_with_www or hostname.endswith('.' + domain_with_www):
@@ -595,7 +653,7 @@ class HostFilter:
             if not url:
                 continue
             
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             hostname = parsed.hostname or ''
             
             # Extract root domain (last 2-3 parts)

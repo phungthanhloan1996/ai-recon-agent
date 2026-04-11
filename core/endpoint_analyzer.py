@@ -1,3 +1,4 @@
+import urllib.parse
 """
 core/endpoint_analyzer.py - Enhanced Endpoint Classification
 Analyzes endpoints with HEAD/GET requests, content-type detection, and form extraction
@@ -200,7 +201,7 @@ class EndpointAnalyzer:
                 logger.warning(f"Failed to parse HTML from {url}: {str(e)[:50]}")
 
         # Step 7: Analyze query parameters
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         if parsed.query:
             result['has_query_params'] = True
             result['params'] = list(parse_qs(parsed.query).keys())
@@ -263,7 +264,7 @@ class EndpointAnalyzer:
                 action = form.get('action', '')
                 if action:
                     if action.startswith('/'):
-                        parsed = urlparse(base_url)
+                        parsed = urllib.parse.urlparse(base_url)
                         action = f"{parsed.scheme}://{parsed.netloc}{action}"
                     elif not action.startswith(('http://', 'https://')):
                         action = f"{base_url.rstrip('/')}/{action}"

@@ -1,3 +1,4 @@
+import urllib.parse
 """
 modules/subdomain_takeover_scanner.py - Subdomain Takeover Detection
 Dangling DNS, CNAME takeover, cloud service takeover
@@ -82,7 +83,7 @@ class SubdomainTakeoverScanner:
         logger.info(f"[TAKEOVER] Scanning {url}")
         
         # Parse main domain
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         main_domain = parsed.netloc.split(':')[0]
         
         if not subdomains:

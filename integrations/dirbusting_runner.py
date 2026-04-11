@@ -1,3 +1,4 @@
+import urllib.parse
 """
 integrations/dirbusting_runner.py - Directory and File Brute-forcing
 Uses dirsearch or gobuster to discover hidden files and directories.
@@ -108,7 +109,7 @@ class DirBustingRunner:
                 After timeout, reduce timeout by 25% to fail faster on problematic hosts.
         """
         optimizer = get_optimizer()
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         hostname = parsed.hostname or ""
         
         # Check if host is blacklisted

@@ -1,3 +1,4 @@
+import urllib.parse
 """
 modules/crawler.py - Discovery Engine
 Endpoint extraction from HTML, JavaScript, forms, and hidden parameters
@@ -15,7 +16,7 @@ import logging
 import json
 import tempfile
 from typing import Dict, List, Set, Tuple, Callable, Optional
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlunparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from bs4 import BeautifulSoup
 import time
@@ -23,6 +24,7 @@ import config
 from core.executor import check_tools, run_command
 from core.state_manager import StateManager
 from core.http_engine import HTTPClient
+from core.phase_admission import PhaseAdmission
 from integrations.browser_crawler import BrowserCrawler
 from modules.api_scanner import APIScannerRunner
 
@@ -64,6 +66,7 @@ class DiscoveryEngine:
         self.target = state.get("target")
         self.http_client = HTTPClient()
         self.browser_crawler = BrowserCrawler()
+        self.phase_admission = PhaseAdmission(state)
         self.budget = (self.state.get("scan_metadata", {}) or {}).get("budget", {})
 
         # Patterns for endpoint discovery
@@ -101,7 +104,7 @@ class DiscoveryEngine:
         """
         score = 0
         url_lower = url.lower()
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         path = parsed.path.lower()
         query = parsed.query
         
@@ -242,6 +245,14 @@ class DiscoveryEngine:
                 if api_ep.get('url') not in existing_urls:
                     classified.append(api_ep)
 
+        if not classified and seed_urls:
+            classified = self._build_seed_fallback_endpoints(seed_urls)
+            if classified:
+                logger.warning(
+                    "[DISCOVERY] Discovery returned empty; injected %s canonical seed endpoint(s)",
+                    len(classified),
+                )
+
         self.state.update(endpoints=classified)
 
         # Save to file
@@ -261,18 +272,38 @@ class DiscoveryEngine:
         ]
         merged = list(dict.fromkeys(live_urls + (urls or [])))
         if not merged:
+            fallback_urls = [ep.get("url") for ep in self._build_seed_fallback_endpoints([self.target]) if ep.get("url")]
+            if fallback_urls:
+                logger.warning(
+                    "[DISCOVERY] Upstream provided no seed URLs; preserved %s canonical target seed(s)",
+                    len(fallback_urls),
+                )
+                return fallback_urls
             return []
 
-        target_parsed = urlparse(self.target or "")
+        target_parsed = urllib.parse.urlparse(self.target or "")
         target_host = target_parsed.hostname or ""
         target_port = target_parsed.port
 
         prepared: List[str] = []
         seen = set()
+        pruned_invalid = 0
+        pruned_blacklisted = 0
         for url in merged:
             if not url.startswith(("http://", "https://")):
                 continue
-            parsed = urlparse(url)
+            record = self.phase_admission.register(url)
+            if not record or not self.phase_admission.is_valid_endpoint(record):
+                pruned_invalid += 1
+                continue
+
+            host = record.get("host") or ""
+            if host and self.phase_admission.optimizer.is_host_blacklisted(host):
+                pruned_blacklisted += 1
+                continue
+
+            normalized_url = record.get("url") or url
+            parsed = urllib.parse.urlparse(normalized_url)
             key = (parsed.scheme, parsed.netloc, parsed.path, parsed.query)
             if key in seen:
                 continue
@@ -284,9 +315,56 @@ class DiscoveryEngine:
                     continue
 
             seen.add(key)
-            prepared.append(url)
+            prepared.append(normalized_url)
+
+        if pruned_invalid or pruned_blacklisted:
+            logger.info(
+                "[DISCOVERY] Seed filtering reduced %s -> %s (invalid=%s blacklisted=%s)",
+                len(merged),
+                len(prepared),
+                pruned_invalid,
+                pruned_blacklisted,
+            )
+
+        if not prepared and merged:
+            fallback_urls = [ep.get("url") for ep in self._build_seed_fallback_endpoints(merged) if ep.get("url")]
+            if fallback_urls:
+                logger.warning(
+                    "[DISCOVERY] Seed filtering would empty the queue; preserved %s canonical seed URL(s)",
+                    len(fallback_urls),
+                )
+                return fallback_urls
 
         return prepared
+
+    def _build_seed_fallback_endpoints(self, seed_urls: List[str]) -> List[Dict]:
+        fallback: List[Dict] = []
+        seen = set()
+        for raw_seed in list(seed_urls or []) + [self.target]:
+            record = self.phase_admission.register(raw_seed)
+            if not record:
+                continue
+            parsed = urllib.parse.urlparse(record.get("url") or "")
+            path = (parsed.path or "/").rstrip("/") or "/"
+            path_variants = list(dict.fromkeys([path, "/" if path != "/" else "/", f"{path}/" if path != "/" else "/"]))
+            scheme_variants = list(dict.fromkeys([parsed.scheme, "http", "https"]))
+            for scheme in scheme_variants:
+                for path_variant in path_variants:
+                    variant = urlunparse((scheme, parsed.netloc, path_variant, "", parsed.query, ""))
+                    candidate = self.phase_admission.register(variant)
+                    if not candidate or not self.phase_admission.is_valid_endpoint(candidate):
+                        continue
+                    fingerprint = candidate.get("exact_fingerprint") or candidate.get("url")
+                    if fingerprint in seen:
+                        continue
+                    seen.add(fingerprint)
+                    fallback.append({
+                        "url": candidate["url"],
+                        "type": "seed",
+                        "source": "seed_fallback",
+                        "method": "GET",
+                    })
+        return self.classify_endpoints(fallback)
 
     def _discover_with_katana(self, seed_urls: List[str]) -> List[Dict]:
         """Use katana CLI for deeper JS-aware crawling with retry mechanism."""
@@ -381,10 +459,13 @@ class DiscoveryEngine:
                 with tempfile.NamedTemporaryFile(prefix="arjun_", suffix=".txt", delete=False) as tf:
                     out_file = tf.name
                 try:
-                    rc, stdout, _ = run_command(
+                    rc, stdout, stderr = run_command(
                         ["arjun", "-u", url, "-oT", out_file, "-q", "-t", "8"],
                         timeout=120
                     )
+                    if rc == -4 or (stderr and "Traceback" in stderr):
+                        logger.warning("[DISCOVERY] Arjun failed at runtime; skipping remaining Arjun jobs")
+                        break
                     if rc == 0 and os.path.exists(out_file):
                         with open(out_file, "r", encoding="utf-8", errors="ignore") as f:
                             for line in f:
@@ -407,12 +488,12 @@ class DiscoveryEngine:
                         os.unlink(out_file)
 
         if check_tools(["paramspider"]).get("paramspider"):
-            domains = sorted({urlparse(u).netloc for u in seeds if urlparse(u).netloc})
+            domains = sorted({urllib.parse.urlparse(u).netloc for u in seeds if urllib.parse.urlparse(u).netloc})
             # FIX: Only run paramspider on domains with API patterns or historical query strings
             api_patterns = ["/api/", "/graphql", "/rest/", "/wp-json"]
             domains_with_potential = []
             for domain in domains:
-                domain_seeds = [u for u in seeds if urlparse(u).netloc == domain]
+                domain_seeds = [u for u in seeds if urllib.parse.urlparse(u).netloc == domain]
                 has_api = any(any(p in u for p in api_patterns) for u in domain_seeds)
                 has_params = any("?" in u for u in domain_seeds)
                 if has_api or has_params:
@@ -421,7 +502,10 @@ class DiscoveryEngine:
                 logger.debug("[DISCOVERY] Skipping paramspider - no API patterns or query strings found")
             else:
                 for domain in domains_with_potential[:4]:
-                    rc, stdout, _ = run_command(["paramspider", "-d", domain, "-s"], timeout=180)
+                    rc, stdout, stderr = run_command(["paramspider", "-d", domain, "-s"], timeout=180)
+                    if rc == -4 or (stderr and "Traceback" in stderr):
+                        logger.warning("[DISCOVERY] ParamSpider failed at runtime; skipping remaining ParamSpider jobs")
+                        break
                     if rc != 0 or not stdout:
                         continue
                     out.extend(self._parse_plain_url_output(stdout, source="paramspider"))
@@ -509,6 +593,15 @@ class DiscoveryEngine:
     def discover_from_url(self, url: str) -> List[Dict]:
         """Discover endpoints from a single URL"""
         endpoints = []
+        record = self.phase_admission.register(url)
+        if not record or not self.phase_admission.is_valid_endpoint(record):
+            return endpoints
+
+        host = record.get("host") or ""
+        if host and self.phase_admission.optimizer.is_host_blacklisted(host):
+            return endpoints
+
+        url = record.get("url") or url
         
         # Skip binary files to avoid parsing errors
         binary_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.zip', '.tar', '.gz', 
@@ -541,6 +634,8 @@ class DiscoveryEngine:
             endpoints.extend(self.extract_from_comments(soup, url))
 
         except Exception as e:
+            if "Skipping blacklisted host" in str(e):
+                return endpoints
             logger.debug(f"[DISCOVERY] Error discovering from {url}: {e}")
 
         return endpoints
@@ -640,33 +735,15 @@ class DiscoveryEngine:
         """Normalize an endpoint URL"""
         if not endpoint:
             return None
+        record = self.phase_admission.register(endpoint, base_url=base_url)
+        if not record or not self.phase_admission.is_valid_endpoint(record):
+            return None
 
-        # Skip external domains
-        if endpoint.startswith(('http://', 'https://')):
-            parsed = urlparse(endpoint)
-            base_parsed = urlparse(base_url)
-            if parsed.netloc and parsed.netloc != base_parsed.netloc:
-                return None
-
-        # Convert relative to absolute
-        if not endpoint.startswith(('http://', 'https://')):
-            base_parsed = urlparse(base_url)
-            if endpoint.startswith('/'):
-                endpoint = f"{base_parsed.scheme}://{base_parsed.netloc}{endpoint}"
-            else:
-                # Relative path
-                base_path = base_parsed.path.rsplit('/', 1)[0] + '/'
-                endpoint = f"{base_parsed.scheme}://{base_parsed.netloc}{base_path}{endpoint}"
-
-        # Remove fragments
-        endpoint = endpoint.split('#')[0]
-
-        # Skip excluded extensions
-        parsed = urlparse(endpoint)
+        parsed = urllib.parse.urlparse(record["url"])
         if any(parsed.path.endswith(ext) for ext in self.exclude_extensions):
             return None
 
-        return endpoint
+        return record["url"]
 
     def deduplicate_endpoints(self, endpoints: List[Dict]) -> List[Dict]:
         """Remove duplicate endpoints with intelligent URL normalization.
@@ -686,7 +763,7 @@ class DiscoveryEngine:
             
             # Normalize URL: parse, filter params, reconstruct
             try:
-                parsed = urlparse(url)
+                parsed = urllib.parse.urlparse(url)
                 
                 # Filter out noise tracking parameters
                 if parsed.query:
@@ -738,7 +815,12 @@ class DiscoveryEngine:
         for ep in endpoints:
             url = ep.get('url', '')
             if url:
-                parsed = urlparse(url)
+                record = self.phase_admission.register(url)
+                if not record or not self.phase_admission.is_valid_endpoint(record):
+                    continue
+                if record.get("host") and self.phase_admission.optimizer.is_host_blacklisted(record["host"]):
+                    continue
+                parsed = urllib.parse.urlparse(record.get("url") or url)
                 base_url = f"{parsed.scheme}://{parsed.netloc}"
                 base_urls.add(base_url)
         
@@ -833,7 +915,7 @@ class DiscoveryEngine:
                     categories.append('general')
             
             # Extract parameters
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             params = list(parse_qs(parsed.query).keys()) if parsed.query else []
             
             # 🔥 FIX: Nếu không có params nhưng URL có dấu ?, thêm parameter mặc định

@@ -1,3 +1,4 @@
+import urllib.parse
 import json
 import logging
 import os
@@ -141,7 +142,7 @@ class LoadTester:
         try:
             # Get base host (first target's domain)
             from urllib.parse import urlparse
-            parsed = urlparse(targets[0])
+            parsed = urllib.parse.urlparse(targets[0])
             host = f"{parsed.scheme}://{parsed.netloc}"
             
             cmd = [

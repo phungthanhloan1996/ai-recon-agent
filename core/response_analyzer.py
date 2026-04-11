@@ -4,6 +4,7 @@ Phân tích response để xác định exploit success
 """
 
 import re
+import json
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -497,6 +498,75 @@ class ResponseAnalyzer:
             )
         
         return result
+
+    def compare_responses(self, baseline: Dict[str, Any], mutated: Dict[str, Any]) -> float:
+        """
+        Differential comparison engine for fuzzing.
+
+        Compares:
+        - HTTP status
+        - content length
+        - JSON keys
+        - header differences
+
+        Returns:
+            diff_score in range [0.0, 1.0]
+        """
+        baseline = baseline or {}
+        mutated = mutated or {}
+
+        score = 0.0
+
+        baseline_status = int(baseline.get("status_code", 0) or 0)
+        mutated_status = int(mutated.get("status_code", 0) or 0)
+        if baseline_status != mutated_status:
+            score += 0.35
+
+        baseline_len = int(baseline.get("content_length", 0) or 0)
+        mutated_len = int(mutated.get("content_length", 0) or 0)
+        if baseline_len > 0:
+            ratio = abs(mutated_len - baseline_len) / float(max(baseline_len, 1))
+            score += min(0.30, ratio)
+        elif mutated_len != baseline_len:
+            score += 0.10
+
+        baseline_body = baseline.get("body") or baseline.get("content") or ""
+        mutated_body = mutated.get("body") or mutated.get("content") or ""
+
+        def _json_keys(payload: str) -> set:
+            if not isinstance(payload, str) or not payload:
+                return set()
+            try:
+                parsed = json.loads(payload)
+            except Exception:
+                return set()
+
+            keys = set()
+            if isinstance(parsed, dict):
+                keys = set(parsed.keys())
+            elif isinstance(parsed, list) and parsed and isinstance(parsed[0], dict):
+                keys = set(parsed[0].keys())
+            return keys
+
+        baseline_keys = _json_keys(baseline_body)
+        mutated_keys = _json_keys(mutated_body)
+        if baseline_keys or mutated_keys:
+            union = baseline_keys | mutated_keys
+            if union:
+                delta = len(union - (baseline_keys & mutated_keys)) / float(len(union))
+                score += min(0.20, delta)
+
+        baseline_headers = {str(k).lower(): str(v) for k, v in (baseline.get("headers") or {}).items()}
+        mutated_headers = {str(k).lower(): str(v) for k, v in (mutated.get("headers") or {}).items()}
+        watched_headers = {"content-type", "location", "set-cookie", "cache-control", "www-authenticate"}
+        header_changes = 0
+        for header in watched_headers:
+            if baseline_headers.get(header) != mutated_headers.get(header):
+                header_changes += 1
+        if header_changes:
+            score += min(0.15, 0.05 * header_changes)
+
+        return round(min(1.0, score), 2)
 
     def analyze_shell_response(self, response_text: str) -> Tuple[bool, str]:
         """Check if webshell executed successfully"""

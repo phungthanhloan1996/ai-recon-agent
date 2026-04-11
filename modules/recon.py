@@ -1,3 +1,4 @@
+import urllib.parse
 """
 modules/recon.py - Recon Engine
 External integrations for comprehensive surface discovery
@@ -65,7 +66,7 @@ class ReconEngine:
             raise ValueError("Target domain not found in state")
 
         self.raw_target = self.target
-        parsed_target = urlparse(self.target if "://" in self.target else f"https://{self.target}")
+        parsed_target = urllib.parse.urlparse(self.target if "://" in self.target else f"https://{self.target}")
         self.target_host = parsed_target.hostname or self.target.replace("https://", "").replace("http://", "").strip()
         self.target_port = parsed_target.port
         self.target_scheme = parsed_target.scheme or "https"
@@ -658,7 +659,7 @@ class ReconEngine:
             url = (raw_url or "").strip()
             if not url or url in seen:
                 continue
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             if parsed.scheme not in ("http", "https") or not parsed.netloc:
                 continue
             
@@ -762,7 +763,7 @@ class ReconEngine:
         Create a canonical form of URL for deduplication.
         Normalizes query parameters and removes noise.
         """
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         path = parsed.path or "/"
         
         # Normalize path
@@ -819,7 +820,7 @@ class ReconEngine:
         
         filtered = []
         for url in urls:
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             path = parsed.path.lower()
             
             # Check if URL matches low-value patterns
@@ -851,7 +852,7 @@ class ReconEngine:
         """
         groups: Dict[str, List[str]] = {}
         for url in urls:
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             path = parsed.path or "/"
             if path not in groups:
                 groups[path] = []
@@ -879,7 +880,7 @@ class ReconEngine:
             else:
                 # Sort by parameter value (prefer URLs with injection-prone params)
                 def score_url(url):
-                    parsed = urlparse(url)
+                    parsed = urllib.parse.urlparse(url)
                     if not parsed.query:
                         return 0
                     url_params = set()
@@ -900,7 +901,7 @@ class ReconEngine:
         seen_hosts = set()
 
         def score(url: str):
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             path = parsed.path or "/"
             ext = os.path.splitext(path.lower())[1]
             path_depth = len([part for part in path.split("/") if part])
@@ -917,7 +918,7 @@ class ReconEngine:
             return (scheme_penalty, static_penalty, query_penalty, path_depth, len(path), len(url))
 
         for url in sorted(self._filter_useful_urls(urls), key=score):
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             host = parsed.hostname or ""
             if not host:
                 continue

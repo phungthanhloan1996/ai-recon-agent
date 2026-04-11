@@ -1,0 +1,161 @@
+{
+  "logfile": "/home/root17/Desktop/ai-recon-agent/results/127_0_0_1_8080_20260411_223036/agent.log",
+  "phases": {
+    "advanced": 1,
+    "comprehensive": 1,
+    "http": 1,
+    "127": 2,
+    "https": 1,
+    "scan": 3
+  },
+  "phase_sequence": [
+    {
+      "line": 6,
+      "phase": "advanced",
+      "text": "[2026-04-11 22:31:26] [DEBUG] [recon.agent.http_127.0.0.1_8080] [WORDPRESS] Running advanced security scan on detected targets..."
+    },
+    {
+      "line": 8,
+      "phase": "comprehensive",
+      "text": "[2026-04-11 22:31:28] [INFO] [recon.agent.http_127.0.0.1_8080] [TOOLKIT] Starting comprehensive scan on 2 hosts"
+    },
+    {
+      "line": 9,
+      "phase": "http",
+      "text": "[2026-04-11 22:31:40] [INFO] [recon.agent.http_127.0.0.1_8080] [NIKTO] Scan completed: http://127.0.0.1:8080/"
+    },
+    {
+      "line": 17,
+      "phase": "127",
+      "text": "[2026-04-11 22:31:40] [INFO] [recon.agent.http_127.0.0.1_8080] [NMAP] Port scan completed: 127.0.0.1"
+    },
+    {
+      "line": 18,
+      "phase": "127",
+      "text": "[2026-04-11 22:31:40] [INFO] [recon.agent.http_127.0.0.1_8080] [NMAP] Port scan completed: 127.0.0.1"
+    },
+    {
+      "line": 19,
+      "phase": "https",
+      "text": "[2026-04-11 22:31:40] [INFO] [recon.agent.http_127.0.0.1_8080] [NIKTO] Scan completed: https://127.0.0.1:8080/"
+    },
+    {
+      "line": 35,
+      "phase": "scan",
+      "text": "[2026-04-11 22:34:28] [WARNING] [recon.agent.http_127.0.0.1_8080] [SCAN] Running scan on 14 endpoints"
+    },
+    {
+      "line": 62,
+      "phase": "scan",
+      "text": "[2026-04-11 22:43:06] [WARNING] [recon.agent.http_127.0.0.1_8080] [SCAN] Running scan on 14 endpoints"
+    },
+    {
+      "line": 78,
+      "phase": "scan",
+      "text": "[2026-04-11 22:43:57] [WARNING] [recon.agent.http_127.0.0.1_8080] [SCAN] Running scan on 14 endpoints"
+    }
+  ],
+  "errors": {},
+  "module_hits": {
+    "INFO": 62,
+    "INIT": 3,
+    "LIVE": 1,
+    "DEBUG": 17,
+    "WORDPRESS": 1,
+    "TOOLKIT": 3,
+    "NIKTO": 2,
+    "WHATWEB": 2,
+    "WAPPALYZER": 2,
+    "NMAP": 2,
+    "WP": 1,
+    "JS_HUNTER": 1,
+    "PARAM_MINER": 2,
+    "WARNING": 14,
+    "RANK": 3,
+    "SCAN": 15,
+    "DIFF_FUZZ": 3,
+    "ANALYSIS": 9,
+    "FINDINGS": 6,
+    "PIVOT": 2,
+    "VERIFY": 1,
+    "AUTO_EXPLOIT": 2,
+    "EXPLOIT": 1,
+    "GATING": 5,
+    "CUSTOM": 3,
+    "GROQ": 5,
+    "ITER_METRICS": 4,
+    "AGENT": 3
+  },
+  "suspicious": [
+    {
+      "line": 31,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:34:28] [WARNING] [recon.agent.http_127.0.0.1_8080] [PARAM_MINER] Discovered 38 parameters on 8 endpoints"
+    },
+    {
+      "line": 32,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:34:28] [WARNING] [recon.agent.http_127.0.0.1_8080] [RANK] input endpoints: 77"
+    },
+    {
+      "line": 33,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:34:28] [WARNING] [recon.agent.http_127.0.0.1_8080] [RANK] input=77 deduped=14 ranked=14 scheduled=14"
+    },
+    {
+      "line": 34,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:34:28] [WARNING] [recon.agent.http_127.0.0.1_8080] [RANK] Prioritized endpoints count: 14"
+    },
+    {
+      "line": 35,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:34:28] [WARNING] [recon.agent.http_127.0.0.1_8080] [SCAN] Running scan on 14 endpoints"
+    },
+    {
+      "line": 47,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:36:24] [WARNING] [recon.agent.http_127.0.0.1_8080] [PIVOT] Generated 3 exploitation chains"
+    },
+    {
+      "line": 50,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:36:26] [WARNING] [recon.agent.http_127.0.0.1_8080] [AUTO_EXPLOIT] Selected: Recon chain: content_ingestion_candidate"
+    },
+    {
+      "line": 58,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:43:06] [WARNING] [recon.agent.http_127.0.0.1_8080] [GROQ] Advisory unavailable after 429; continuing with local logic"
+    },
+    {
+      "line": 60,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:43:06] [WARNING] [recon.agent.http_127.0.0.1_8080] [GROQ] Advisory unavailable after 429; continuing with local logic"
+    },
+    {
+      "line": 62,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:43:06] [WARNING] [recon.agent.http_127.0.0.1_8080] [SCAN] Running scan on 14 endpoints"
+    },
+    {
+      "line": 74,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:43:57] [WARNING] [recon.agent.http_127.0.0.1_8080] [GROQ] Advisory unavailable after 429; continuing with local logic"
+    },
+    {
+      "line": 76,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:43:57] [WARNING] [recon.agent.http_127.0.0.1_8080] [GROQ] Advisory unavailable after 429; continuing with local logic"
+    },
+    {
+      "line": 78,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:43:57] [WARNING] [recon.agent.http_127.0.0.1_8080] [SCAN] Running scan on 14 endpoints"
+    },
+    {
+      "line": 90,
+      "type": "warn/fail",
+      "text": "[2026-04-11 22:44:46] [WARNING] [recon.agent.http_127.0.0.1_8080] [GROQ] Advisory unavailable after 429; continuing with local logic"
+    }
+  ]
+}

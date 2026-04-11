@@ -1,3 +1,4 @@
+import urllib.parse
 """
 Scan Optimizer - Centralized optimization for scanning operations
 Addresses performance issues with dead hosts, port scanning, retries, and caching
@@ -432,7 +433,7 @@ class ScanOptimizer:
         """
         from urllib.parse import urlparse, parse_qs
         
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         
         # Check if URL has query parameters
         if parsed.query:
@@ -475,7 +476,7 @@ class ScanOptimizer:
         """
         from urllib.parse import urlparse, parse_qs
         
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         
         # Count query parameters
         param_count = 0
@@ -584,7 +585,7 @@ class ScanOptimizer:
             url = url_extractor(item) if url_extractor else str(item)
             try:
                 from urllib.parse import urlparse
-                parsed = urlparse(url)
+                parsed = urllib.parse.urlparse(url)
                 hostname = parsed.hostname or parsed.netloc or ""
                 
                 if hostname in self._blacklisted_hosts:

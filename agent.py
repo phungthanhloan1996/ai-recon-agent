@@ -1,3 +1,4 @@
+import urllib.parse
 import argparse
 import warnings
 # Thêm vào sau các import modules
@@ -56,6 +57,8 @@ from core.exploit_executor import ExploitExecutor
 from core.error_recovery import ErrorRecovery, ConditionalPlaybook
 from core.wordlist_generator import WordlistGenerator
 from core.attack_surface import AttackSurfaceTracker
+from core.scan_deduplicator import ScanDeduplicator
+from core.url_normalizer import URLNormalizer as CanonicalURLNormalizer
 
 # ─── Integration Components ─────────────────────────────────────────────────
 from integrations.wp_advanced_scan import WordPressAdvancedScan
@@ -138,6 +141,7 @@ from modules.toolkit_scanner import ToolkitScanner
 from modules.endpoint_probe import run_endpoint_probe
 from modules.js_endpoint_hunter import hunt_js_endpoints
 from modules.parameter_miner import mine_endpoint_parameters
+from modules.differential_fuzzer import DifferentialFuzzer
 from modules.sqli_exploiter import SQLiExploiter
 from modules.upload_bypass import UploadBypass
 from modules.reverse_shell import ReverseShellGenerator
@@ -159,7 +163,7 @@ from modules.subdomain_takeover_scanner import SubdomainTakeoverScanner
 
 # ─── Core Intelligence Engines ──────────────────────────────────────────────
 from core.privilege_pivot_engine import analyze_privilege_escalation
-from core.automatic_exploit_selector import select_exploitation_strategy, select_all_strategies, should_execute_module, AutomaticExploitSelector
+from core.automatic_exploit_selector import select_exploitation_strategy, should_execute_module, AutomaticExploitSelector
 
 # ─── AI Intelligence Engines ────────────────────────────────────────────────
 from ai.adaptive_payload_engine import generate_adaptive_payloads
@@ -423,7 +427,7 @@ def _print_api_validation(results: dict):
 def validate_and_handle_api_keys() -> tuple:
     """
     Validate tất cả API keys và xử lý theo quy tắc:
-    - Groq: BẮT BUỘC - nếu chết thì dừng luôn
+    - Groq: advisory/fallback only - nếu chết thì tiếp tục bằng local logic
     - Others: TÙY CHỌN - nếu chết thì cảnh báo + skip modules
     
     Returns:
@@ -434,22 +438,10 @@ def validate_and_handle_api_keys() -> tuple:
     api_results = check_api_keys(silent=False)
     skip_modules = []
     
-    # Check Groq - BẮT BUỘC
+    # Check Groq - advisory only
     if not api_results["groq"]["valid"]:
-        print(f"\n{Colors.BRIGHT_RED}╔══════════════════════════════════════════════════════════════╗{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}║  ❌ FATAL ERROR: GROQ API KEY KHÔNG HỢP LỆ!                   ║{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}║                                                                ║{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}║  Groq API là BẮT BUỘC để AI Recon Agent hoạt động.           ║{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}║                                                                ║{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}║  Cách khắc phục:                                              ║{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}║  1. Lấy API key tại: https://console.groq.com/keys            ║{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}║  2. Điền vào file .env:                                       ║{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}║     GROQ_API_KEY=your_key_here                                ║{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}║  3. Hoặc export: export GROQ_API_KEY=your_key_here            ║{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}║                                                                ║{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}║  Chi tiết: {api_results['groq']['message']:<52}║{Colors.RESET}")
-        print(f"{Colors.BRIGHT_RED}╚══════════════════════════════════════════════════════════════╝{Colors.RESET}\n")
-        sys.exit(1)
+        skip_modules.append("groq_advisory")
+        print(f"{Colors.YELLOW}⚠️  Groq API không hợp lệ - tiếp tục bằng deterministic/rule-based mode{Colors.RESET}")
     
     # Check optional APIs - nếu chết thì skip modules tương ứng
     if not api_results["wpscan"]["valid"]:
@@ -468,7 +460,10 @@ def validate_and_handle_api_keys() -> tuple:
         skip_modules.append("ai_fallback")
         print(f"{Colors.YELLOW}⚠️  Không có AI fallback provider - Chỉ dùng Groq{Colors.RESET}")
     
-    print(f"\n{Colors.BRIGHT_GREEN}✅ Groq API hợp lệ - Bắt đầu scan...{Colors.RESET}\n")
+    if api_results["groq"]["valid"]:
+        print(f"\n{Colors.BRIGHT_GREEN}✅ Groq API hợp lệ - Bắt đầu scan...{Colors.RESET}\n")
+    else:
+        print(f"\n{Colors.YELLOW}⚠️  Groq advisory unavailable - Bắt đầu scan với local decision flow...{Colors.RESET}\n")
     
     return api_results, skip_modules
 
@@ -621,7 +616,7 @@ class BatchDisplay:
         self.ALL_PHASES = [
             'recon', 'live', 'wp', 'toolkit', 'crawl', 'wp_detect_state',
             'js_hunter', 'param_mine', 'auth', 'ml_classify', 'classify', 'rank', 'scan',
-            'analyze', 'cve_analysis', 'pivot', 'graph', 'chain', 'select',
+            'differential_fuzz', 'analyze', 'cve_analysis', 'pivot', 'graph', 'chain', 'select',
             'exploit', 'sqli_exploit', 'upload_bypass', 'reverse_shell',
             'privesc', 'waf_bypass', 'boolean_sqli', 'xss', 'idor',
             'default_creds', 'cve_exploit', 'api_vuln', 'subdomain_takeover',
@@ -744,6 +739,7 @@ class BatchDisplay:
             'classify': 'classify',
             'rank': 'rank',
             'scan': 'scan',
+            'differential_fuzz': 'diff-fuzz',
             'analyze': 'analyze',
             'cve_analysis': 'cve-analysis',
             'pivot': 'pivot',
@@ -827,6 +823,14 @@ class BatchDisplay:
                 bar = self._get_progress_bar(tested, total, 8)
                 return f"{percent:3d}% [{bar}]"
             return f"⚡ {tested} payloads" if tested > 0 else "⏳ testing..."
+        elif phase == 'differential_fuzz':
+            tested = stats.get('diff_fuzz_tested', 0)
+            total = stats.get('diff_fuzz_total', 0)
+            if total > 0:
+                percent = int((tested / total) * 100) if total else 0
+                bar = self._get_progress_bar(tested, total, 8)
+                return f"{percent:3d}% [{bar}]"
+            return f"🧬 {tested} endpoints" if tested > 0 else "🧬 diff-testing..."
         elif phase == 'exploit':
             chains = data.get('chains', [])
             if chains:
@@ -921,7 +925,7 @@ class BatchDisplay:
             phase_icons = {
                 'recon': '🔍', 'live': '🌐', 'wp': '🎯', 'crawl': '📄',
                 'auth': '🔐', 'toolkit': '🔧', 'classify': '🏷️', 'rank': '📊',
-                'scan': '⚡', 'analyze': '🧪', 'graph': '🕸️', 'chain': '🔗',
+                'scan': '⚡', 'differential_fuzz': '🧬', 'analyze': '🧪', 'graph': '🕸️', 'chain': '🔗',
                 'exploit': '💣', 'learn': '📚', 'init': '⚙️', 'report': '📋',
                 'select': '🎯', 'pivot': '🔄', 'hunt': '🔎', 'mine': '⛏️',
                 'cve_analysis': '📖', 'mfa_bypass': '🔓', 'oauth_saml': '🔑',
@@ -1478,57 +1482,95 @@ class DomainDisplay:
 
 
 # ─── LOGGING SETUP ─────────────────────────────────────────────────────────
-def setup_logging(output_dir: str, verbose: bool = False) -> logging.Logger:
+def setup_logging(output_dir: str, verbose: bool = False, target: str = "") -> logging.Logger:
     """File logging only - console handled by display system"""
     os.makedirs(output_dir, exist_ok=True)
     log_file = os.path.join(output_dir, "agent.log")
+    current_thread_id = threading.get_ident()
 
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
+    target_hints = set()
+    target_text = (target or "").strip().lower()
+    if target_text:
+        parsed_target = urllib.parse.urlparse(target_text if "://" in target_text else f"https://{target_text}")
+        if parsed_target.netloc:
+            target_hints.add(parsed_target.netloc.lower())
+        if parsed_target.hostname:
+            target_hints.add(parsed_target.hostname.lower())
+            try:
+                import socket
+                for info in socket.getaddrinfo(parsed_target.hostname, None):
+                    resolved_ip = (info[4][0] or "").strip().lower()
+                    if resolved_ip:
+                        target_hints.add(resolved_ip)
+            except Exception:
+                pass
 
-    # Avoid duplicate handlers when running many targets in batch mode.
-    has_file = False
-    has_console = False
-    for h in root.handlers:
-        if isinstance(h, logging.FileHandler) and getattr(h, "baseFilename", "") == os.path.abspath(log_file):
-            has_file = True
-        if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
-            has_console = True
+    class _TargetLogFilter(logging.Filter):
+        def __init__(self, thread_id: int, hints: set, output_path: str):
+            super().__init__()
+            self.thread_id = thread_id
+            self.hints = {hint for hint in hints if hint}
+            self.output_path = os.path.abspath(output_path).lower()
 
-    if not has_file:
-        file_handler = logging.FileHandler(log_file)
-        file_handler.setLevel(logging.DEBUG)
-        file_handler.setFormatter(logging.Formatter(
-            "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        ))
-        root.addHandler(file_handler)
+        def filter(self, record: logging.LogRecord) -> bool:
+            if record.thread == self.thread_id:
+                return True
+            try:
+                message = record.getMessage().lower()
+            except Exception:
+                message = ""
+            if self.output_path and self.output_path in message:
+                return True
+            return any(hint in message for hint in self.hints)
 
-    if not has_console:
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.ERROR)
-        console_handler.setFormatter(logging.Formatter("%(message)s"))
-        root.addHandler(console_handler)
-    
+    logger_name = f"recon.agent.{re.sub(r'[^a-zA-Z0-9_.-]+', '_', target or 'unknown')}"
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        try:
+            handler.close()
+        except Exception:
+            pass
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setLevel(logging.DEBUG)
+    file_handler.setFormatter(logging.Formatter(
+        "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    logger.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.ERROR)
+    console_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(console_handler)
+
     logging.getLogger("urllib3").setLevel(logging.ERROR)
     logging.getLogger("requests").setLevel(logging.ERROR)
-    
-    return logging.getLogger("recon.agent")
+
+    return logger
 
 
 # ─── MAIN AGENT ───────────────────────────────────────────────────────────
 class ReconAgent:
     def __init__(self, target: str, output_dir: str, options: dict,
-                 nvd_key: str = "", 
-                 urls_file: str = "", subdomains_file: str = "", auth_file: str = "", force_recon: bool = False,
+                 nvd_key: str = "",
+                 urls_file: str = "",
+                 subdomains_file: str = "",
+                 auth_file: str = "",
+                 force_recon: bool = False,
                  batch_display: BatchDisplay = None,
                  api_status: Optional[dict] = None,
                  target_index: int = 1,
                  total_targets: int = 1,
-                 allowed_domains: list = None):
+                 allowed_domains: list = None,
+                 logger: Optional[logging.Logger] = None):
         
         # Initialize logger FIRST before any logging calls
-        self.logger = logging.getLogger("recon.agent")
+        self.logger = logger or logging.getLogger("recon.agent")
         
         self.target = target.lower().strip()
         self.output_dir = output_dir
@@ -1600,6 +1642,7 @@ class ReconAgent:
         self.live_host_engine = LiveHostEngine(self.state, output_dir)
         self.discovery_engine = DiscoveryEngine(self.state, output_dir)
         self.scanning_engine = ScanningEngine(self.state, output_dir, self.payload_gen, self.payload_mutator, self.learning_engine)
+        self.differential_fuzzer = DifferentialFuzzer(http_client=self.http_client)
         self.exploit_engine = ExploitTestEngine(self.state, output_dir, self.learning_engine)
         self.wp_scanner = WordPressScannerEngine(self.state, output_dir)
         self.auth_engine = AuthScannerEngine(self.state, output_dir, self.session)
@@ -1913,7 +1956,10 @@ class ReconAgent:
         self.logger.info(f"Target: {self.target} | Output: {self.output_dir}")
 
         # IMPROVED: Normalize URL first
-        normalized, is_valid, error_msg = self.url_normalizer.normalize(self.target)
+        normalized, is_valid, error_msg = self.url_normalizer.normalize(
+            self.target,
+            check_alive=False,
+        )
         if not is_valid:
             self.last_action = f"URL error: {error_msg}"
             self.error_recovery.log_error("init", "url_normalizer", error_msg)
@@ -1925,6 +1971,18 @@ class ReconAgent:
         
         # Update target with normalized URL
         self.target = normalized
+        reachable, reachability_error = self.url_normalizer.check_reachable(self.target)
+        if not reachable:
+            scan_meta = self.state.get("scan_metadata", {}) or {}
+            reasons = scan_meta.get("scan_incomplete_reasons", []) or []
+            reasons.append(f"init reachability unreliable: {reachability_error}")
+            scan_meta["scan_incomplete_reasons"] = reasons[-10:]
+            scan_meta["init_reachability_unreliable"] = True
+            self.state.update(scan_incomplete=True, scan_metadata=scan_meta)
+            self.logger.warning(
+                "[INIT] %s; continuing with recon/live-host discovery instead of aborting",
+                reachability_error,
+            )
         self.last_action = f"URL normalized: {self.target}"
         self._update_display()
 
@@ -1953,11 +2011,15 @@ class ReconAgent:
                     self.logger.warning(f"[AGENT] Wall-clock time limit reached during iteration. Stopping.")
                     break
                 
-                # BUG 11 FIX: Clear completed phases on iteration 2+ to allow re-scanning
+                # Iteration safety: avoid full phase reset loops.
+                # Only re-run adaptive phases when iteration > 1.
                 if self.iteration_count > 1:
-                    for phase in ["classify", "rank", "scan", "analyze", "graph", "chain", "exploit", "learn"]:
+                    rerun_phases = ["scan", "differential_fuzz", "analyze", "learn"]
+                    for phase in rerun_phases:
                         self.completed_phases.discard(phase)
-                    self.logger.debug(f"[AGENT] Iteration {self.iteration_count}: Reset completed phases for re-scanning")
+                    self.logger.debug(
+                        f"[AGENT] Iteration {self.iteration_count}: selective re-scan reset for {rerun_phases}"
+                    )
                 
                 # Phase 1: Recon
                 if self.iteration_count == 1 and not self._should_skip_phase("recon"):
@@ -2004,7 +2066,8 @@ class ReconAgent:
                     self._update_display()
                     self._run_discovery_phase()
                     if self._should_abort_low_signal():
-                        break
+                        self.logger.warning("[AGENT] Low signal detected, skipping iteration but keeping target alive")
+                        continue
 
                 # Phase 4.2: WordPress Detection from State Data
                 # After crawling, analyze discovered URLs/endpoints for WordPress patterns
@@ -2071,6 +2134,15 @@ class ReconAgent:
                     self.phase_status = "running"
                     self._update_display()
                     self._run_scanning_phase()
+
+                # Phase 7.5: Differential Fuzzing
+                if "differential_fuzz" not in self.completed_phases:
+                    self.current_phase = "differential_fuzz"
+                    self.phase_detail = "logic-anomaly"
+                    self.phase_tool = "differential-fuzzer"
+                    self.phase_status = "running"
+                    self._update_display()
+                    self._run_differential_fuzz_phase()
                 
                 # Phase 8: Analysis
                 if "analyze" not in self.completed_phases:
@@ -2080,15 +2152,9 @@ class ReconAgent:
                     self.phase_status = "running"
                     self._update_display()
                     self._run_analysis_phase()
-                
-                # Phase 8.2: CVE Analysis (NEW - MUST BE BEFORE CHAIN PLANNING)
-                if not self._should_skip_phase("cve_analysis"):
-                    self.current_phase = "cve_analysis"
-                    self.phase_detail = "match to CVE database"
-                    self.phase_tool = "cve-matcher"
-                    self.phase_status = "running"
-                    self._update_display()
-                    self._run_cve_analysis_phase()
+                    if self._terminal_reached():
+                        self._log_iteration_metrics(terminal_reason=self._get_terminal_reason())
+                        break
                 
                 # Phase 8.5: Privilege Escalation Analysis
                 if "priv_pivot" not in self.completed_phases:
@@ -2116,6 +2182,9 @@ class ReconAgent:
                     self.phase_status = "running"
                     self._update_display()
                     self._run_chain_planning_phase(attack_graph)
+                    if self._terminal_reached():
+                        self._log_iteration_metrics(terminal_reason=self._get_terminal_reason())
+                        break
                 
                 # Phase 10.5: Automatic Exploit Selection (LEVEL BOSS)
                 if "exploit_select" not in self.completed_phases:
@@ -2125,6 +2194,9 @@ class ReconAgent:
                     self.phase_status = "running"
                     self._update_display()
                     self._run_exploit_selection_phase()
+                    if self._terminal_reached():
+                        self._log_iteration_metrics(terminal_reason=self._get_terminal_reason())
+                        break
                 
                 # Phase 11: Exploit Testing
                 if not self._should_skip_phase("exploit"):
@@ -2134,6 +2206,9 @@ class ReconAgent:
                     self.phase_status = "running"
                     self._update_display()
                     self._run_exploit_phase()
+                    if self._terminal_reached():
+                        self._log_iteration_metrics(terminal_reason=self._get_terminal_reason())
+                        break
                 
                 # Phase 12: SQLi Exploitation
                 if not self._should_skip_phase("sqli_exploit"):
@@ -2215,15 +2290,6 @@ class ReconAgent:
                     self.phase_status = "running"
                     self._update_display()
                     self._run_default_creds_phase()
-                
-                # Phase 21: CVE Exploitation
-                if not self._should_skip_phase("cve_exploit"):
-                    self.current_phase = "cve_exploit"
-                    self.phase_detail = "test known CVE exploits"
-                    self.phase_tool = "cve-exploiter"
-                    self.phase_status = "running"
-                    self._update_display()
-                    self._run_cve_exploit_phase()
                 
                 # Phase 22: API Vulnerabilities
                 if not self._should_skip_phase("api_vuln"):
@@ -2336,21 +2402,27 @@ class ReconAgent:
                     self._run_learning_phase()
                 
                 self._update_stats()
+                self._log_iteration_metrics()
+                if self._terminal_reached():
+                    break
                 
                 if self._check_confidence_threshold():
                     break
 
                 if self._should_stop_due_to_stagnation():
-                    self.logger.info("[AGENT] Stopping early due to stagnant iterations")
-                    self.last_action = "stopping early: no new signal across iterations"
+                    terminal_reason = "stagnation: no new signal across iterations"
+                    self.logger.info("[AGENT] Stagnation detected, finalizing target cleanly")
+                    self.last_action = f"stopping early: {terminal_reason}"
                     self._update_display()
+                    self._set_terminal_state(terminal_reason, stop_reason="stagnation")
+                    self._log_iteration_metrics(terminal_reason=terminal_reason)
                     break
                     
                 self._adapt_for_next_iteration()
             
             # Final
 
-            if not self.options.get("skip_ddos"):
+            if not self._terminal_reached() and not self.options.get("skip_ddos"):
                 self.current_phase = "ddos"
                 self.phase_detail = "[DDoS] Checking if attack needed..."
                 self._update_display()
@@ -2370,10 +2442,11 @@ class ReconAgent:
                 top_chain = ""
                 if self.chains_data:
                     top_chain = self.chains_data[0].get("name", "")
+                meaningful_exploits = len(self._meaningful_successful_exploits()) if hasattr(self, "_meaningful_successful_exploits") else self.stats['exploited']
                 self.batch_display.mark_completed(self.target, {
                     'vulns': self.stats['vulns'],
                     'chains': len(self.chains_data),
-                    'exploited': self.stats['exploited'],
+                    'exploited': meaningful_exploits,
                     'top_chain': top_chain,
                     'eps': self.stats.get('eps', 0),
                     'live': self.stats.get('live', 0),
@@ -2637,7 +2710,7 @@ class ReconAgent:
         self.logger.info(f"[INIT] Initializing seed queue with: {self.target}")
         
         try:
-            parsed = urlparse(self.target)
+            parsed = urllib.parse.urlparse(self.target)
             
             seed = {
                 "url": self.target,
@@ -2670,11 +2743,48 @@ class ReconAgent:
             "discovery": "skip_crawl", 
             "auth": "skip_auth",
             "scan": "skip_scan",
+            "differential_fuzz": "skip_differential_fuzz",
             "exploit": "skip_exploit"
         }
+        if phase != "report" and self._terminal_reached():
+            return True
         if self.options.get(skip_map.get(phase, ""), False):
             return True
         return phase in self.completed_phases
+
+    def _get_terminal_reason(self) -> Optional[str]:
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        return (
+            scan_meta.get("terminal_reason")
+            or scan_meta.get("selector_terminal_reason")
+            or scan_meta.get("chain_terminal_reason")
+        )
+
+    def _terminal_reached(self) -> bool:
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        return bool(
+            scan_meta.get("terminal_reached")
+            or scan_meta.get("stop_requested")
+            or scan_meta.get("finalized")
+            or self._get_terminal_reason()
+        )
+
+    def _set_terminal_state(self, reason: str, stop_reason: Optional[str] = None) -> None:
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        if reason:
+            scan_meta["terminal_reason"] = reason
+        if stop_reason:
+            scan_meta["stop_reason"] = stop_reason
+        scan_meta["terminal_reached"] = True
+        scan_meta["stop_requested"] = True
+        scan_meta["finalized"] = True
+        self.state.update(scan_metadata=scan_meta)
+
+    def _has_vulnerability_evidence(self) -> bool:
+        return bool(
+            (self.state.get("confirmed_vulnerabilities", []) or [])
+            or (self.state.get("verified_vulnerabilities", []) or [])
+        )
 
     def _get_resume_phase(self) -> str:
         """Get the phase to resume from when restarting after interruption.
@@ -2703,6 +2813,7 @@ class ReconAgent:
             "classify": "classify",
             "rank": "rank",
             "scan": "scan",
+            "differential_fuzz": "differential_fuzz",
             "analyze": "analyze",
             "cve_analysis": "cve_analysis",
             "pivot": "priv_pivot",
@@ -2915,7 +3026,7 @@ class ReconAgent:
             if not u:
                 continue
             try:
-                p = urlparse(u)
+                p = urllib.parse.urlparse(u)
                 if not p.scheme or not p.netloc:
                     continue
                 root = f"{p.scheme}://{p.netloc.lower()}"
@@ -3371,10 +3482,10 @@ class ReconAgent:
         
         # Update vulnerabilities
         if metrics['vulnerabilities']:
-            current_vulns = self.state.get('vulnerabilities', []) or []
-            for vuln in metrics['vulnerabilities']:
-                if vuln not in current_vulns:
-                    current_vulns.append(vuln)
+            current_vulns = self._merge_vulnerability_lists(
+                self.state.get('vulnerabilities', []) or [],
+                metrics['vulnerabilities'],
+            )
             self.state.update(vulnerabilities=current_vulns)
             self.stats['vulns'] = len(current_vulns)
 
@@ -3548,30 +3659,14 @@ class ReconAgent:
             return default
 
     def _normalize_vulnerability_record(self, vuln):
-        if not isinstance(vuln, dict):
-            return {}
+        from core.finding_normalizer import normalize_finding
 
-        normalized = dict(vuln)
-        endpoint = normalized.get("endpoint") or normalized.get("url") or normalized.get("target") or ""
-        if endpoint:
-            normalized["endpoint"] = endpoint
-            normalized.setdefault("url", endpoint)
-
-        normalized["confidence"] = self._confidence_value(normalized.get("confidence", 0.0))
-
-        severity = str(normalized.get("severity", "") or "").upper()
-        if not severity:
-            confidence = normalized["confidence"]
-            severity = "CRITICAL" if confidence >= 0.9 else "HIGH" if confidence >= 0.75 else "MEDIUM" if confidence >= 0.4 else "LOW"
-        normalized["severity"] = severity
-        return normalized
+        return normalize_finding(vuln)
 
     def _vuln_merge_key(self, vuln):
-        normalized = self._normalize_vulnerability_record(vuln)
-        endpoint = normalized.get("endpoint") or normalized.get("url") or ""
-        vtype = normalized.get("type") or normalized.get("name") or "unknown"
-        payload = normalized.get("payload") or ""
-        return (endpoint, vtype, payload)
+        from core.finding_normalizer import finding_identity
+
+        return finding_identity(vuln)
 
     def _merge_vulnerability_lists(self, existing, incoming):
         merged = {}
@@ -3632,6 +3727,90 @@ class ReconAgent:
             self.logger.warning(f"[VERIFY] Pre-validation failed: {e}")
 
         return self.state.get("verified_vulnerabilities", []) or []
+
+    def _collect_concrete_tool_vulnerabilities(self):
+        concrete = []
+
+        for vuln in self.state.get("wp_vulnerabilities", []) or []:
+            if not isinstance(vuln, dict):
+                continue
+            endpoint = vuln.get("url") or vuln.get("endpoint") or ""
+            if not endpoint:
+                continue
+            severity = str(vuln.get("severity", "MEDIUM") or "MEDIUM").upper()
+            concrete.append({
+                "name": vuln.get("description") or vuln.get("type") or "wordpress finding",
+                "type": vuln.get("type") or "wordpress_finding",
+                "endpoint": endpoint,
+                "url": endpoint,
+                "severity": severity,
+                "confidence": self._confidence_value(vuln.get("confidence", 0.8), 0.8),
+                "evidence": vuln.get("evidence", ""),
+                "tool": "wordpress_scanner",
+                "source": "wordpress_scanner",
+                "exploitable": severity in {"HIGH", "CRITICAL"},
+            })
+
+        for finding in self.state.get("api_vuln_findings", []) or []:
+            if not isinstance(finding, dict):
+                continue
+            endpoint = finding.get("endpoint") or finding.get("url") or ""
+            if not endpoint:
+                continue
+            severity = str(finding.get("severity", "MEDIUM") or "MEDIUM").upper()
+            concrete.append({
+                "name": finding.get("name") or finding.get("description") or finding.get("type") or "api finding",
+                "type": finding.get("type") or "api_finding",
+                "endpoint": endpoint,
+                "url": endpoint,
+                "severity": severity,
+                "confidence": self._confidence_value(finding.get("confidence", 0.75), 0.75),
+                "evidence": finding.get("evidence", "") or finding.get("description", ""),
+                "tool": finding.get("tool") or "api_vuln_scanner",
+                "source": finding.get("source") or "api_vuln_scanner",
+                "exploitable": severity in {"HIGH", "CRITICAL"},
+            })
+
+        for finding in self.state.get("default_creds_findings", []) or []:
+            if not isinstance(finding, dict):
+                continue
+            if not (finding.get("success") or finding.get("valid_credentials")):
+                continue
+            endpoint = finding.get("endpoint") or finding.get("url") or self.target
+            concrete.append({
+                "name": finding.get("name") or "default credentials accepted",
+                "type": finding.get("type") or "default_credentials",
+                "endpoint": endpoint,
+                "url": endpoint,
+                "severity": str(finding.get("severity", "HIGH") or "HIGH").upper(),
+                "confidence": self._confidence_value(finding.get("confidence", 0.9), 0.9),
+                "evidence": finding.get("evidence", "") or finding.get("username", ""),
+                "tool": finding.get("tool") or "default_creds_scanner",
+                "source": finding.get("source") or "default_creds_scanner",
+                "exploitable": True,
+            })
+
+        return self._merge_vulnerability_lists([], concrete)
+
+    def _promote_concrete_tool_findings(self):
+        tool_vulns = self._collect_concrete_tool_vulnerabilities()
+        if not tool_vulns:
+            return []
+
+        merged_confirmed = self._merge_vulnerability_lists(
+            self.state.get("confirmed_vulnerabilities", []) or [],
+            tool_vulns,
+        )
+        merged_all = self._merge_vulnerability_lists(
+            self.state.get("vulnerabilities", []) or [],
+            merged_confirmed,
+        )
+        self.state.update(confirmed_vulnerabilities=merged_confirmed)
+        self.state.update(vulnerabilities=merged_all)
+        self.logger.info(
+            f"[ANALYSIS] Promoted {len(tool_vulns)} concrete tool findings into canonical vulnerability state"
+        )
+        return tool_vulns
 
     def _get_exploitation_findings(self):
         preferred = self.state.get("verified_vulnerabilities", []) or []
@@ -3717,6 +3896,83 @@ class ReconAgent:
             })
         return recipes
 
+    def _build_evidence_backed_chains(self, findings):
+        chains = []
+        seen = set()
+        for finding in findings or []:
+            if not isinstance(finding, dict):
+                continue
+            vuln_type = str(finding.get("type", "") or "").lower()
+            endpoint = finding.get("endpoint") or finding.get("url") or ""
+            if not endpoint or vuln_type not in {
+                "command_injection", "rce",
+                "sql_injection", "sqli",
+                "file_upload", "upload",
+                "lfi", "file_inclusion", "path_traversal",
+                "ssrf",
+                "auth_bypass", "idor", "object_access",
+            }:
+                continue
+            key = (endpoint, vuln_type)
+            if key in seen:
+                continue
+            seen.add(key)
+            if vuln_type in {"command_injection", "rce"}:
+                primitive = "command_injection"
+                action = "execute_commands"
+            elif vuln_type in {"sql_injection", "sqli"}:
+                primitive = "sql_injection"
+                action = "test_sqli"
+            elif vuln_type in {"file_upload", "upload"}:
+                primitive = "file_upload"
+                action = "upload_file"
+            elif vuln_type in {"lfi", "file_inclusion", "path_traversal"}:
+                primitive = "lfi"
+                action = "test_lfi"
+            elif vuln_type == "ssrf":
+                primitive = "ssrf"
+                action = "probe"
+            else:
+                primitive = "auth_object"
+                action = "auth_bypass"
+            payload = finding.get("payload", "") or ""
+            chain_name = f"Verified {vuln_type} exploitation"
+            confidence = max(float(finding.get("verification_confidence", finding.get("confidence", 0.6)) or 0.6), 0.75)
+            evidence_sources = [vuln_type, endpoint]
+            if finding.get("tool") or finding.get("source"):
+                evidence_sources.append(str(finding.get("tool") or finding.get("source")))
+            chains.append({
+                "chain_id": f"evidence_{abs(hash(key))}",
+                "name": chain_name,
+                "description": f"Exploit verified {vuln_type} evidence at {endpoint}",
+                "goal": f"validate {vuln_type} impact on {endpoint}",
+                "primitive": primitive,
+                "required_primitives": [primitive],
+                "optional_primitives": [],
+                "evidence_sources": evidence_sources[:6],
+                "usability_score": min(1.0, confidence),
+                "missing_preconditions": [],
+                "planner_mode": "deterministic",
+                "force_chain": True,
+                "confidence": confidence,
+                "risk_level": str(finding.get("severity", "MEDIUM") or "MEDIUM").upper(),
+                "preconditions_met": [vuln_type],
+                "preconditions_missing": [],
+                "steps": [
+                    {
+                        "name": chain_name,
+                        "action": action,
+                        "target": endpoint,
+                        "tool": "verified_evidence",
+                        "payload": payload,
+                        "parameter": finding.get("parameter") or finding.get("param"),
+                        "success_indicator": f"{vuln_type} confirmed",
+                        "description": f"Replay verified {vuln_type} evidence on the validated endpoint",
+                    }
+                ],
+            })
+        return chains
+
     def _run_scanning_phase(self):
         before = len(self.state.get("confirmed_vulnerabilities", []))
 
@@ -3776,6 +4032,8 @@ class ReconAgent:
 
         if os.path.exists(scan_results_file):
             self.logger.info(f"[SCAN] Reading scan results from {scan_results_file}")
+            merged_confirmed = self.state.get("confirmed_vulnerabilities", []) or []
+            merged_all = self.state.get("vulnerabilities", []) or []
             
             with open(scan_results_file, 'r') as f:
                 for line_num, line in enumerate(f, 1):
@@ -3809,24 +4067,28 @@ class ReconAgent:
                     except json.JSONDecodeError as e:
                         self.logger.warning(f"[SCAN] Invalid JSON at line {line_num}: {e}")
                         continue
-            merged_confirmed = self._merge_vulnerability_lists(
-                self.state.get("confirmed_vulnerabilities", []) or [],
-                vulns_from_scan,
-            )
-            merged_all = self._merge_vulnerability_lists(
-                self.state.get("vulnerabilities", []) or [],
-                merged_confirmed,
-            )
+            if len(scan_responses) > 0:
+                self.state.update(scan_responses=scan_responses)
+                merged_confirmed = self._merge_vulnerability_lists(
+                    self.state.get("confirmed_vulnerabilities", []) or [],
+                    vulns_from_scan,
+                )
+                merged_all = self._merge_vulnerability_lists(
+                    self.state.get("vulnerabilities", []) or [],
+                    merged_confirmed,
+                )
 
-            self.state.update(confirmed_vulnerabilities=[])
-            self.state.update(confirmed_vulnerabilities=merged_confirmed)
-            self.state.update(vulnerabilities=[])
-            self.state.update(vulnerabilities=merged_all)
+                self.state.update(confirmed_vulnerabilities=[])
+                self.state.update(confirmed_vulnerabilities=merged_confirmed)
+                self.state.update(vulnerabilities=[])
+                self.state.update(vulnerabilities=merged_all)
 
-            self.logger.info(
-                f"[SCAN] Loaded {len(scan_responses)} responses, parsed {len(vulns_from_scan)} file findings, "
-                f"state now has {len(merged_confirmed)} confirmed / {len(merged_all)} total vulnerabilities"
-            )
+                self.logger.info(
+                    f"[SCAN] Loaded {len(scan_responses)} responses, parsed {len(vulns_from_scan)} file findings, "
+                    f"state now has {len(merged_confirmed)} confirmed / {len(merged_all)} total vulnerabilities"
+                )
+            else:
+                self.logger.warning("[SCAN] scan_results.json present but empty; skipping vulnerability promotion")
 
             if vulns_from_scan:
                 for vuln in vulns_from_scan[:10]:
@@ -3842,26 +4104,22 @@ class ReconAgent:
             current_confirmed = self.state.get("confirmed_vulnerabilities", []) or []
             current_all = self.state.get("vulnerabilities", []) or []
             self.logger.warning(f"[SCAN] scan_results.json NOT FOUND at {scan_results_file}")
-            # Fallback
-            fallback_targets = self.state.get("prioritized_endpoints") or self.state.get("endpoints") or []
-            for e in fallback_targets[:20]:
-                scan_responses.append({
-                    "endpoint": e.get("url") if isinstance(e, dict) else e,
-                    "vulnerable": False,
-                    "category": "surface",
-                    "confidence": 0.1,
-                    "reason": "No active scan result - fallback surface detection"
-                })
             self.logger.warning(
-                f"[SCAN] Generated {len(scan_responses)} fallback responses; "
+                f"[SCAN] Keeping scan_responses empty (no fallback generation); "
                 f"state currently has {len(current_confirmed)} confirmed / {len(current_all)} total vulnerabilities"
             )
 
         # SAVE TO STATE
-        self.state.update(scan_responses=scan_responses)
+        if not scan_responses:
+            self.state.update(scan_responses=scan_responses)
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        persisted_scan_responses = self.state.get("scan_responses", []) or []
+        scan_meta["scan_responses_count"] = len(persisted_scan_responses or scan_responses)
+        self.state.update(scan_metadata=scan_meta)
 
         # ============ CẬP NHẬT STATS ============
         after = len(self.state.get("confirmed_vulnerabilities", []))
+        after_total = len(self.state.get("vulnerabilities", []) or [])
         scanned = len(self.state.get("prioritized_endpoints", []) or [])
         self.stats['payloads_tested'] = min(scanned, 100)
         self._update_display()
@@ -3883,7 +4141,9 @@ class ReconAgent:
 
             self._update_stats()
         else:
-            self.logger.info(f"[SCAN] No new vulnerabilities (before={before}, after={after})")
+            self.logger.info(
+                f"[SCAN] No new confirmed vulnerabilities (before_confirmed={before}, after_confirmed={after}, total_vulnerabilities={after_total})"
+            )
             self._update_stats()
 
         self._mark_phase_done("scan")
@@ -3891,6 +4151,7 @@ class ReconAgent:
     def _run_analysis_phase(self):
         self.phase_detail = "[ANALYSIS] Processing scan results..."
         self._update_display()
+        promoted_tool_vulns = self._promote_concrete_tool_findings()
 
         # Load scan_responses from state, and if missing then load from scan_results.json.
         responses = self.state.get("scan_responses", []) or []
@@ -3916,13 +4177,39 @@ class ReconAgent:
                 self.state.update(scan_responses=responses)
                 self.logger.warning(f"[ANALYSIS] Loaded {len(responses)} scan responses from scan_results.json")
 
+        if len(responses) == 0 and not promoted_tool_vulns:
+            carried_findings = len(self.state.get("security_findings", []) or [])
+            verified_findings = len(self.state.get("verified_vulnerabilities", []) or [])
+            scan_meta = self.state.get("scan_metadata", {}) or {}
+            scan_meta.update(
+                {
+                    "analysis_new_findings": 0,
+                    "analysis_carried_findings": carried_findings,
+                    "analysis_verified_findings": verified_findings,
+                }
+            )
+            self.state.update(scan_metadata=scan_meta)
+            self._set_terminal_state("analysis_stopped_no_scan_responses", stop_reason="no_scan_responses")
+            self.logger.warning(
+                f"[ANALYSIS] scan_responses=0 -> skip vulnerability/finding promotion "
+                f"(new=0 carried={carried_findings} verified={verified_findings})"
+            )
+            self.phase_status = "done"
+            self._update_display()
+            self._mark_phase_done("analyze")
+            return
+        elif len(responses) == 0 and promoted_tool_vulns:
+            self.logger.warning(
+                f"[ANALYSIS] scan_responses=0 but retained {len(promoted_tool_vulns)} concrete tool vulnerabilities; continuing analysis"
+            )
+
         existing_confirmed = self.state.get("confirmed_vulnerabilities", []) or []
         existing_detected = self.state.get("vulnerabilities", []) or []
         parsed_vulnerabilities = []
         allowed_domains = self.state.get("allowed_domains", []) or []
         try:
             from core.host_filter import HostFilter
-            target_hostname = urlparse(self.target).hostname if getattr(self, "target", None) else None
+            target_hostname = urllib.parse.urlparse(self.target).hostname if getattr(self, "target", None) else None
             response_host_filter = HostFilter(
                 skip_dev_test=True,
                 target_domain=target_hostname,
@@ -3986,6 +4273,8 @@ class ReconAgent:
             with open(queue_file, "w") as f:
                 json.dump(manual_queue, f, indent=2)
 
+        carried_findings_before = len(self.state.get("security_findings", []) or [])
+
         # Generate security_findings from non-CVE signals
         self.phase_detail = "[ANALYSIS] Extracting security findings from scan data..."
         self._update_display()
@@ -4005,6 +4294,16 @@ class ReconAgent:
         self.state.update(rce_chain_possibilities=rce_possibilities)
         self.logger.info(f"[ANALYSIS] Identified {len(rce_possibilities)} RCE attack surface(s)")
 
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        scan_meta.update(
+            {
+                "analysis_new_findings": len(findings),
+                "analysis_carried_findings": carried_findings_before,
+                "analysis_verified_findings": len(self.state.get("verified_vulnerabilities", []) or []),
+            }
+        )
+        self.state.update(scan_metadata=scan_meta)
+
         # ─── SECURITY MISCONFIGURATION CHECKS (Crypto/SSL/TLS/Sensitive Data) ────────
         self.phase_detail = "[ANALYSIS] Running security misconfiguration checks..."
         self._update_display()
@@ -4021,11 +4320,53 @@ class ReconAgent:
         self._update_display()
         self._mark_phase_done("analyze")
 
+    def _run_differential_fuzz_phase(self):
+        """Phase 7.5: Differential fuzzing for logic anomaly detection."""
+        endpoints = (
+            self.state.get("prioritized_endpoints")
+            or self.state.get("endpoints")
+            or []
+        )
+        self.stats['diff_fuzz_total'] = len(endpoints)
+        self.stats['diff_fuzz_tested'] = 0
+        self._update_display()
+
+        if not endpoints:
+            self.logger.info("[DIFF_FUZZ] No endpoints available, skipping differential fuzzing")
+            self.phase_status = "done"
+            self._mark_phase_done("differential_fuzz")
+            return
+
+        before = len(self.state.get("vulnerabilities", []) or [])
+        self._set_activity("differential-fuzzer", "running", "logic-anomaly")
+        try:
+            findings = self.differential_fuzzer.run(endpoints, self.state) or []
+            self.stats['diff_fuzz_tested'] = len(endpoints)
+            self._update_display()
+            if findings:
+                self.last_action = f"differential_fuzz: {len(findings)} logic anomalies"
+                self.logger.info(f"[DIFF_FUZZ] Detected {len(findings)} logic anomaly candidates")
+            else:
+                self.last_action = "differential_fuzz: no significant anomalies"
+                self.logger.info("[DIFF_FUZZ] No anomalies above threshold")
+        except Exception as e:
+            self.logger.warning(f"[DIFF_FUZZ] Phase error: {e}")
+            self.last_action = f"differential_fuzz error: {str(e)[:50]}"
+
+        after = len(self.state.get("vulnerabilities", []) or [])
+        if after > before:
+            self.logger.info(f"[DIFF_FUZZ] Added {after - before} vulnerability candidates to state")
+        self.phase_status = "done"
+        self._set_activity("differential-fuzzer", "done", "logic-anomaly")
+        self._mark_phase_done("differential_fuzz")
+
     def _generate_findings(self) -> List[Dict[str, Any]]:
         """
         Generate structured findings from discovered data (non-CVE signals).
         Covers: tech detection, misconfigurations, interesting endpoints, anomalies.
         """
+        from core.finding_normalizer import normalize_finding
+
         findings: List[Dict[str, Any]] = []
 
         # 1. TECHNOLOGY DETECTION FINDINGS
@@ -4046,16 +4387,34 @@ class ReconAgent:
         # 6. ANOMALY FINDINGS
         findings.extend(self._extract_anomaly_findings())
 
+        filtered_findings: List[Dict[str, Any]] = []
+        has_vuln_evidence = self._has_vulnerability_evidence()
+        for finding in findings:
+            if not isinstance(finding, dict):
+                continue
+            title = str(finding.get("title", "") or "")
+            if title.lower().startswith("potential vulnerable"):
+                continue
+            normalized = normalize_finding(finding)
+            if not normalized:
+                continue
+            if not has_vuln_evidence:
+                if normalized.get("type") not in {"signal", "surface", "exposure"}:
+                    normalized["type"] = "signal"
+                if str(normalized.get("severity", "LOW")).upper() not in {"INFO", "LOW"}:
+                    normalized["severity"] = "LOW"
+            filtered_findings.append(normalized)
+
         # Deduplicate
         seen = set()
         unique_findings = []
-        for finding in findings:
+        for finding in filtered_findings:
             key = (finding.get("type"), finding.get("title", ""), finding.get("endpoint", ""))
             if key not in seen:
                 seen.add(key)
                 unique_findings.append(finding)
 
-        self.logger.debug(f"[FINDINGS] Generated {len(unique_findings)} findings from {len(findings)} raw entries")
+        self.logger.debug(f"[FINDINGS] Generated {len(unique_findings)} findings from {len(filtered_findings)} normalized entries")
         return unique_findings
 
     def _extract_outdated_version_findings(self) -> List[Dict[str, Any]]:
@@ -4117,23 +4476,21 @@ class ReconAgent:
             wp_version = self.state.get("wp_version", "unknown")
             if isinstance(wp_version, str) and wp_version.lower() != "unknown":
                 vuln_versions = wp_rules.get("vulnerable_versions", {}) or {}
-                sev_map = {
-                    "critical": "CRITICAL",
-                    "high": "HIGH",
-                    "medium": "MEDIUM",
-                }
                 for group, ranges in vuln_versions.items():
                     for expr in ranges or []:
                         if version_in_expr(wp_version, str(expr)):
                             findings.append(
                                 {
-                                    "type": "outdated_version",
-                                    "severity": sev_map.get(group, "MEDIUM"),
+                                    "type": "signal",
+                                    "signal_type": "outdated_wordpress_version_observed",
+                                    "severity": "LOW",
                                     "title": f"Outdated WordPress version detected (v{wp_version})",
                                     "endpoint": "WordPress Core",
                                     "evidence": f"Matched vulnerable version rule: {expr}",
                                     "prerequisites": ["wordpress_detected"],
                                     "consequences": ["outdated_wordpress_version"],
+                                    "confidence": 0.55,
+                                    "requires_validation": True,
                                 }
                             )
                             break
@@ -4154,14 +4511,17 @@ class ReconAgent:
                 if version_in_expr(str(ver), str(expr)):
                     findings.append(
                         {
-                            "type": "outdated_component_version",
-                            "severity": info.get("severity", "MEDIUM"),
+                            "type": "signal",
+                            "signal_type": "outdated_plugin_version_observed",
+                            "severity": "LOW",
                             "title": f"Outdated WordPress plugin detected: {name} (v{ver})",
                             "endpoint": "WordPress Plugin",
                             "evidence": f"Matched vulnerable version rule: {expr}",
                             "prerequisites": ["wordpress_detected"],
                             "consequences": ["outdated_component_version"],
                             "cve": info.get("cve", []),
+                            "confidence": 0.5,
+                            "requires_validation": True,
                         }
                     )
                     break
@@ -4181,14 +4541,17 @@ class ReconAgent:
                 if version_in_expr(str(ver), str(expr)):
                     findings.append(
                         {
-                            "type": "outdated_component_version",
-                            "severity": info.get("severity", "MEDIUM"),
+                            "type": "signal",
+                            "signal_type": "outdated_theme_version_observed",
+                            "severity": "LOW",
                             "title": f"Outdated WordPress theme detected: {name} (v{ver})",
                             "endpoint": "WordPress Theme",
                             "evidence": f"Matched vulnerable version rule: {expr}",
                             "prerequisites": ["wordpress_detected"],
                             "consequences": ["outdated_component_version"],
                             "cve": info.get("cve", []),
+                            "confidence": 0.5,
+                            "requires_validation": True,
                         }
                     )
                     break
@@ -4203,50 +4566,65 @@ class ReconAgent:
         if self.state.get("wordpress_detected"):
             wp_version = self.state.get("wp_version", "unknown")
             findings.append({
-                "type": "tech_detect",
+                "type": "signal",
+                "signal_type": "wordpress_detected",
                 "severity": "INFO",
                 "title": f"WordPress detected (v{wp_version})",
                 "endpoint": "N/A",
-                "evidence": f"WordPress CMS identified. Version: {wp_version}. Plugins detected: {len(self.state.get('wp_plugins', []))}. Themes: {len(self.state.get('wp_themes', []))}."
+                "evidence": f"WordPress CMS identified. Version: {wp_version}. Plugins detected: {len(self.state.get('wp_plugins', []))}. Themes: {len(self.state.get('wp_themes', []) )}.",
+                "confidence": 0.7,
+                "requires_validation": False,
             })
         
         # Framework/CMS detection
         cms_version = self.findings.get('cms_version', '')
         if cms_version and 'wordpress' not in cms_version.lower():
             findings.append({
-                "type": "tech_detect",
+                "type": "signal",
+                "signal_type": "cms_detected",
                 "severity": "INFO",
                 "title": f"CMS detected - {cms_version}",
                 "endpoint": "N/A",
-                "evidence": f"Server is running {cms_version}"
+                "evidence": f"Server is running {cms_version}",
+                "confidence": 0.65,
+                "requires_validation": False,
             })
         
         # PHP version
         php_version = self.findings.get('php_version', '')
         if php_version:
             findings.append({
-                "type": "tech_detect",
+                "type": "signal",
+                "signal_type": "php_version_exposed",
                 "severity": "INFO",
                 "title": f"PHP version exposed: {php_version}",
                 "endpoint": "N/A",
-                "evidence": f"Server identifies as {php_version} in response headers"
+                "evidence": f"Server identifies as {php_version} in response headers",
+                "confidence": 0.6,
+                "requires_validation": False,
             })
         
         # WAF detection
         waf = self.findings.get('waf', '')
         if waf:
             findings.append({
-                "type": "tech_detect",
+                "type": "signal",
+                "signal_type": "waf_detected",
                 "severity": "INFO",
                 "title": f"WAF/Security detected: {waf}",
                 "endpoint": "N/A",
-                "evidence": f"Server is protected by {waf} security appliance"
+                "evidence": f"Server is protected by {waf} security appliance",
+                "confidence": 0.6,
+                "requires_validation": False,
             })
         
         return findings
 
     def _extract_endpoint_findings(self) -> List[Dict[str, Any]]:
         findings: List[Dict[str, Any]] = []
+        if not self._has_vulnerability_evidence():
+            self.logger.debug("[FINDINGS] Endpoint pattern findings suppressed: no confirmed or verified vulnerability evidence")
+            return findings
 
         def collect_candidate_urls() -> List[str]:
             out = set()
@@ -4301,13 +4679,13 @@ class ReconAgent:
             else:
                 wp_rules = {}
 
-            # Build severity lookup from common vulnerable endpoints.
+            # Build lookup from common endpoint patterns (surface-only; never direct vulnerability).
             common = wp_rules.get("common_vulnerabilities", {}) or {}
-            endpoint_sev_map: Dict[str, Dict[str, Any]] = {}
+            endpoint_meta_map: Dict[str, Dict[str, Any]] = {}
             for key, info in common.items():
                 endpoint = info.get("endpoint")
                 if endpoint:
-                    endpoint_sev_map[str(endpoint).lower()] = info
+                    endpoint_meta_map[str(endpoint).lower()] = info
 
             default_paths = wp_rules.get("default_paths", {}) or {}
 
@@ -4320,12 +4698,8 @@ class ReconAgent:
             for path_key, path_value in default_paths.items():
                 if not path_value:
                     continue
-                sev = "MEDIUM"
-                type_hint = str(path_key)
-                match_info = endpoint_sev_map.get(str(path_value).lower())
-                if match_info and match_info.get("severity"):
-                    sev = match_info.get("severity", sev)
-                    type_hint = match_info.get("type", type_hint)
+                sev = "LOW"
+                match_info = endpoint_meta_map.get(str(path_value).lower())
                 consequences = []
                 tok = token_map.get(str(path_key))
                 if tok:
@@ -4333,15 +4707,16 @@ class ReconAgent:
 
                 pattern_entries.append(
                     {
-                        "finding_type": "interesting_endpoint",
+                        "finding_type": "signal",
+                        "signal_type": f"{path_key}_surface_present",
                         "pattern": str(path_value),
-                        "title": f"WordPress path exposed: {path_key}",
+                        "title": f"WordPress surface exposed: {path_key}",
                         "severity": sev,
                         "consequences": consequences,
                     }
                 )
 
-            # Common vulnerable endpoints
+            # Common WordPress endpoint signals (surface-only)
             for info in common.values():
                 endpoint = info.get("endpoint")
                 if not endpoint:
@@ -4355,10 +4730,11 @@ class ReconAgent:
                 consequences = [tok] if tok else []
                 pattern_entries.append(
                     {
-                        "finding_type": "interesting_endpoint",
+                        "finding_type": "signal",
+                        "signal_type": f"{str(info.get('type', 'endpoint_signal')).lower()}_present",
                         "pattern": str(endpoint),
-                        "title": f"Potential vulnerable WordPress endpoint ({info.get('type', 'unknown')})",
-                        "severity": info.get("severity", "MEDIUM"),
+                        "title": f"WordPress endpoint surface observed ({info.get('type', 'unknown')})",
+                        "severity": "LOW",
                         "consequences": consequences,
                     }
                 )
@@ -4368,20 +4744,22 @@ class ReconAgent:
             for p in det.get("paths", []) or []:
                 pattern_entries.append(
                     {
-                        "finding_type": "interesting_endpoint",
+                        "finding_type": "signal",
+                        "signal_type": "wordpress_indicator_path_exposed",
                         "pattern": str(p),
                         "title": "WordPress indicator path exposed",
-                        "severity": "LOW",
+                        "severity": "INFO",
                         "consequences": [],
                     }
                 )
             for f_name in det.get("files", []) or []:
                 pattern_entries.append(
                     {
-                        "finding_type": "interesting_endpoint",
+                        "finding_type": "signal",
+                        "signal_type": "wordpress_indicator_file_exposed",
                         "pattern": str(f_name),
                         "title": "WordPress indicator file exposed",
-                        "severity": "LOW",
+                        "severity": "INFO",
                         "consequences": [],
                     }
                 )
@@ -4389,22 +4767,23 @@ class ReconAgent:
         # Dynamic fallback: infer endpoint type from URL naming (rules-driven patterns are preferred above).
         # Note: keep fallback generic and do not hardcode sensitive specific filenames.
         fallback_patterns = [
-            (r"/admin(?:/|\\b)", "Admin interface exposed", "LOW", ["admin_endpoint_found"]),
-            (r"/login(?:/|\\b)", "Login panel exposed", "MEDIUM", ["login_endpoint_found"]),
-            (r"/upload(?:/|\\b)|/uploads(?:/|\\b)", "File upload surface exposed", "MEDIUM", ["file_upload_endpoint"]),
-            (r"/api(?:/|\\b)|graphql|swagger", "API surface exposed", "LOW", ["api_endpoint_found"]),
-            (r"/debug(?:/|\\b)|/debug\\.php(?:\\b|$)", "Debug surface exposed", "MEDIUM", []),
-            (r"/backup(?:/|\\b)", "Backup surface exposed", "MEDIUM", []),
-            (r"/config(?:/|\\b)", "Configuration surface exposed", "MEDIUM", []),
+            (r"/admin(?:/|\\b)", "Admin interface exposed", "LOW", ["admin_endpoint_found"], "admin_surface_present"),
+            (r"/login(?:/|\\b)", "Login panel exposed", "LOW", ["login_endpoint_found"], "login_surface_present"),
+            (r"/upload(?:/|\\b)|/uploads(?:/|\\b)", "File upload surface exposed", "LOW", ["file_upload_endpoint"], "upload_surface_present"),
+            (r"/api(?:/|\\b)|graphql|swagger", "API surface exposed", "LOW", ["api_endpoint_found"], "api_surface_present"),
+            (r"/debug(?:/|\\b)|/debug\\.php(?:\\b|$)", "Debug surface exposed", "INFO", [], "debug_surface_present"),
+            (r"/backup(?:/|\\b)", "Backup surface exposed", "LOW", [], "backup_surface_present"),
+            (r"/config(?:/|\\b)", "Configuration surface exposed", "LOW", [], "config_surface_present"),
         ]
-        for regex, title, sev, cons in fallback_patterns:
+        for regex, title, sev, cons, signal_type in fallback_patterns:
             pattern_entries.append(
                 {
-                    "finding_type": "interesting_endpoint",
+                    "finding_type": "signal",
                     "regex": regex,
                     "title": title,
                     "severity": sev,
                     "consequences": cons,
+                    "signal_type": signal_type,
                 }
             )
 
@@ -4413,10 +4792,11 @@ class ReconAgent:
             if not url:
                 continue
             for entry in pattern_entries:
-                finding_type = entry.get("finding_type", "interesting_endpoint")
-                severity = entry.get("severity", "MEDIUM")
+                finding_type = entry.get("finding_type", "signal")
+                severity = entry.get("severity", "LOW")
                 title = entry.get("title", "Interesting endpoint")
                 consequences = entry.get("consequences", []) or []
+                signal_type = entry.get("signal_type") or "endpoint_surface_present"
 
                 if entry.get("regex"):
                     regex = str(entry["regex"])
@@ -4431,12 +4811,15 @@ class ReconAgent:
                     findings.append(
                         {
                             "type": finding_type,
-                            "severity": severity,
+                            "signal_type": signal_type,
+                            "severity": "LOW" if severity in ("MEDIUM", "HIGH", "CRITICAL") else severity,
                             "title": title,
                             "endpoint": url,
                             "evidence": f"Matched dynamic pattern '{pattern_label}' on {url}",
                             "prerequisites": [],
                             "consequences": consequences,
+                            "confidence": 0.45,
+                            "requires_validation": False,
                         }
                     )
 
@@ -4465,11 +4848,14 @@ class ReconAgent:
         for pattern in verbose_patterns:
             if re.search(pattern, responses_str, re.IGNORECASE):
                 findings.append({
-                    "type": "misconfig",
+                    "type": "signal",
+                    "signal_type": "verbose_error_surface_present",
                     "severity": "LOW",
                     "title": "Verbose error messages exposed",
                     "endpoint": "*",
-                    "evidence": f"Server exposes debugging information in error responses (pattern: {pattern})"
+                    "evidence": f"Server exposes debugging information in error responses (pattern: {pattern})",
+                    "confidence": 0.5,
+                    "requires_validation": True,
                 })
                 break
         
@@ -4483,22 +4869,28 @@ class ReconAgent:
         if self.findings.get('users'):
             user_count = len(self.findings['users'])
             findings.append({
-                "type": "info_leak",
+                "type": "signal",
+                "signal_type": "user_enumeration_surface_present",
                 "severity": "LOW",
                 "title": f"{user_count} users enumerated",
                 "endpoint": "WordPress REST API",
-                "evidence": f"User enumeration possible - {user_count} usernames discovered: {', '.join(self.findings['users'][:5])}"
+                "evidence": f"User enumeration possible - {user_count} usernames discovered: {', '.join(self.findings['users'][:5])}",
+                "confidence": 0.5,
+                "requires_validation": True,
             })
         
         # Plugin information leak
         if self.findings.get('plugins'):
             plugin_count = len(self.findings['plugins'])
             findings.append({
-                "type": "info_leak",
+                "type": "signal",
+                "signal_type": "plugin_enumeration_surface_present",
                 "severity": "LOW",
                 "title": f"{plugin_count} plugins identified",
                 "endpoint": "/wp-content/plugins/",
-                "evidence": f"Active WordPress plugins exposed: {', '.join([p.get('name', 'unknown')[:20] for p in self.findings['plugins'][:5]])}"
+                "evidence": f"Active WordPress plugins exposed: {', '.join([p.get('name', 'unknown')[:20] for p in self.findings['plugins'][:5]])}",
+                "confidence": 0.45,
+                "requires_validation": False,
             })
         
         # Technology fingerprinting
@@ -4506,11 +4898,14 @@ class ReconAgent:
             tech_count = len(self.tech_stack)
             tech_list = list(self.tech_stack.keys())[:5]
             findings.append({
-                "type": "info_leak",
-                "severity": "LOW",
+                "type": "signal",
+                "signal_type": "technology_fingerprint_surface_present",
+                "severity": "INFO",
                 "title": f"Technology fingerprinting possible ({tech_count} technologies detected)",
                 "endpoint": "*",
-                "evidence": f"Server reveals technology stack: {', '.join(tech_list)}"
+                "evidence": f"Server reveals technology stack: {', '.join(tech_list)}",
+                "confidence": 0.35,
+                "requires_validation": False,
             })
         
         return findings
@@ -4520,14 +4915,17 @@ class ReconAgent:
         findings = []
         endpoints = self.state.get("endpoints", []) or []
         
-        # Attack surface despite no CVEs
+        # Attack surface despite no confirmed vulnerabilities
         if len(endpoints) > 20 and len(self.state.get("confirmed_vulnerabilities", [])) == 0:
             findings.append({
-                "type": "anomaly",
-                "severity": "MEDIUM",
-                "title": "Large attack surface with no detected CVEs",
+                "type": "signal",
+                "signal_type": "broad_attack_surface_observed",
+                "severity": "INFO",
+                "title": "Large attack surface with no confirmed vulnerabilities",
                 "endpoint": f"{len(endpoints)} total",
-                "evidence": f"Server exposes {len(endpoints)} endpoints but no CVEs detected. Potential for zero-day or complex chain attacks."
+                "evidence": f"Server exposes {len(endpoints)} endpoints but no confirmed vulnerabilities yet.",
+                "confidence": 0.4,
+                "requires_validation": False,
             })
         
         return findings
@@ -4659,6 +5057,7 @@ class ReconAgent:
         severity_weight = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
 
         possible = []
+        no_confirmed_vulns = len(confirmed_vulns) == 0
         for chain_id, tpl in chain_templates.items():
             prereqs = tpl.get("prerequisites", []) or []
             prereqs = [str(p) for p in prereqs if p is not None]
@@ -4681,10 +5080,14 @@ class ReconAgent:
                 evidence_parts.append(f"Prerequisites satisfied: {', '.join(prereqs)}")
             evidence = " | ".join([p for p in evidence_parts if p])
 
+            derived_severity = str(tpl.get("risk_level", "MEDIUM") or "MEDIUM").upper()
+            if no_confirmed_vulns and derived_severity in {"CRITICAL", "HIGH"}:
+                derived_severity = "LOW"
+
             possible.append(
                 {
                     "type": "rce_possibility",
-                    "severity": tpl.get("risk_level", "MEDIUM"),
+                    "severity": derived_severity,
                     "title": tpl.get("name", chain_id),
                     "components": components,
                     "evidence": evidence or tpl.get("name", chain_id),
@@ -4701,9 +5104,16 @@ class ReconAgent:
         self._update_display()
         self._ensure_verified_findings()
         confirmed = self._get_exploitation_findings()
+        differential_candidates = [
+            v for v in (self.state.get("vulnerabilities", []) or [])
+            if isinstance(v, dict)
+            and v.get("source") == "differential_fuzz"
+            and v.get("type") == "logic_anomaly"
+        ]
         wp_vulns = self.state.get("wp_vulnerabilities", []) or []
 
         vulnerabilities = list(confirmed)
+        vulnerabilities.extend(differential_candidates)
         for wp_vuln in wp_vulns:
             vulnerabilities.append({
                 "name": wp_vuln.get("type", "wordpress"),
@@ -4835,65 +5245,17 @@ class ReconAgent:
     def _run_chain_planning_phase(self, attack_graph: AttackGraph):
         self.phase_detail = "[CHAINS] Planning attack chains..."
         self._update_display()
-        verified_findings = self._ensure_verified_findings()
-        
-        # ========== PROCESS CONDITIONED FINDINGS ==========
-        # 1. Xử lý conditioned findings từ WordPress
-        conditioned_chains = self._process_conditioned_findings()
-        if conditioned_chains:
-            self.logger.warning(f"[CHAIN] Found {len(conditioned_chains)} conditioned chains from WordPress data")
-            for chain in conditioned_chains[:3]:
-                if self.batch_display:
-                    self.batch_display._add_to_ai_feed(
-                        "🎯 Conditioned Chain",
-                        f"{chain.get('name', '')[:50]} (conf: {chain.get('confidence')}%)",
-                        self.target
-                    )
-        
-        # 2. Gọi chain planner từ graph (code cũ)
-        chains = self.chain_planner.plan_chains_from_graph(attack_graph)
-        base_chains = list(chains)
-        
-        # 3. Gọi conditioned chains từ chain_planner
-        try:
-            wp_conditioned_chains = self.chain_planner._build_conditioned_wp_chains()
-            if wp_conditioned_chains:
-                self.logger.warning(f"[CHAIN] Found {len(wp_conditioned_chains)} chains from chain_planner conditioned method")
-                for chain in wp_conditioned_chains:
-                    chain_name = getattr(chain, 'name', '')
-                    if chain_name and not any(
-                        getattr(c, 'name', '') == chain_name for c in chains
-                    ):
-                        chains.append(chain)
-        except Exception as e:
-            self.logger.debug(f"[CHAIN] Could not get conditioned chains from chain_planner: {e}")
-        # ========== END CONDITIONED FINDINGS ==========
-        
-        if self.ai_chain_planner:
-            try:
-                ai_chains = self.ai_chain_planner.plan_chains(asdict(self.state.state))
-                if ai_chains:
-                    seen_names = {
-                        getattr(chain, "name", "") if not isinstance(chain, dict) else chain.get("name", "")
-                        for chain in chains
-                    }
-                    for chain in ai_chains:
-                        name = chain.get("name", "")
-                        if name and name not in seen_names:
-                            chains.append(chain)
-                            seen_names.add(name)
-            except Exception as e:
-                self.logger.warning(f"[CHAIN] AI chain enrichment failed: {e}")
-        manual_playbook = self.chain_planner.build_manual_playbook(base_chains)
-        
+        plan = self.chain_planner.plan_recon_chains_deterministic()
+        chains = plan.get("chains", []) or []
+        signals = plan.get("signals", []) or []
+        primitives = plan.get("primitives", []) or []
+        terminal_reason = plan.get("terminal_reason")
+        manual_playbook = []
+
         self.chains_data = []
         for i, chain in enumerate(chains[:5], 1):
             chain_name = chain.get("name") if isinstance(chain, dict) else getattr(chain, "name", f"Chain-{i}")
-            chain_risk = (
-                (chain.get("risk") or chain.get("risk_level") or chain.get("severity"))
-                if isinstance(chain, dict)
-                else getattr(chain, "risk_level", "MEDIUM")
-            )
+            chain_risk = (chain.get("risk") or chain.get("risk_level") or chain.get("severity")) if isinstance(chain, dict) else getattr(chain, "risk_level", "MEDIUM")
             chain_steps = chain.get("steps", []) if isinstance(chain, dict) else getattr(chain, "steps", [])
             chain_info = {
                 'name': chain_name or f"CHAIN-{i:02d}",
@@ -4905,8 +5267,12 @@ class ReconAgent:
             }
             
             for step in chain_steps[:3]:
-                step_desc = step.get('description', '') if isinstance(step, dict) else getattr(step, "name", "")
-                step_payload = step.get('payload', '') if isinstance(step, dict) else getattr(step, "payload", "")
+                if isinstance(step, str):
+                    step_desc = step
+                    step_payload = ""
+                else:
+                    step_desc = step.get('description', '') if isinstance(step, dict) else getattr(step, "name", "")
+                    step_payload = step.get('payload', '') if isinstance(step, dict) else getattr(step, "payload", "")
                 step_info = {
                     'desc': step_desc,
                     'success': step.get('exploited', False) if isinstance(step, dict) else False,
@@ -4917,31 +5283,29 @@ class ReconAgent:
             
             self.chains_data.append(chain_info)
         
-        serializable_chains = []
-        for chain in chains:
-            if isinstance(chain, dict):
-                serializable_chains.append(chain)
-            else:
-                serializable_chains.append(
-                    {
-                        "name": getattr(chain, "name", ""),
-                        "description": getattr(chain, "description", ""),
-                        "risk_level": getattr(chain, "risk_level", "MEDIUM"),
-                        "estimated_time": getattr(chain, "estimated_time", "unknown"),
-                        "steps": [
-                            {
-                                "name": getattr(s, "name", ""),
-                                "action": getattr(s, "action", ""),
-                                "target": getattr(s, "target", ""),
-                                "tool": getattr(s, "tool", ""),
-                                "payload": getattr(s, "payload", ""),
-                                "success_indicator": getattr(s, "success_indicator", ""),
-                            }
-                            for s in getattr(chain, "steps", [])
-                        ],
-                    }
-                )
+        serializable_chains = [dict(chain) for chain in chains if isinstance(chain, dict)]
         exploit_basis = self._get_exploitation_findings()
+        evidence_backed_chains = self._build_evidence_backed_chains(exploit_basis)
+        if evidence_backed_chains:
+            seen_chain_keys = {
+                (c.get("chain_id"), c.get("name"))
+                for c in serializable_chains
+                if isinstance(c, dict)
+            }
+            for chain in evidence_backed_chains:
+                chain_key = (chain.get("chain_id"), chain.get("name"))
+                if chain_key in seen_chain_keys:
+                    continue
+                seen_chain_keys.add(chain_key)
+                serializable_chains.append(chain)
+        serializable_chains.sort(
+            key=lambda chain: (
+                1 if chain.get("force_chain") else 0,
+                float(chain.get("usability_score", chain.get("confidence", 0.0)) or 0.0),
+                float(chain.get("confidence", 0.0) or 0.0),
+            ),
+            reverse=True,
+        )
         exploit_recipes = self._build_exploit_recipes(serializable_chains, exploit_basis)
         self.state.update(exploit_chains=serializable_chains)
         self.state.update(exploit_recipes=exploit_recipes)
@@ -4952,12 +5316,26 @@ class ReconAgent:
         recipes_file = os.path.join(self.output_dir, "exploit_recipes.json")
         with open(recipes_file, "w") as f:
             json.dump(exploit_recipes, f, indent=2)
+
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        scan_meta.update(
+            {
+                "recon_signals": signals,
+                "recon_primitives": primitives,
+                "chains_generated": len(serializable_chains),
+                "chain_terminal_reason": terminal_reason,
+            }
+        )
+        self.state.update(scan_metadata=scan_meta)
+
         if chains:
             self.last_action = f"chains: {len(chains)} attack paths"
             self.phase_detail = f"[CHAINS] Generated {len(chains)} attack chain(s)"
         else:
-            self.last_action = "chains: generated manual playbook"
-            self.phase_detail = "[CHAINS] Generated manual attack playbook"
+            terminal_text = terminal_reason or "no_chain_generated"
+            self._set_terminal_state(terminal_text, stop_reason="no_usable_chain")
+            self.last_action = f"chains: stopped cleanly ({terminal_text})"
+            self.phase_detail = f"[CHAINS] No usable chain ({terminal_text})"
         self._update_display()
         self.phase_status = "done"
         self._mark_phase_done("chain")
@@ -4968,26 +5346,189 @@ class ReconAgent:
         verified_findings = self._ensure_verified_findings()
         chains = self.state.get("exploit_chains", [])
         recipes = self.state.get("exploit_recipes", []) or []
+        selected = self.state.get("selected_exploit_strategy", {}) or {}
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        selected_chain_name = selected.get("chain_name") or selected.get("name") or scan_meta.get("selected_chain")
+        selected_chain_id = selected.get("chain_id")
+        if not selected and selected_chain_name:
+            selected = {
+                "chain_name": selected_chain_name,
+                "chain_id": selected_chain_id,
+                "reasoning": scan_meta.get("selected_reason") or "",
+            }
+
+        if not selected_chain_name and not selected_chain_id:
+            reason = scan_meta.get("selector_terminal_reason") or self.exploit_selector.last_rejection_reason or "no_usable_chain"
+            self.logger.warning(f"[EXPLOIT] Skipping exploit execution: {reason}")
+            self.last_action = f"exploit skipped: {reason}"
+            self.phase_detail = f"[EXPLOIT] No selected chain ({reason})"
+            self._set_terminal_state(reason, stop_reason="selector_rejected")
+            self._update_display()
+            self.phase_status = "done"
+            self._mark_phase_done("exploit")
+            return
+
         if chains:
             results = []
             exploited_count = 0
+            candidate_chain_names = []
+            if selected_chain_name:
+                candidate_chain_names.append(selected_chain_name)
+            for alt in selected.get("alternative_strategies", []) or []:
+                alt_name = alt.get("chain_name")
+                if alt_name and alt_name not in candidate_chain_names:
+                    candidate_chain_names.append(alt_name)
+
+            selected_chains = []
+            for candidate_name in candidate_chain_names:
+                match = next((c for c in chains if c.get("name") == candidate_name), None)
+                if match:
+                    selected_chains.append(match)
+
+            if not selected_chains:
+                reason = f"selected_chain_not_available:{selected_chain_name or selected_chain_id}"
+                self.logger.warning(f"[EXPLOIT] {reason}")
+                self.last_action = f"exploit skipped: {reason}"
+                self.phase_detail = f"[EXPLOIT] {reason}"
+                self._set_terminal_state(reason, stop_reason="selector_rejected")
+                self._update_display()
+                self.phase_status = "done"
+                self._mark_phase_done("exploit")
+                return
+
+            verified_chain_names = set()
             if verified_findings and recipes:
                 verified_chain_names = {
                     recipe.get("chain_name")
                     for recipe in recipes
                     if recipe.get("execution_mode") == "verified_only" and recipe.get("preconditions")
                 }
-                gated_chains = [c for c in chains if c.get("name") in verified_chain_names]
-                if gated_chains:
-                    chains = gated_chains
-            
-            # FIX: Test ALL chains (not just first 3) for deeper exploitation
-            # Also increased limit to test more chains for comprehensive coverage
-            max_chains_to_test = min(len(chains), 10)  # Test up to 10 chains
-            self.logger.info(f"[EXPLOIT] Testing {max_chains_to_test} out of {len(chains)} available chains")
-            
+
+            executable_chain = None
+            rejected_reason = ""
+            fallback_chain = None
+            for idx, chain in enumerate(selected_chains):
+                chain_name = chain.get("name")
+                primitive = chain.get("primitive")
+                missing = chain.get("preconditions_missing", []) or []
+                evidence_used = chain.get("evidence", []) or chain.get("preconditions_met", []) or []
+                matched_verified_context = bool(verified_findings and self._chain_matches_verified_context(chain, verified_findings))
+                preflight_allowed = bool(chain.get("force_chain")) or matched_verified_context or len(missing) <= 1
+                if verified_chain_names and chain_name not in verified_chain_names and not preflight_allowed:
+                    rejected_reason = f"missing_verified_recipe:{chain_name}"
+                    self.logger.warning(
+                        "[EXPLOIT] Rejecting chain=%s matched_primitives=%s missing_preconditions=%s evidence=%s reason=%s",
+                        chain_name,
+                        primitive,
+                        ",".join(missing) or "none",
+                        evidence_used[:4],
+                        rejected_reason,
+                    )
+                    if idx + 1 < len(selected_chains):
+                        fallback_chain = selected_chains[idx + 1].get("name")
+                    continue
+                if verified_chain_names and chain_name not in verified_chain_names and preflight_allowed:
+                    self.logger.info(
+                        "[EXPLOIT] Preflight verification allowed for chain=%s matched_primitives=%s missing_preconditions=%s evidence=%s",
+                        chain_name,
+                        primitive,
+                        ",".join(missing) or "none",
+                        evidence_used[:4],
+                    )
+                executable_chain = chain
+                break
+
+            if not executable_chain:
+                reason = f"selected_chain_rejected:{selected_chain_name}"
+                scan_meta["selector_terminal_reason"] = reason
+                scan_meta["rejected_chain_reason"] = rejected_reason or reason
+                if fallback_chain:
+                    scan_meta["fallback_chain"] = fallback_chain
+                self.state.update(scan_metadata=scan_meta)
+                self.logger.warning(f"[EXPLOIT] {reason}")
+                self.last_action = f"exploit skipped: {reason}"
+                self.phase_detail = f"[EXPLOIT] {reason}"
+                self._set_terminal_state(reason, stop_reason="selector_rejected")
+                self._update_display()
+                self.phase_status = "done"
+                self._mark_phase_done("exploit")
+                return
+
+            if executable_chain.get("name") != selected_chain_name:
+                scan_meta["fallback_chain"] = executable_chain.get("name")
+                scan_meta["selected_chain"] = executable_chain.get("name")
+                scan_meta["selected_reason"] = f"fallback_from:{selected_chain_name}->{executable_chain.get('name')}"
+                current_selected = dict(selected)
+                current_selected["chain_name"] = executable_chain.get("name")
+                current_selected["chain_id"] = executable_chain.get("chain_id")
+                current_selected["reasoning"] = scan_meta["selected_reason"]
+                self.state.update(selected_exploit_strategy=current_selected)
+                self.state.update(scan_metadata=scan_meta)
+                self.logger.warning(
+                    "[EXPLOIT] Falling back from chain=%s to chain=%s",
+                    selected_chain_name,
+                    executable_chain.get("name"),
+                )
+
+            def _chain_host(chain):
+                for step in chain.get("steps", []) or []:
+                    target = step.get("target") or ""
+                    if target:
+                        try:
+                            parsed_target = urllib.parse.urlparse(target)
+                            return (parsed_target.netloc or parsed_target.hostname or "").lower()
+                        except Exception:
+                            return ""
+                for item in chain.get("evidence", []) or chain.get("preconditions_met", []) or []:
+                    if isinstance(item, str) and "://" in item:
+                        try:
+                            parsed_item = urllib.parse.urlparse(item)
+                            return (parsed_item.netloc or parsed_item.hostname or "").lower()
+                        except Exception:
+                            return ""
+                return ""
+
+            live_hosts = self.state.get("live_hosts", []) or []
+            live_hostnames = {
+                (
+                    urllib.parse.urlparse(entry.get("url") or "").netloc
+                    or entry.get("host")
+                    or urllib.parse.urlparse(entry.get("url") or "").hostname
+                    or ""
+                ).lower()
+                for entry in live_hosts if isinstance(entry, dict)
+            }
+
+            chains = [executable_chain]
+            selected_chain_name = executable_chain.get("name") or selected_chain_name
+            max_hosts_to_cover = max(1, min(len([host for host in live_hostnames if host]), 3))
+            seen_hosts = {_chain_host(executable_chain)}
+            for candidate in selected_chains:
+                if candidate is executable_chain:
+                    continue
+                candidate_host = _chain_host(candidate)
+                if not candidate_host:
+                    continue
+                if live_hostnames and candidate_host not in live_hostnames:
+                    continue
+                if candidate_host in seen_hosts:
+                    continue
+                chains.append(candidate)
+                seen_hosts.add(candidate_host)
+                if len(chains) >= max_hosts_to_cover:
+                    break
+
+            max_chains_to_test = len(chains)
+            if max_chains_to_test > 1:
+                self.logger.info(
+                    "[EXPLOIT] Multi-host scope detected; testing %s chains across distinct targets",
+                    max_chains_to_test,
+                )
+            else:
+                self.logger.info(f"[EXPLOIT] Testing selected chain only: {selected_chain_name or selected_chain_id}")
+
             for i, chain in enumerate(chains[:max_chains_to_test]):
-                self.phase_detail = f"[EXPLOIT] Testing chain {i+1}/{min(3, len(chains))}..."
+                self.phase_detail = f"[EXPLOIT] Testing selected chain {i+1}/{len(chains)}..."
                 self._update_display()
                 result = self.exploit_engine.test_chain(chain)
                 results.append(result)
@@ -5329,6 +5870,7 @@ class ReconAgent:
                     # FIX 1: Store detected vulnerabilities in confirmed_vulnerabilities
                     # so chain_planner can find them and generate SQLi chains
                     current_vulns = self.state.get("confirmed_vulnerabilities", []) or []
+                    pending_vulns = []
                     for v in result['vulnerabilities']:
                         vuln_entry = {
                             "type": "SQLI",
@@ -5342,11 +5884,11 @@ class ReconAgent:
                             "details": v,
                             "source": "boolean_sqli_detector"
                         }
-                        # Avoid duplicates
-                        if not any(v2.get('endpoint') == url and v2.get('parameter') == v.get('parameter') for v2 in current_vulns):
-                            current_vulns.append(vuln_entry)
+                        pending_vulns.append(vuln_entry)
                     
-                    self.state.update(confirmed_vulnerabilities=current_vulns)
+                    self.state.update(
+                        confirmed_vulnerabilities=self._merge_vulnerability_lists(current_vulns, pending_vulns)
+                    )
                     
                     if self.batch_display:
                         self.batch_display._add_to_feed("🔍", "Boolean SQLi", url, f"{vuln_count} found")
@@ -5400,6 +5942,7 @@ class ReconAgent:
                     # FIX 1: Store detected vulnerabilities in confirmed_vulnerabilities
                     # so chain_planner can find them and generate XSS chains
                     current_vulns = self.state.get("confirmed_vulnerabilities", []) or []
+                    pending_vulns = []
                     for v in result['vulnerabilities']:
                         vuln_entry = {
                             "type": "XSS",
@@ -5413,11 +5956,11 @@ class ReconAgent:
                             "details": v,
                             "source": "xss_detector"
                         }
-                        # Avoid duplicates
-                        if not any(v2.get('endpoint') == url and v2.get('parameter') == v.get('parameter') and v2.get('type') == v.get('type') for v2 in current_vulns):
-                            current_vulns.append(vuln_entry)
+                        pending_vulns.append(vuln_entry)
                     
-                    self.state.update(confirmed_vulnerabilities=current_vulns)
+                    self.state.update(
+                        confirmed_vulnerabilities=self._merge_vulnerability_lists(current_vulns, pending_vulns)
+                    )
                     
                     if self.batch_display:
                         types = set(v.get('type') for v in result['vulnerabilities'])
@@ -5535,54 +6078,8 @@ class ReconAgent:
         self._mark_phase_done("default_creds")
 
     def _run_cve_exploit_phase(self):
-        """Phase 21: Known CVE Exploitation"""
-        if self._should_abort_low_signal():
-            return
-        
-        self.phase_detail = "[CVE] Testing for known CVE exploits..."
-        self._update_display()
-        
-        try:
-            cve_results = []
-            technologies = self.state.get("technologies", {})
-            endpoints = self.state.get("live_urls", [])
-            
-            if not endpoints:
-                endpoints = self.state.get("prioritized_endpoints", [])
-            
-            for url in endpoints[:5]:
-                url_str = url if isinstance(url, str) else url.get("url", "")
-                url_str = self._canonicalize_url(url_str)
-                if not url_str:
-                    continue
-                
-                self.phase_detail = f"[CVE] Testing {url_str.split('//')[-1][:30]}..."
-                self._update_display()
-                
-                result = self.cve_exploiter.scan(
-                    url_str,
-                    technologies=technologies,
-                    progress_cb=self._progress_callback
-                )
-                cve_results.append(result)
-                
-                if result.get('exploitable_cves'):
-                    self.stats['vulns'] += len(result['exploitable_cves'])
-                    if self.batch_display:
-                        self.batch_display._add_to_feed("🎯", "CVE", url_str, f"{len(result['exploitable_cves'])} exploitable")
-            
-            self.state.update(cve_findings=cve_results)
-            cve_count = sum(len(r.get('exploitable_cves', [])) for r in cve_results)
-            self.last_action = f"cve: {cve_count} exploitable CVEs found"
-            self.phase_detail = f"[CVE] Complete - {cve_count} known exploits available"
-            self._update_display()
-            
-        except Exception as e:
-            self.logger.error(f"[CVE] Phase failed: {e}")
-            self.last_action = f"cve error: {str(e)[:50]}"
-            self.phase_detail = f"[CVE] Error - {str(e)[:60]}"
-            self._update_display()
-        
+        """Legacy no-op. CVE exploitation is disabled in the active pipeline."""
+        self.phase_detail = "[LEGACY] CVE exploitation phase disabled"
         self.phase_status = "done"
         self._mark_phase_done("cve_exploit")
 
@@ -7057,7 +7554,7 @@ class ReconAgent:
             
             # Check if host was previously blacklisted for timeouts
             from urllib.parse import urlparse
-            hostname = urlparse(url).hostname or ""
+            hostname = urllib.parse.urlparse(url).hostname or ""
             from core.scan_optimizer import get_optimizer
             optimizer = get_optimizer()
             if optimizer and optimizer.is_host_blacklisted(hostname):
@@ -7300,14 +7797,14 @@ class ReconAgent:
         try:
             from urllib.parse import urlparse, urlunparse
 
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             if not parsed.scheme or not parsed.hostname:
                 return url
 
             target_port = parsed.port or (443 if parsed.scheme == "https" else 80)
             for host_info in self.state.get("live_hosts", []) or []:
                 live_url = host_info.get("url", "")
-                live_parsed = urlparse(live_url)
+                live_parsed = urllib.parse.urlparse(live_url)
                 if not live_parsed.scheme or not live_parsed.hostname:
                     continue
                 live_port = live_parsed.port or (443 if live_parsed.scheme == "https" else 80)
@@ -7389,6 +7886,54 @@ class ReconAgent:
             "security_findings": len(self.state.get("security_findings", []) or []),
             "rce_paths": len(self.state.get("rce_chain_possibilities", []) or []),
         }
+
+    def _log_iteration_metrics(self, terminal_reason: Optional[str] = None):
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        input_eps = int(scan_meta.get("ranking_input_endpoints", len((self.state.get("urls", []) or []) + (self.state.get("endpoints", []) or [])) or 0))
+        deduped_eps = int(scan_meta.get("ranking_deduped_endpoints", len(self.state.get("endpoints", []) or [])) or 0)
+        ranked_eps = int(scan_meta.get("ranking_ranked_endpoints", len(self.state.get("prioritized_endpoints", []) or [])) or 0)
+        scheduled_eps = len(self.state.get("prioritized_endpoints", []) or [])
+        scan_responses = len(self.state.get("scan_responses", []) or [])
+        new_findings = int(scan_meta.get("analysis_new_findings", 0) or 0)
+        carried_findings = int(scan_meta.get("analysis_carried_findings", 0) or 0)
+        signals_count = len(scan_meta.get("recon_signals", []) or [])
+        primitives_count = len(scan_meta.get("recon_primitives", []) or [])
+        chains_generated = len(self.state.get("exploit_chains", []) or [])
+        selected = self.state.get("selected_exploit_strategy", {}) or {}
+        selected_name = selected.get("chain_name") or selected.get("name") or scan_meta.get("selected_chain") or "none"
+        selected_reason = selected.get("reasoning") or scan_meta.get("selected_reason") or scan_meta.get("selector_terminal_reason") or scan_meta.get("chain_terminal_reason") or "n/a"
+        effective_terminal = terminal_reason or scan_meta.get("terminal_reason") or scan_meta.get("selector_terminal_reason") or scan_meta.get("chain_terminal_reason")
+        confirmed_vulns_count = len(self.state.get("confirmed_vulnerabilities", []) or [])
+        heuristic_vulns_count = len(self.state.get("vulnerabilities", []) or [])
+        planner_mode = scan_meta.get("planner_mode") or "rule_based"
+        forced_chain = scan_meta.get("forced_chain", False)
+        rejected_chain_reason = scan_meta.get("rejected_chain_reason") or "none"
+        fallback_chain = scan_meta.get("fallback_chain") or "none"
+        self.logger.info(
+            "[ITER_METRICS] iter=%s input_endpoints=%s deduped_endpoints=%s ranked_endpoints=%s "
+            "scan_responses=%s new_findings=%s carried_findings=%s signals=%s primitives=%s "
+            "chains_generated=%s confirmed_vulns_count=%s heuristic_vulns_count=%s planner_mode=%s "
+            "forced_chain=%s selected_chain=%s selected_reason=%s rejected_chain_reason=%s fallback_chain=%s terminal_reason=%s",
+            self.iteration_count,
+            input_eps,
+            deduped_eps,
+            ranked_eps if ranked_eps else scheduled_eps,
+            scan_responses,
+            new_findings,
+            carried_findings,
+            signals_count,
+            primitives_count,
+            chains_generated,
+            confirmed_vulns_count,
+            heuristic_vulns_count,
+            planner_mode,
+            forced_chain,
+            selected_name,
+            str(selected_reason)[:180],
+            rejected_chain_reason,
+            fallback_chain,
+            effective_terminal or "none",
+        )
 
     def _should_stop_due_to_stagnation(self) -> bool:
         snapshot = self._iteration_snapshot()
@@ -7575,7 +8120,7 @@ Exploitability estimation:
         if not groq_key:
             return ""
         
-        max_retries = 3
+        max_retries = 1
         base_delay = 1
         
         for attempt in range(max_retries):
@@ -7610,7 +8155,7 @@ Exploitability estimation:
                         time.sleep(delay)
                         continue
                     else:
-                        self.logger.warning(f"[GROQ] Exhausted retries for 429 after {max_retries} attempts")
+                        self.logger.warning(f"[GROQ] Advisory unavailable after 429; continuing with local logic")
                 else:
                     self.logger.debug(f"[GROQ] HTTP error {e.code}: {e}")
                     break
@@ -7712,8 +8257,18 @@ Exploitability estimation:
         }
 
     def _ai_decide_and_apply(self):
-        """Gọi Groq để ra quyết định adaptive sau mỗi iteration và apply kết quả."""
+        """AI is advisory-only: annotate/explain; never control loop or override data decisions."""
         try:
+            scan_responses_count = len(self.state.get("scan_responses", []) or [])
+            ranked_endpoints_count = len(self.state.get("prioritized_endpoints", []) or [])
+            if scan_responses_count == 0 or ranked_endpoints_count == 0:
+                reason = f"stop_ai_advice: scan_responses={scan_responses_count}, ranked_endpoints={ranked_endpoints_count}"
+                scan_meta = self.state.get("scan_metadata", {}) or {}
+                scan_meta["ai_terminal_reason"] = reason
+                self.state.update(scan_metadata=scan_meta)
+                self.logger.warning(f"[GROQ] {reason}")
+                return
+
             ctx = self._build_ai_context()
             raw = self._call_groq(self._GROQ_DECISION_PROMPT, json.dumps(ctx), timeout=15)
             if not raw:
@@ -7725,18 +8280,17 @@ Exploitability estimation:
 
             action = decision.get("action", "PROCEED")
             reason = decision.get("reason", "")
-            strategy = decision.get("next_strategy", {})
             chain_hints = decision.get("chain_hints", [])
             insight = decision.get("learning_insight", "")
 
-            self.logger.info(f"[GROQ] Decision: {action} — {reason}")
+            self.logger.info(f"[GROQ] Advisory: {action} — {reason}")
             if insight:
                 self.logger.info(f"[GROQ] Insight: {insight}")
 
             # Hiện lên AI panel
             if self.batch_display:
                 self.batch_display._add_to_ai_feed(
-                    f"Decision: {action}",
+                    f"Advisory: {action}",
                     f"{reason[:55]}" if reason else "",
                     self.target
                 )
@@ -7757,167 +8311,116 @@ Exploitability estimation:
             self.state.update(ai_learning_insight=insight)
             if chain_hints:
                 self.state.update(ai_chain_hints=chain_hints)
-
-            # Apply WAF bypass mode
-            new_bypass = strategy.get("waf_bypass_mode")
-            if new_bypass and new_bypass != getattr(self, "_waf_bypass_mode", "NONE"):
-                self._waf_bypass_mode = new_bypass
-                self.payload_gen.waf_context["bypass_mode"] = new_bypass
-                self.logger.info(f"[GROQ] WAF bypass escalated to: {new_bypass}")
-                if self.batch_display:
-                    self.batch_display._add_to_feed("🧠", "AI-Adapt", self.target, f"WAF bypass → {new_bypass}")
-
-            # Apply skip_payload_types
-            skip_types = strategy.get("skip_payload_types", [])
-            if skip_types:
-                self.state.update(ai_skip_payload_types=skip_types)
-                self.logger.info(f"[GROQ] Skipping payload types: {skip_types}")
-
-            # Apply endpoint filter
-            ep_filter = strategy.get("endpoint_filter")
-            if ep_filter:
-                self.state.update(ai_endpoint_filter=ep_filter)
-
-            # Apply max_payloads
-            max_p = strategy.get("max_payloads")
-            if max_p and isinstance(max_p, int):
-                self.stats["total_payloads"] = min(max_p, self.stats.get("total_payloads", 100))
-
-            # Xử lý action đặc biệt
-            if action == "ABORT_TARGET":
-                self.logger.warning(f"[GROQ] ABORT_TARGET: {reason}")
-                self.last_action = f"AI abort: {reason}"
-                self._update_display()
-            elif action == "SKIP_TO_EXPLOIT":
-                self.logger.info(f"[GROQ] SKIP_TO_EXPLOIT: {reason}")
-                # Mark scan phase done để nhảy thẳng vào exploit
-                self._mark_phase_done("scan")
-            elif action == "CHANGE_STRATEGY":
-                self.logger.info(f"[GROQ] CHANGE_STRATEGY: {reason}")
-                self.last_action = f"AI strategy change: {new_bypass or 'adjusted'}"
-                self._update_display()
+            self.logger.info("[GROQ] Advisory processed (no control-flow/data override applied)")
 
         except Exception as e:
             self.logger.debug(f"[GROQ] _ai_decide_and_apply failed: {e}")
 
     def _run_endpoint_ranking(self):
-        urls = self.state.get("urls", [])
-        endpoints = self.state.get("endpoints", [])
-        
-        # 🔥 FIX: Log số lượng
-        self.logger.warning(f"[RANK] urls: {len(urls)}, endpoints: {len(endpoints)}")
-        
-        # Normalize endpoints → always dict
-        normalized = []
-        
+        urls = self.state.get("urls", []) or []
+        endpoints = self.state.get("endpoints", []) or []
+        from core.phase_admission import PhaseAdmission
+
+        raw_inputs: List[Dict[str, Any]] = []
         for u in urls:
-            if u:
-                normalized.append({
-                    "url": u,
-                    "parameters": [],
-                    "categories": []
-                })
-        
+            if not u:
+                continue
+            raw_inputs.append({"url": u, "source": "url_list"})
         for ep in endpoints:
             if isinstance(ep, dict) and ep.get("url"):
-                normalized.append(ep)
-            elif isinstance(ep, str):
-                normalized.append({
-                    "url": ep,
-                    "parameters": [],
-                    "categories": []
-                })
-        
-        # Deduplicate by URL
-        try:
-            from core.host_filter import HostFilter
-            allowed_domains = self.state.get("allowed_domains", []) or []
-            host_filter = HostFilter(skip_dev_test=True, allowed_domains=allowed_domains)
-        except Exception:
-            host_filter = None
+                raw_inputs.append(ep)
+            elif isinstance(ep, str) and ep:
+                raw_inputs.append({"url": ep, "source": "endpoint_list"})
 
-        seen = set()
-        all_eps = []
-        live_hosts = self.state.get("live_hosts", []) or []
-        preferred_hosts = {}
-        try:
-            from urllib.parse import urlparse
-            for item in live_hosts:
-                live_url = item.get("url", "")
-                parsed_live = urlparse(live_url)
-                if parsed_live.hostname:
-                    preferred_hosts[(parsed_live.hostname.lower(), parsed_live.port or (443 if parsed_live.scheme == "https" else 80))] = {
-                        "scheme": parsed_live.scheme,
-                        "netloc": parsed_live.netloc,
-                    }
-        except Exception:
-            preferred_hosts = {}
-
-        for ep in normalized:
-            u = ep["url"]
-            if host_filter and host_filter.allowed_domains and not host_filter._is_in_allowed_domains(u):
-                continue
-
-            try:
-                from urllib.parse import urlparse, urlunparse
-                parsed = urlparse(u)
-                port = parsed.port or (443 if parsed.scheme == "https" else 80)
-                preferred_target = preferred_hosts.get(((parsed.hostname or "").lower(), port))
-                if preferred_target and (parsed.netloc != preferred_target["netloc"] or parsed.scheme != preferred_target["scheme"]):
-                    ep = dict(ep)
-                    ep["url"] = urlunparse(parsed._replace(scheme=preferred_target["scheme"], netloc=preferred_target["netloc"]))
-                    u = ep["url"]
-            except Exception:
-                pass
-
-            if u not in seen:
-                seen.add(u)
-                all_eps.append(ep)
-        
-        if not all_eps:
-            self.logger.warning("[RANK] No URLs found for ranking")
-            # 🔥 FIX: Fallback từ urls
-            if urls:
-                fallback_eps = [{"url": u, "parameters": [], "categories": []} for u in urls[:100]]
-                self.state.update(prioritized_endpoints=fallback_eps)
-                self.logger.warning(f"[RANK] Fallback: {len(fallback_eps)} endpoints from urls")
+        input_count = len(raw_inputs)
+        self.logger.warning(f"[RANK] input endpoints: {input_count}")
+        if input_count == 0:
+            self.state.update(prioritized_endpoints=[])
+            self.logger.warning("[RANK] No input endpoints, scheduled=0")
             return
-        
-        self.logger.warning(f"[RANK] Total endpoints before ranking: {len(all_eps)}")
-        
-        # Rank using URL only
+
+        canonical_normalizer = CanonicalURLNormalizer()
+        canonical_eps = canonical_normalizer.normalize_endpoints(raw_inputs, base_url=self.target)
+
+        # Force required recon shape (stable keys for downstream chain/signal derivation)
+        shaped_eps: List[Dict[str, Any]] = []
+        for ep in canonical_eps:
+            params = ep.get("query_params") or ep.get("parameters") or {}
+            source = ep.get("source") or ep.get("tool") or "recon"
+            shaped = {
+                "url": ep.get("url", ""),
+                "canonical_url": ep.get("normalized_url") or ep.get("url", ""),
+                "host": ep.get("host", ""),
+                "scheme": ep.get("scheme", ""),
+                "port": ep.get("port"),
+                "path": ep.get("path", "/"),
+                "method": ep.get("method"),
+                "params": params if isinstance(params, (dict, list)) else [],
+                "source": source,
+                "tech_hints": ep.get("tech_hints", []) or ep.get("categories", []) or [],
+                "auth_hints": ep.get("auth_hints", []),
+                "signals": ep.get("signals", []) or [],
+                "confidence": float(ep.get("confidence", 0.0) or 0.0),
+                "risk_level": ep.get("risk_level", "LOW"),
+            }
+            if shaped["url"]:
+                shaped_eps.append(shaped)
+
+        deduped_count = len(shaped_eps)
+        if deduped_count == 0:
+            self.state.update(prioritized_endpoints=[])
+            self.logger.warning("[RANK] Canonicalization rejected all endpoints, scheduled=0")
+            return
+
+        # Additional dedup/filter stage required before ranking
+        dedup = ScanDeduplicator(self.output_dir)
+        filtered = dedup.filter_urls_for_scanning([ep["canonical_url"] for ep in shaped_eps if ep.get("canonical_url")])
+        pre_rank_urls = filtered["high"] + filtered["medium"] + filtered["low"]
+        pre_rank_seen = set()
+        pre_rank_urls = [u for u in pre_rank_urls if not (u in pre_rank_seen or pre_rank_seen.add(u))]
+
+        url_to_ep = {ep["canonical_url"]: dict(ep) for ep in shaped_eps if ep.get("canonical_url")}
+        pre_rank_eps = [url_to_ep[u] for u in pre_rank_urls if u in url_to_ep]
+
+        phase_admission = PhaseAdmission(self.state)
+        admitted_eps = phase_admission.filter_candidates(pre_rank_eps, "rank") or []
+        if admitted_eps:
+            pre_rank_eps = admitted_eps
+
+        if not pre_rank_eps:
+            self.state.update(prioritized_endpoints=[])
+            self.logger.warning("[RANK] No endpoints after dedup/admission, scheduled=0")
+            return
+
         ranker = EndpointRanker()
-        ranked_dicts = ranker.rank_endpoints([ep["url"] for ep in all_eps])
-        
-        self.logger.warning(f"[RANK] Ranked endpoints: {len(ranked_dicts)}")
-        
-        # Extract URLs from ranked dicts
-        ranked_urls = [item["url"] for item in ranked_dicts] if ranked_dicts else []
-        
-        # Fallback if rank fail
-        if not ranked_urls:
-            self.logger.warning("[RANK] Ranker returned empty, using fallback")
-            ranked_urls = [ep["url"] for ep in all_eps]
-        
+        ranked_dicts = ranker.rank_endpoints([ep["canonical_url"] for ep in pre_rank_eps])
+        ranked_count = len(ranked_dicts)
+
+        ranked_urls = [item.get("url") for item in ranked_dicts if item.get("url")]
         rank_top = int(os.environ.get("RANK_TOP", "150"))
-        
-        # Map URL → full object
-        url_map = {ep["url"]: ep for ep in all_eps}
-        final_targets = [url_map[u] for u in ranked_urls if u in url_map][:rank_top]
-        
-        # 🔥 FIX: fallback lần 2
-        if not final_targets:
-            self.logger.warning("[RANK] Final targets empty → fallback to all endpoints")
-            final_targets = all_eps[:50]
-        
-        self.state.update(prioritized_endpoints=final_targets)
-        
-        self.logger.warning(f"[RANK] Final prioritized endpoints: {len(final_targets)}")
-        
-        # Save file
+        final_targets = [dict(url_to_ep[u]) for u in ranked_urls if u in url_to_ep][:rank_top]
+
+        # Finalize once; do not mutate list after this point.
+        finalized_targets = [dict(ep) for ep in final_targets]
+        self.state.update(prioritized_endpoints=finalized_targets)
+
+        scan_meta = self.state.get("scan_metadata", {}) or {}
+        scan_meta.update(
+            {
+                "ranking_input_endpoints": input_count,
+                "ranking_deduped_endpoints": len(pre_rank_eps),
+                "ranking_ranked_endpoints": ranked_count,
+                "ranking_scheduled_endpoints": len(finalized_targets),
+            }
+        )
+        self.state.update(scan_metadata=scan_meta)
+        self.logger.warning(
+            f"[RANK] input={input_count} deduped={len(pre_rank_eps)} ranked={ranked_count} scheduled={len(finalized_targets)}"
+        )
+
         ranked_file = os.path.join(self.output_dir, "endpoints_ranked.json")
         with open(ranked_file, "w") as f:
-            json.dump(final_targets, f, indent=2)
+            json.dump(finalized_targets, f, indent=2)
 
     def _run_js_endpoint_hunt_phase(self):
         """Phase 4.3: JavaScript Endpoint Hunting"""
@@ -8018,94 +8521,8 @@ Exploitability estimation:
         self._mark_phase_done("param_mine")
 
     def _run_cve_analysis_phase(self):
-        """Phase 8.2: CVE Matching & Risk Assessment (INSERTED BEFORE CHAIN PLANNING)"""
-        self.phase_detail = "[CVE] Matching detected technologies to CVE database..."
-        self._update_display()
-        
-        try:
-            technologies = self.state.get("technologies", {}) or {}
-            if not technologies:
-                self.logger.info("[CVE_ANALYSIS] No technologies detected yet")
-                self.phase_detail = "[CVE] No technologies to analyze"
-                self._update_display()
-                self._mark_phase_done("cve_analysis")
-                return
-            
-            self.logger.info(f"[CVE_ANALYSIS] Analyzing {len(technologies)} technologies")
-            
-            exploitable_cves = []
-            cve_count = 0
-            
-            # Check each technology for known CVEs
-            for tech_name, tech_data in technologies.items():
-                version = None
-                if isinstance(tech_data, dict):
-                    version = tech_data.get("version", "")
-                elif isinstance(tech_data, str):
-                    continue
-                
-                if not version or version.lower() in ["unknown", "none", ""]:
-                    self.logger.debug(f"[CVE_ANALYSIS] {tech_name}: version unknown, skipping")
-                    continue
-                
-                self.phase_detail = f"[CVE] Checking {tech_name} {version}..."
-                self._update_display()
-                
-                # Use existing CVE exploiter to query CVEs
-                cve_result = self.cve_exploiter.scan(
-                    self.target,
-                    technologies={tech_name: version},
-                    progress_cb=self._progress_callback
-                )
-                
-                if cve_result and cve_result.get("exploitable_cves"):
-                    for cve_info in cve_result["exploitable_cves"]:
-                        cve_entry = {
-                            "cve_id": cve_info.get("cve"),
-                            "tech": tech_name,
-                            "version": version,
-                            "name": cve_info.get("name", ""),
-                            "description": cve_info.get("description", ""),
-                            "affected": cve_info.get("affected", ""),
-                            "endpoint": cve_info.get("endpoint", ""),
-                            "method": cve_info.get("method", "GET"),
-                            "severity": self._cvss_to_severity(cve_info.get("affected", "")),
-                            "probability_of_success": 0.85,  # Known CVEs are reliable
-                            "effort": "low"
-                        }
-                        exploitable_cves.append(cve_entry)
-                        cve_count += 1
-                        
-                        self.logger.warning(f"[CVE_ANALYSIS] ✅ Found: {cve_info.get('cve')} in {tech_name} {version}")
-                        
-                        if self.batch_display:
-                            self.batch_display._add_to_feed(
-                                "🔍", "CVE Found", self.target, 
-                                f"{cve_info.get('cve')} ({tech_name})"
-                            )
-            
-            # Store in state for chain planning & exploit selection
-            self.state.update(exploitable_cves=exploitable_cves)
-            self.state.update(cve_facts={
-                "total_exploitable": cve_count,
-                "high_severity": len([c for c in exploitable_cves if c["severity"] in ["CRITICAL", "HIGH"]]),
-                "technology_count": len(technologies),
-                "analyzed_count": sum(1 for t in technologies.values() if isinstance(t, dict) and t.get("version"))
-            })
-            
-            self.stats['vulns'] += cve_count
-            self.last_action = f"cve_analysis: {cve_count} exploitable CVEs found"
-            self.phase_detail = f"[CVE] Complete - {cve_count} CVEs matched to chain planning"
-            self._update_display()
-            
-            self.logger.info(f"[CVE_ANALYSIS] Complete: {cve_count} exploitable CVEs found")
-            
-        except Exception as e:
-            self.logger.error(f"[CVE_ANALYSIS] Error: {e}")
-            self.last_action = f"cve_analysis error: {str(e)[:50]}"
-            self.phase_detail = f"[CVE] Error - {str(e)[:60]}"
-            self._update_display()
-        
+        """Legacy no-op. CVE analysis is disabled in the active pipeline."""
+        self.phase_detail = "[LEGACY] CVE analysis phase disabled"
         self.phase_status = "done"
         self._mark_phase_done("cve_analysis")
     
@@ -8161,111 +8578,120 @@ Exploitability estimation:
         self._mark_phase_done("priv_pivot")
 
     def _run_exploit_selection_phase(self):
-        """Phase 10.5: Automatic Exploit Selection (LEVEL BOSS) - NOW WITH CVE PRIORITIZATION"""
-        self.phase_detail = "[SELECT] Selecting best exploitation strategy (CVE-aware)..."
+        """Phase 10.5: Automatic Exploit Selection (recon-driven deterministic)."""
+        self.phase_detail = "[SELECT] Selecting best exploitation strategy (recon-driven)..."
         self._update_display()
         
         try:
-            vulnerabilities = self.state.get("vulnerabilities", []) or []
-            endpoints = self.state.get("endpoints", []) or []
+            vulnerabilities = self._get_exploitation_findings() or self.state.get("confirmed_vulnerabilities", []) or self.state.get("vulnerabilities", []) or []
+            endpoints = self.state.get("prioritized_endpoints", []) or self.state.get("endpoints", []) or []
             technologies = self.state.get("technologies", {}) or {}
             chains = self.state.get("exploit_chains", []) or []
-            exploitable_cves = self.state.get("exploitable_cves", []) or []  # NEW: CVE data from Phase 8.2
-            
-            # NEW: Build CVE-specific chains for prioritization
-            cve_chains = []
-            if exploitable_cves:
-                self.logger.info(f"[AUTO_EXPLOIT] Found {len(exploitable_cves)} CVE exploits to prioritize")
-                for cve in exploitable_cves:
-                    cve_chain = {
-                        "name": f"[{cve.get('cve_id', 'CVE')}] {cve.get('tech', 'Unknown')} {cve.get('version', '')} RCE",
-                        "type": "known_cve",
-                        "severity": "CRITICAL",
-                        "cve_id": cve.get("cve_id"),
-                        "technology": cve.get("tech"),
-                        "version": cve.get("version"),
-                        "probability_of_success": cve.get("probability_of_success", 0.85),
-                        "effort": cve.get("effort", "low"),
-                        "endpoint": cve.get("endpoint", ""),
-                        "method": cve.get("method", "GET")
-                    }
-                    cve_chains.append(cve_chain)
-                    self.logger.warning(f"[AUTO_EXPLOIT] Added CVE chain: {cve_chain['name']}")
-            
-            # Combine CVE chains first (highest priority), then regular chains
-            all_chains = cve_chains + chains
-            
-            if all_chains and vulnerabilities:
-                self.logger.info(f"[AUTO_EXPLOIT] Selecting from {len(all_chains)} chains ({len(cve_chains)} CVEs + {len(chains)} custom)")
-                self.last_action = f"selecting best exploitation strategy (CVE-aware)"
-                self.phase_detail = f"[SELECT] Ranking {len(all_chains)} strategies ({len(cve_chains)} CVE exploits)..."
+            scan_meta = self.state.get("scan_metadata", {}) or {}
+            signals = scan_meta.get("recon_signals", []) or []
+            primitives = scan_meta.get("recon_primitives", []) or []
+            chain_terminal_reason = scan_meta.get("chain_terminal_reason")
+
+            if chains and signals and primitives:
+                self.logger.info(f"[AUTO_EXPLOIT] Selecting from {len(chains)} recon chains")
+                self.last_action = "selecting best exploitation strategy (recon-driven)"
+                self.phase_detail = f"[SELECT] Ranking {len(chains)} recon strategies..."
                 self._update_display()
                 
                 # Convert technologies dict to list
                 tech_list = technologies.keys() if isinstance(technologies, dict) else technologies
                 
-                # Select best strategy (CVE chains have priority)
-                selected = None
-                if cve_chains:
-                    # Prioritize CVE with highest success probability and lowest effort
-                    selected_cve_chain = sorted(
-                        cve_chains, 
-                        key=lambda x: (x.get("probability_of_success", 0), -len(x.get("effort", ""))),
-                        reverse=True
-                    )[0]
-                    self.logger.warning(f"[AUTO_EXPLOIT] ⭐ PRIORITIZED CVE: {selected_cve_chain['name']}")
-                    # Create wrapper for compatibility
-                    class CVEStrategy:
-                        def __init__(self, cve_chain):
-                            self.chain_name = cve_chain["name"]
-                            self.chain_data = cve_chain
-                        def to_dict(self):
-                            return self.chain_data
-                    selected = CVEStrategy(selected_cve_chain)
-                
-                if not selected:
-                    # Fall back to standard strategy selection
-                    selected = select_exploitation_strategy(
-                        vulnerabilities,
-                        chains,
-                        endpoints,
-                        list(tech_list)
-                    )
+                selected = self.exploit_selector.select_best_strategy(
+                    vulnerabilities=vulnerabilities,
+                    chains=chains,
+                    endpoints=endpoints,
+                    technologies=list(tech_list),
+                    signals=signals,
+                    primitives=primitives,
+                )
                 
                 if selected:
                     self.logger.warning(f"[AUTO_EXPLOIT] Selected: {selected.chain_name}")
                     self.phase_detail = f"[SELECT] ⭐ Selected: {selected.chain_name[:50]}"
                     self._update_display()
                     
-                    # Get all strategies
-                    all_strategies = select_all_strategies(
-                        vulnerabilities,
-                        chains,
-                        endpoints,
-                        list(tech_list)
-                    ) if not cve_chains else []
+                    ranked_candidates = getattr(self.exploit_selector, "last_ranked_candidates", []) or []
+                    alternative_strategies = []
+                    for alt_chain, alt_score in ranked_candidates[1:4]:
+                        if not isinstance(alt_chain, dict):
+                            continue
+                        alternative_strategies.append(
+                            {
+                                "chain_id": alt_chain.get("chain_id", ""),
+                                "chain_name": alt_chain.get("name", alt_chain.get("goal", "")),
+                                "confidence": alt_chain.get("confidence", 0.0),
+                                "likelihood": alt_chain.get("confidence", 0.0),
+                                "complexity": "medium",
+                                "score": alt_score,
+                            }
+                        )
                     
-                    # Store strategies (CVE-first)
+                    # Store recon-driven strategy
+                    scan_meta["selected_chain"] = selected.chain_name
+                    scan_meta["selected_reason"] = selected.reasoning
+                    scan_meta["planner_mode"] = "deterministic" if any(
+                        isinstance(c, dict) and c.get("name") == selected.chain_name and c.get("force_chain")
+                        for c in chains
+                    ) else "rule_based"
+                    scan_meta["forced_chain"] = bool(any(
+                        isinstance(c, dict) and c.get("name") == selected.chain_name and c.get("force_chain")
+                        for c in chains
+                    ))
+                    scan_meta.pop("selector_terminal_reason", None)
+                    self.state.update(scan_metadata=scan_meta)
+                    selected_payload = selected.to_dict()
+                    selected_payload["planner_mode"] = scan_meta["planner_mode"]
+                    selected_payload["forced_chain"] = scan_meta["forced_chain"]
+                    selected_payload["alternative_strategies"] = alternative_strategies
                     self.state.update(
-                        selected_exploit_strategy=selected.to_dict() if hasattr(selected, 'to_dict') else selected.chain_data,
-                        alternative_strategies=[s.to_dict() for s in all_strategies[1:]] if all_strategies else [],
-                        cve_exploit_available=bool(cve_chains)
+                        selected_exploit_strategy=selected_payload,
+                        alternative_strategies=alternative_strategies,
+                        cve_exploit_available=False
                     )
                     
                     if self.batch_display:
-                        strategy_type = "🔍 CVE Exploit" if cve_chains else "⚔️  Custom Exploit"
                         self.batch_display._add_to_ai_feed(
-                            strategy_type,
+                            "⚔️ Recon Strategy",
                             f"Selected: {selected.chain_name}",
                             self.target
                         )
                 else:
-                    self.logger.warning("[AUTO_EXPLOIT] No suitable strategy found")
-                    self.phase_detail = "[SELECT] No suitable strategy found"
+                    reason = self.exploit_selector.last_rejection_reason or "no_usable_chain"
+                    self.logger.warning(f"[AUTO_EXPLOIT] No usable strategy: {reason}")
+                    self.phase_detail = f"[SELECT] No usable strategy ({reason})"
+                    scan_meta["selected_chain"] = "none"
+                    scan_meta["selected_reason"] = reason
+                    scan_meta["planner_mode"] = "fallback"
+                    scan_meta["forced_chain"] = False
+                    scan_meta["selector_terminal_reason"] = reason
+                    self.state.update(scan_metadata=scan_meta)
+                    self.state.update(selected_exploit_strategy={})
+                    self._set_terminal_state(reason, stop_reason="selector_rejected")
                     self._update_display()
             else:
-                self.logger.info("[AUTO_EXPLOIT] Insufficient data for selection")
-                self.phase_detail = "[SELECT] Insufficient data"
+                missing = []
+                if not chains:
+                    missing.append("chains")
+                if not signals:
+                    missing.append("signals")
+                if not primitives:
+                    missing.append("primitives")
+                reason = chain_terminal_reason or f"missing:{','.join(missing)}"
+                self.logger.info(f"[AUTO_EXPLOIT] Insufficient data for selection ({reason})")
+                self.phase_detail = f"[SELECT] Insufficient data ({reason})"
+                scan_meta["selected_chain"] = "none"
+                scan_meta["selected_reason"] = reason
+                scan_meta["planner_mode"] = "fallback"
+                scan_meta["forced_chain"] = False
+                scan_meta["selector_terminal_reason"] = reason
+                self.state.update(scan_metadata=scan_meta)
+                self.state.update(selected_exploit_strategy={})
+                self._set_terminal_state(reason, stop_reason="selector_rejected")
                 self._update_display()
         
         except Exception as e:
@@ -8474,7 +8900,7 @@ Exploitability estimation:
             for site in wp_sites[:10]:
                 # Extract domain from URL (relative path)
                 from urllib.parse import urlparse
-                domain = urlparse(site).netloc if '://' in site else site
+                domain = urllib.parse.urlparse(site).netloc if '://' in site else site
                 
                 # Get version for this site
                 site_version = wp_core.get("version", wp_version) if site == wp_core.get("url") else wp_version
@@ -8811,7 +9237,7 @@ Exploitability estimation:
                 url = ep.get('url', '') if isinstance(ep, dict) else str(ep)
                 # Extract just the path
                 from urllib.parse import urlparse
-                parsed = urlparse(url)
+                parsed = urllib.parse.urlparse(url)
                 path = parsed.path if parsed.path else url
                 print(f"     {C.BRIGHT_RED}└─ ⚠️ {path}{C.RESET}")
         else:
@@ -8825,7 +9251,7 @@ Exploitability estimation:
             for ep in api_endpoints[:3]:
                 url = ep.get('url', '') if isinstance(ep, dict) else str(ep)
                 from urllib.parse import urlparse
-                parsed = urlparse(url)
+                parsed = urllib.parse.urlparse(url)
                 path = parsed.path if parsed.path else url
                 print(f"     └─ {path}")
         print()
@@ -8837,7 +9263,7 @@ Exploitability estimation:
             for ep in admin_endpoints[:3]:
                 url = ep.get('url', '') if isinstance(ep, dict) else str(ep)
                 from urllib.parse import urlparse
-                parsed = urlparse(url)
+                parsed = urllib.parse.urlparse(url)
                 path = parsed.path if parsed.path else url
                 print(f"     └─ {path}")
         print()
@@ -9414,7 +9840,7 @@ def load_targets(filepath: str) -> tuple[list, int]:
                     continue
                 # Strip path from URL - only keep scheme + domain
                 from urllib.parse import urlparse
-                parsed = urlparse(line.lower())
+                parsed = urllib.parse.urlparse(line.lower())
                 if parsed.scheme and parsed.netloc:
                     # URL with scheme: extract just scheme://netloc
                     clean_url = f"{parsed.scheme}://{parsed.netloc}"
@@ -9471,7 +9897,7 @@ def _find_resume_dir(base_output: str, domain: str) -> Optional[str]:
 def process_single_target(domain: str, output_dir: str, options: dict, args, batch_display: BatchDisplay):
     """Process one target (for batch mode)"""
     try:
-        setup_logging(output_dir, options.get("verbose", False))
+        target_logger = setup_logging(output_dir, options.get("verbose", False), target=domain)
         
         # Read all targets from targets.txt to build allowed_domains list
         allowed_domains = []
@@ -9483,7 +9909,7 @@ def process_single_target(domain: str, output_dir: str, options: dict, args, bat
                     if line and not line.startswith('#'):
                         # Extract domain from URL (strip scheme and path)
                         from urllib.parse import urlparse
-                        parsed = urlparse(line.lower())
+                        parsed = urllib.parse.urlparse(line.lower())
                         if parsed.scheme and parsed.netloc:
                             allowed_domains.append(parsed.netloc)
                         elif '.' in line:
@@ -9499,7 +9925,8 @@ def process_single_target(domain: str, output_dir: str, options: dict, args, bat
             force_recon=getattr(args, 'force_recon', False),
             batch_display=batch_display,
             api_status=check_api_keys(),
-            allowed_domains=allowed_domains
+            allowed_domains=allowed_domains,
+            logger=target_logger
         )
         agent.run()
 
@@ -9536,6 +9963,7 @@ def run_batch(targets_file: str, options: dict, args):
     # Create logger
     batch_logger = logging.getLogger("batch")
     batch_logger.setLevel(logging.INFO)
+    batch_logger.propagate = False
     
     # File handler - with fallback support
     file_handler = None
@@ -9618,7 +10046,7 @@ def run_batch(targets_file: str, options: dict, args):
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                         # Sanitize domain: extract hostname and replace special chars
                         from urllib.parse import urlparse
-                        parsed = urlparse(domain)
+                        parsed = urllib.parse.urlparse(domain)
                         hostname = parsed.netloc if parsed.netloc else domain
                         domain_safe = hostname.replace(".", "_").replace(":", "_").replace("/", "_")
                         domain_output = os.path.join(base_output, f"{domain_safe}_{timestamp}")

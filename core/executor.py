@@ -7,11 +7,46 @@ import subprocess
 import logging
 import os
 import shutil
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import random
 import time
 
 logger = logging.getLogger("recon.executor")
+
+_BROKEN_TOOLS: Dict[str, str] = {}
+_LOGGED_BROKEN_TOOLS = set()
+
+
+def _decode_output(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="ignore")
+    return str(value)
+
+
+def _looks_like_runtime_tool_breakage(stdout: str, stderr: str) -> bool:
+    combined = f"{stdout or ''}\n{stderr or ''}".lower()
+    if "traceback (most recent call last):" not in combined:
+        return False
+    markers = (
+        "modulenotfounderror",
+        "importerror",
+        "no module named",
+        "cannot import name",
+        "pkg_resources",
+        "distributionnotfound",
+    )
+    return any(marker in combined for marker in markers)
+
+
+def _mark_tool_broken(tool: str, reason: str):
+    if not tool:
+        return
+    _BROKEN_TOOLS[tool] = (reason or "runtime failure")[:200]
+    if tool not in _LOGGED_BROKEN_TOOLS:
+        logger.warning(f"[EXEC] Disabling {tool} for the rest of this run: {_BROKEN_TOOLS[tool]}")
+        _LOGGED_BROKEN_TOOLS.add(tool)
 
 
 def add_evasion(cmd: List[str]) -> List[str]:
@@ -55,6 +90,11 @@ def run_command(
     Returns (returncode, stdout, stderr)
     """
     tool = cmd[0]
+    if tool in _BROKEN_TOOLS:
+        reason = _BROKEN_TOOLS.get(tool, "runtime failure")
+        logger.warning(f"[EXEC] Skipping disabled tool {tool}: {reason}")
+        return -4, "", reason
+
     resolved_tool = shutil.which(tool)
     if not resolved_tool:
         for candidate in (
@@ -77,22 +117,26 @@ def run_command(
     cmd = add_evasion(cmd)
 
     try:
+        use_binary_stdin = stdin_data is not None
+        input_payload = stdin_data.encode("utf-8") if use_binary_stdin else None
         result = subprocess.run(
             cmd,
             capture_output=True,
-            text=True,
+            text=not use_binary_stdin,
             timeout=timeout,
-            input=stdin_data,
+            input=input_payload,
             env=env or os.environ.copy(),
             cwd=cwd
         )
 
-        stdout = result.stdout.strip()
-        stderr = result.stderr.strip()
+        stdout = _decode_output(result.stdout).strip()
+        stderr = _decode_output(result.stderr).strip()
 
         if result.returncode == 0:
             logger.info(f"[EXEC] ✓ {tool} finished (lines: {len(stdout.splitlines())})")
         else:
+            if _looks_like_runtime_tool_breakage(stdout, stderr):
+                _mark_tool_broken(tool, stderr or stdout or f"exit code {result.returncode}")
             logger.warning(f"[EXEC] ✗ {tool} exited {result.returncode}: {stderr[:200]}")
 
         if output_file and stdout:
@@ -127,6 +171,8 @@ def run_command(
 
 def tool_available(name: str) -> bool:
     """Check if a CLI tool is available"""
+    if name in _BROKEN_TOOLS:
+        return False
     if shutil.which(name) is not None:
         return True
     extra_candidates = [
@@ -140,6 +186,11 @@ def check_tools(tools: List[str]) -> dict:
     """Check multiple tools and return availability status"""
     status = {}
     for tool in tools:
+        broken_reason = _BROKEN_TOOLS.get(tool)
+        if broken_reason:
+            status[tool] = False
+            logger.info(f"[TOOLS] ✗ {tool} (disabled: {broken_reason[:80]})")
+            continue
         available = tool_available(tool)
         status[tool] = available
         icon = "✓" if available else "✗"

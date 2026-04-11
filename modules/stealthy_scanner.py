@@ -1,3 +1,4 @@
+import urllib.parse
 """
 modules/stealthy_scanner.py - Integrated Stealthy & High-Efficiency Vulnerability Scanner
 Implements all 4 constraints in a unified scanning pipeline.
@@ -271,7 +272,7 @@ class StealthyScanner:
         """
         # FIX #8: Filter URLs with no injection parameters - they don't need WAF bypass
         from urllib.parse import urlparse
-        parsed = urlparse(endpoint_url)
+        parsed = urllib.parse.urlparse(endpoint_url)
         
         if config.WAF_BYPASS_FILTER_NO_PARAMS and not parsed.query:
             # URL has no parameters - skip WAF bypass logic, just do normal test

@@ -13,6 +13,9 @@ from datetime import datetime
 from typing import Any, Dict, List
 from dataclasses import dataclass, field, asdict
 
+from core.endpoint_registry import EndpointRegistry
+from core.finding_normalizer import finding_identity, normalize_finding
+
 logger = logging.getLogger("recon.state")
 
 
@@ -51,6 +54,11 @@ class ScanState:
     verification_stats: Dict[str, Any] = field(default_factory=dict)
     scan_responses: List[Dict] = field(default_factory=list)
     scan_metadata: Dict[str, Any] = field(default_factory=dict)
+    allowed_domains: List[str] = field(default_factory=list)
+    scan_targets: List[Dict] = field(default_factory=list)
+    scanned_endpoints: List[str] = field(default_factory=list)
+    payloads_tested: int = 0
+    scan_incomplete: bool = False
     
     # NEW: Structured findings layer (non-CVE security signals)
     security_findings: List[Dict] = field(default_factory=list)  # General security findings
@@ -141,6 +149,9 @@ class ScanState:
     cve_exploit_findings: List[Dict] = field(default_factory=list)
     api_vuln_findings: List[Dict] = field(default_factory=list)
     subdomain_takeover_findings: List[Dict] = field(default_factory=list)
+    selected_exploit_strategy: Dict[str, Any] = field(default_factory=dict)
+    alternative_strategies: List[Dict] = field(default_factory=list)
+    cve_exploit_available: bool = False
     
     # Phase 16 - Advanced Post-Exploitation (NEW)
     living_off_land_techniques: List[Dict] = field(default_factory=list)  # LOLBin techniques used
@@ -157,12 +168,22 @@ class ScanState:
 
 
 class StateManager:
+    URL_LIST_FIELDS = {"urls", "archived_urls", "scanned_endpoints"}
+    ENDPOINT_LIST_FIELDS = {"live_hosts", "endpoints", "prioritized_endpoints", "scan_targets"}
+    VULNERABILITY_LIST_FIELDS = {"vulnerabilities", "confirmed_vulnerabilities", "verified_vulnerabilities"}
+    REQUIRES_SCAN_RESPONSES_FIELDS = {
+        "exploit_results",
+        "security_findings",
+        "rce_chain_possibilities",
+    }
+
     def __init__(self, target: str, output_dir: str):
         self.output_dir = output_dir
         self.state_file = os.path.join(output_dir, "state.json")
         self._last_save_ts = 0.0
         self._dirty = False
         self._save_interval = float(os.getenv("STATE_SAVE_INTERVAL_SECONDS", "2"))
+        self._endpoint_registry = EndpointRegistry()
         self.state = ScanState(
             target=target,
             scan_id=os.path.basename(output_dir),
@@ -171,12 +192,89 @@ class StateManager:
         os.makedirs(output_dir, exist_ok=True)
         logger.info(f"[STATE] Initialized state for target: {target}")
 
+    def _normalize_url_list(self, current: List[str], incoming: List[str]) -> List[str]:
+        merged: List[str] = []
+        seen = set()
+        base_url = self.state.target or None
+        for url in list(current or []) + list(incoming or []):
+            normalized = self._endpoint_registry.normalizer.normalize_url(url, base_url=base_url)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            merged.append(normalized)
+        return merged
+
+    def _normalize_endpoint_list(self, current: List[Dict[str, Any]], incoming: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        ordered = []
+        merged: Dict[str, Dict[str, Any]] = {}
+        base_url = self.state.target or None
+        for item in list(current or []) + list(incoming or []):
+            record = self._endpoint_registry.register(item, base_url=base_url)
+            if not record:
+                continue
+            fingerprint = record.get("fingerprint") or record.get("url")
+            if fingerprint not in merged:
+                ordered.append(fingerprint)
+                merged[fingerprint] = record
+            else:
+                merged[fingerprint] = self._endpoint_registry.merge_records(merged[fingerprint], record)
+        return [merged[fingerprint] for fingerprint in ordered]
+
+    def _normalize_vulnerability_list(self, current: List[Dict[str, Any]], incoming: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        ordered = []
+        merged: Dict[Any, Dict[str, Any]] = {}
+        normalizer = self._endpoint_registry.normalizer
+        for item in list(current or []) + list(incoming or []):
+            normalized = normalize_finding(item, normalizer)
+            if not normalized:
+                continue
+            key = finding_identity(normalized, normalizer)
+            existing = merged.get(key)
+            if existing is None:
+                ordered.append(key)
+                merged[key] = normalized
+                continue
+
+            existing_score = float(existing.get("verification_confidence", existing.get("confidence", 0.0)) or 0.0)
+            incoming_score = float(normalized.get("verification_confidence", normalized.get("confidence", 0.0)) or 0.0)
+
+            retained = dict(existing)
+            if incoming_score >= existing_score:
+                retained.update(normalized)
+
+            left_evidence = str(existing.get("evidence", "") or "").strip()
+            right_evidence = str(normalized.get("evidence", "") or "").strip()
+            if left_evidence and right_evidence and left_evidence != right_evidence:
+                retained["evidence"] = f"{left_evidence} | {right_evidence}"
+
+            merged[key] = retained
+
+        return [merged[key] for key in ordered]
+
     def update(self, **kwargs):
         """Update state fields"""
+        pending_scan_responses = kwargs.get("scan_responses")
+        effective_scan_response_count = len(self.state.scan_responses or [])
+        if isinstance(pending_scan_responses, list) and len(pending_scan_responses) > 0:
+            effective_scan_response_count = len(pending_scan_responses)
         for key, value in kwargs.items():
             if hasattr(self.state, key):
+                if (
+                    key in self.REQUIRES_SCAN_RESPONSES_FIELDS
+                    and isinstance(value, list)
+                    and len(value) > 0
+                    and effective_scan_response_count == 0
+                ):
+                    logger.warning(f"[STATE] Skipping {key} update: scan_responses=0")
+                    continue
                 current = getattr(self.state, key)
-                if isinstance(current, list) and isinstance(value, list):
+                if key in self.URL_LIST_FIELDS and isinstance(value, list):
+                    setattr(self.state, key, self._normalize_url_list(current, value))
+                elif key in self.ENDPOINT_LIST_FIELDS and isinstance(value, list):
+                    setattr(self.state, key, self._normalize_endpoint_list(current, value))
+                elif key in self.VULNERABILITY_LIST_FIELDS and isinstance(value, list):
+                    setattr(self.state, key, self._normalize_vulnerability_list(current, value))
+                elif isinstance(current, list) and isinstance(value, list):
                     # Deduplicate
                     if value and isinstance(value[0], str):
                         merged = list(set(current + value))
@@ -193,18 +291,13 @@ class StateManager:
             self.state.subdomains.append(subdomain)
 
     def add_live_host(self, host_info: Dict):
-        urls = [h.get("url") for h in self.state.live_hosts if "url" in h]
-        if host_info.get("url") not in urls:
-            self.state.live_hosts.append(host_info)
+        self.update(live_hosts=[host_info])
 
     def add_url(self, url: str):
-        if url not in self.state.urls:
-            self.state.urls.append(url)
+        self.update(urls=[url])
 
     def add_endpoint(self, endpoint: Dict):
-        paths = [e.get("path") for e in self.state.endpoints if "path" in e]
-        if endpoint.get("path") not in paths:
-            self.state.endpoints.append(endpoint)
+        self.update(endpoints=[endpoint])
 
     def update_technologies(self, host: str, tech_data: Dict[str, Any]):
         technologies = self.state.technologies or {}
@@ -218,20 +311,7 @@ class StateManager:
         self.save(force=False)
 
     def upsert_endpoint(self, endpoint: Dict[str, Any]):
-        if not isinstance(endpoint, dict):
-            return
-        url = endpoint.get("url")
-        if not url:
-            return
-        for existing in self.state.endpoints:
-            if isinstance(existing, dict) and existing.get("url") == url:
-                existing.update(endpoint)
-                self._dirty = True
-                self.save(force=False)
-                return
-        self.state.endpoints.append(endpoint)
-        self._dirty = True
-        self.save(force=False)
+        self.update(endpoints=[endpoint])
 
     def update_scan_metadata(self, **kwargs):
         metadata = self.state.scan_metadata or {}
@@ -241,9 +321,17 @@ class StateManager:
         self.save(force=False)
 
     def add_vulnerability(self, vuln: Dict):
+        responses = self.state.scan_responses or []
+        if len(responses) == 0:
+            logger.warning("[STATE] Skipping vulnerability append: scan_responses=0")
+            return
         self.state.vulnerabilities.append(vuln)
 
     def add_exploit_result(self, result: Dict):
+        responses = self.state.scan_responses or []
+        if len(responses) == 0:
+            logger.warning("[STATE] Skipping exploit_result append: scan_responses=0")
+            return
         self.state.exploit_results.append(result)
 
     def add_error(self, error: str):

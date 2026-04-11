@@ -1,3 +1,4 @@
+import urllib.parse
 """
 modules/crypto_scanner.py - Cryptographic Security Scanner
 Checks for SSL/TLS vulnerabilities, sensitive data exposure, and mixed content issues.
@@ -129,7 +130,7 @@ class CryptographicScanner:
         }
         
         try:
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             hostname = parsed.hostname
             port = parsed.port or (443 if parsed.scheme == "https" else 80)
             

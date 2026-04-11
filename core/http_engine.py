@@ -1,3 +1,4 @@
+import urllib.parse
 """
 core/http_engine.py - HTTP Engine
 Core network layer with connection pooling, retries, and rate limiting
@@ -7,14 +8,15 @@ import requests
 import logging
 import time
 import threading
-from requests.exceptions import ConnectTimeout, ConnectionError as RequestsConnectionError, ReadTimeout
+import socket
+from requests.exceptions import ConnectTimeout, ConnectionError as RequestsConnectionError, ReadTimeout, TooManyRedirects
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib3.exceptions import HeaderParsingError, NameResolutionError
 import random
 import config
 import urllib3
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 import ipaddress
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -58,6 +60,7 @@ class HTTPClient:
         self._rate_lock = threading.Lock()
         self._dead_hosts = set()
         self._dead_host_errors = {}
+        self._logged_blacklisted_hosts = set()
 
         # ENHANCED: Connection pool of 50, with exponential backoff
         retry_strategy = Retry(
@@ -82,6 +85,7 @@ class HTTPClient:
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
         self.session.verify = False
+        self.session.max_redirects = 10
 
         # Default headers
         self.session.headers.update({
@@ -106,13 +110,15 @@ class HTTPClient:
             raise ValueError(f"Invalid URL: {msg}")
         
         # Check if host is blacklisted by optimizer - fail fast
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         host = parsed.hostname or parsed.netloc or ""
         
         optimizer = get_optimizer()
         if optimizer.is_host_blacklisted(host):
             error = ConnectionError(f"Skipping blacklisted host: {host}")
-            logger.debug(f"[HTTP] {error}")
+            if host not in self._logged_blacklisted_hosts:
+                logger.debug(f"[HTTP] {error}")
+                self._logged_blacklisted_hosts.add(host)
             raise error
         
         # Check cache for unreachable ports - fail fast
@@ -141,7 +147,7 @@ class HTTPClient:
         kwargs.setdefault('verify', config.SSL_VERIFY)
         
         try:
-            response = self.session.get(url, **kwargs)
+            response = self._request_with_safe_redirects("GET", url, **kwargs)
             self._clear_dead_host_error(host)
             self._handle_rate_limit_response(response, url)
             self._update_session(response)
@@ -178,10 +184,13 @@ class HTTPClient:
         except (ReadTimeout, ConnectTimeout) as e:
             logger.debug(f"[HTTP] Request timed out for {url}: {e}")
             raise
+        except TooManyRedirects as e:
+            logger.debug(f"[HTTP] Redirect loop detected for {url}: {e}")
+            raise
         except HeaderParsingError as e:
             logger.debug(f"[HTTP] Failed to parse headers (url={url}): {e}")
             try:
-                response = self.session.get(url, **kwargs)
+                response = self._request_with_safe_redirects("GET", url, **kwargs)
                 self._clear_dead_host_error(host)
                 self._update_session(response)
                 return response
@@ -205,7 +214,7 @@ class HTTPClient:
         if not is_valid:
             logger.warning(f"[HTTP] Skipping invalid URL: {msg}")
             raise ValueError(f"Invalid URL: {msg}")
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         host = parsed.netloc or parsed.hostname or ""
         if host in self._dead_hosts:
             raise ConnectionError(f"Skipping dead host: {host}")
@@ -225,11 +234,93 @@ class HTTPClient:
         except (ReadTimeout, ConnectTimeout) as e:
             logger.debug(f"[HTTP] POST request timed out for {url}: {e}")
             raise
+        except TooManyRedirects as e:
+            logger.debug(f"[HTTP] Redirect loop detected for POST {url}: {e}")
+            raise
         except Exception as e:
             if self._is_name_resolution_error(e):
                 self._record_dead_host_error(host, hard=True)
             logger.debug(f"[HTTP] POST request failed for {url}: {e}")
             raise
+
+    def _effective_port(self, parsed) -> int:
+        return parsed.port or (443 if parsed.scheme == "https" else 80)
+
+    def _hosts_equivalent(self, left: str, right: str) -> bool:
+        left = (left or "").strip().lower()
+        right = (right or "").strip().lower()
+        if not left or not right:
+            return False
+        if left == right:
+            return True
+
+        try:
+            left_ip = ipaddress.ip_address(left)
+            right_ip = ipaddress.ip_address(right)
+            return left_ip == right_ip
+        except ValueError:
+            pass
+
+        def _resolve(host: str):
+            resolved = set()
+            try:
+                for info in socket.getaddrinfo(host, None):
+                    ip = (info[4][0] or "").strip().lower()
+                    if ip:
+                        resolved.add(ip)
+            except Exception:
+                pass
+            return resolved
+
+        left_ips = _resolve(left)
+        right_ips = _resolve(right)
+        return bool(left_ips and right_ips and left_ips.intersection(right_ips))
+
+    def _can_follow_redirect(self, original_url: str, next_url: str) -> bool:
+        original = urllib.parse.urlparse(original_url)
+        candidate = urllib.parse.urlparse(next_url)
+        if candidate.scheme not in ("http", "https") or not candidate.netloc:
+            return False
+        if not self._hosts_equivalent(original.hostname or "", candidate.hostname or ""):
+            return False
+        if self._effective_port(original) != self._effective_port(candidate):
+            return False
+        return True
+
+    def _request_with_safe_redirects(self, method: str, url: str, **kwargs) -> requests.Response:
+        allow_redirects = kwargs.pop("allow_redirects", True)
+        max_redirects = min(int(kwargs.pop("max_redirects", 10) or 10), 10)
+        request_kwargs = dict(kwargs)
+        request_kwargs["allow_redirects"] = False
+
+        response = self.session.request(method, url, **request_kwargs)
+        if not allow_redirects:
+            return response
+
+        current_url = url
+        seen_urls = {current_url}
+        for _ in range(max_redirects):
+            if not response.is_redirect and not response.is_permanent_redirect:
+                return response
+
+            location = response.headers.get("Location")
+            if not location:
+                return response
+
+            next_url = urljoin(current_url, location)
+            if next_url in seen_urls:
+                logger.debug(f"[HTTP] Redirect loop stopped for {url}: {next_url}")
+                return response
+            if not self._can_follow_redirect(url, next_url):
+                logger.debug(f"[HTTP] Unsafe redirect blocked for {url}: {current_url} -> {next_url}")
+                return response
+
+            seen_urls.add(next_url)
+            current_url = next_url
+            response = self.session.request(method, current_url, **request_kwargs)
+
+        logger.debug(f"[HTTP] Redirect limit reached for {url}")
+        return response
 
     def _record_dead_host_error(self, host: str, hard: bool = False):
         """Track consecutive failures and blacklist host after threshold.
@@ -310,7 +401,7 @@ class HTTPClient:
             return url
         
         # Extract host from URL
-        parsed = urlparse(url)
+        parsed = urllib.parse.urlparse(url)
         host = parsed.hostname or ''
         
         if config.LOCAL_HTTP_ONLY and self._is_local_or_private_host(host) and url.startswith('https://'):
@@ -350,7 +441,7 @@ class HTTPClient:
         if not url:
             return False, "Empty URL"
         try:
-            parsed = urlparse(url)
+            parsed = urllib.parse.urlparse(url)
             if not parsed.scheme or not parsed.netloc:
                 return False, f"Missing scheme or netloc: {url[:100]}"
 

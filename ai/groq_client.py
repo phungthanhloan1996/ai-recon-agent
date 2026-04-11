@@ -139,12 +139,12 @@ class GroqClient:
             self._current_provider = "groq"
             return response
         except Exception as e:
-            logger.warning(f"[GROQ] Failed, attempting OpenRouter fallback: {e}")
+            logger.warning(f"[GROQ] Advisory unavailable, attempting OpenRouter/static fallback: {e}")
             # Groq failed, try OpenRouter
             return self._call_openrouter(prompt, system, temperature)
 
     def _call_groq_with_retry(self, prompt: str, system: str, temperature: float, 
-                               max_retries: int = 3) -> str:
+                               max_retries: int = 1) -> str:
         """Call Groq API with exponential backoff and retries."""
         last_error = None
         
