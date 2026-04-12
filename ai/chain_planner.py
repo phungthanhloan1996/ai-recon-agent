@@ -861,6 +861,17 @@ Return ONLY valid JSON."""
         for value in signal_map.values():
             value["score"] = max(0.0, min(1.0, float(value.get("score", 0.0))))
             signals.append(value)
+
+
+        vulns = self._get_planning_vulnerabilities(include_detected=True)
+        for v in vulns:
+            vtype = v.get("type")
+            if vtype == "xmlrpc_enabled":
+                touch("xmlrpc_available", 0.8, f"endpoint:{v.get('url')}")
+            elif vtype == "user_enumeration":
+                touch("usernames_known", 0.7, f"endpoint:{v.get('url')}")
+
+
         return signals
 
     def _derive_primitives(self, signals: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -942,6 +953,11 @@ Return ONLY valid JSON."""
                 add_direct("ssrf_pivot", endpoint, evidence, max(confidence, 0.8))
             if vuln_type in {"auth_bypass", "idor", "object_access"}:
                 add_direct("auth_object", endpoint, evidence, max(confidence, 0.78), force_chain=False)
+
+            if vuln_type == "xmlrpc_enabled":
+                add_direct("xmlrpc_bruteforce_primitive", endpoint, evidence, max(confidence, 0.75))
+            if vuln_type == "user_enumeration":
+                add_direct("username_list_primitive", endpoint, evidence, max(confidence, 0.7))
 
         for ep in recon_endpoints:
             if not isinstance(ep, dict):

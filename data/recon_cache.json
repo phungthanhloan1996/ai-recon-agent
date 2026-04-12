@@ -1,0 +1,17 @@
+{
+  "127.0.0.1": {
+    "timestamp": 1775984837.586395,
+    "subdomains": [],
+    "archived_urls": []
+  },
+  "vulnwp.local": {
+    "timestamp": 1775984837.7270944,
+    "subdomains": [],
+    "archived_urls": []
+  },
+  "portal-news.internal.test": {
+    "timestamp": 1775984837.9552422,
+    "subdomains": [],
+    "archived_urls": []
+  }
+}

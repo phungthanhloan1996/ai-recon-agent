@@ -5250,6 +5250,29 @@ class ReconAgent:
         signals = plan.get("signals", []) or []
         primitives = plan.get("primitives", []) or []
         terminal_reason = plan.get("terminal_reason")
+        # Nếu không có chain nhưng có primitive xmlrpc_bruteforce, tự tạo chain
+
+
+
+
+        if not chains and any(p.get("type") == "xmlrpc_bruteforce_primitive" for p in primitives):
+            # Tạo chain brute-force từ xmlrpc và user enumeration
+            brute_chain = {
+                "chain_id": "xmlrpc_bruteforce",
+                "name": "XML-RPC Brute Force using enumerated users",
+                "goal": "Gain WordPress access via XML-RPC brute force",
+                "steps": [
+                    {"name": "bruteforce", "action": "xmlrpc_bruteforce", "target": "xmlrpc.php", "tool": "wp_scanner"},
+                    {"name": "login", "action": "authenticate", "target": "wp-login.php"}
+                ],
+                "confidence": 0.7,
+                "risk_level": "HIGH",
+                "force_chain": True,
+                "primitives": ["xmlrpc_bruteforce_primitive", "username_list_primitive"]
+            }
+            chains = [brute_chain]
+            terminal_reason = None  # reset terminal để không dừng
+
         manual_playbook = []
 
         self.chains_data = []
@@ -8673,7 +8696,31 @@ Exploitability estimation:
                     self.state.update(selected_exploit_strategy={})
                     self._set_terminal_state(reason, stop_reason="selector_rejected")
                     self._update_display()
+
+
+
+
             else:
+                # Nếu đã có chains, ưu tiên sử dụng chúng thay vì dừng vì thiếu signals/primitives
+                if chains:
+                    self.logger.info(f"[AUTO_EXPLOIT] Has {len(chains)} chain(s), proceeding despite missing signals/primitives")
+                    # Chọn chain đầu tiên làm fallback
+                    selected_chain = chains[0] if isinstance(chains[0], dict) else None
+                    if selected_chain:
+                        self.selected_exploit_strategy = selected_chain
+                        self.state.update(selected_exploit_strategy=selected_chain)
+                        scan_meta["selected_chain"] = selected_chain.get("name") or "fallback_chain"
+                        scan_meta["selected_reason"] = "fallback_chain_available"
+                        scan_meta["planner_mode"] = "fallback"
+                        scan_meta["forced_chain"] = False
+                        scan_meta["selector_terminal_reason"] = None
+                        self.state.update(scan_metadata=scan_meta)
+                        self._update_display()
+                        # Thoát khỏi hàm, không set terminal
+                        self.phase_status = "done"
+                        self._mark_phase_done("exploit_select")
+                        return
+                # Nếu không có chains, xử lý missing như cũ
                 missing = []
                 if not chains:
                     missing.append("chains")
@@ -8693,6 +8740,11 @@ Exploitability estimation:
                 self.state.update(selected_exploit_strategy={})
                 self._set_terminal_state(reason, stop_reason="selector_rejected")
                 self._update_display()
+        
+
+
+
+
         
         except Exception as e:
             self.logger.error(f"[AUTO_EXPLOIT] Error: {e}")
