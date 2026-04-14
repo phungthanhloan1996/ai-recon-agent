@@ -5402,9 +5402,16 @@ class ReconAgent:
                 if alt_name and alt_name not in candidate_chain_names:
                     candidate_chain_names.append(alt_name)
 
+            def _norm(s):
+                return (s or "").lower().replace(" ", "_").replace("-", "_").replace("→", "").replace(" ", "")
+
             selected_chains = []
             for candidate_name in candidate_chain_names:
-                match = next((c for c in chains if c.get("name") == candidate_name), None)
+                match = next(
+                    (c for c in chains if _norm(c.get("name")) == _norm(candidate_name)
+                     or _norm(candidate_name) in _norm(c.get("name", ""))),
+                    None
+                )
                 if match:
                     selected_chains.append(match)
 

