@@ -366,22 +366,33 @@ class APIScannerRunner:
     def _analyze_fuzz_response(self, param: str, payload: str, status: int, body: str, base_url: str, endpoint: str) -> Optional[Dict[str, Any]]:
         """Analyze response from fuzz test to detect vulnerabilities."""
         
-        # SQL Injection detection
+        # SQL Injection detection — require explicit SQL error messages, not just keywords.
+        # Generic words like "query", "table", "database" appear in normal HTML pages.
+        _SQL_ERROR_RE = re.compile(
+            r"you have an error in your sql syntax"
+            r"|mysql.*error"
+            r"|sql.*syntax.*error"
+            r"|postgresql.*error"
+            r"|ora-\d{5}"
+            r"|microsoft.*odbc.*sql"
+            r"|sqlite.*error"
+            r"|jdbc.*exception"
+            r"|unclosed quotation mark"
+            r"|unterminated string literal"
+            r"|sql server.*error",
+            re.IGNORECASE,
+        )
         if any(pattern in payload.lower() for pattern in ["' or", "' and", "drop table", "union select"]):
-            # Check for different response length or content
-            if status == 200 and len(body) > 50:
-                # Check for SQL error messages
-                sql_indicators = ['sql', 'mysql', 'syntax', 'database', 'query', 'table', 'column']
-                if any(indicator in body.lower() for indicator in sql_indicators):
-                    return {
-                        "type": "API SQL Injection",
-                        "severity": "CRITICAL",
-                        "url": base_url,
-                        "parameter": param,
-                        "payload": payload,
-                        "description": f"Potential SQL injection via {param} parameter",
-                        "evidence": body[:200]
-                    }
+            if status == 200 and _SQL_ERROR_RE.search(body):
+                return {
+                    "type": "API SQL Injection",
+                    "severity": "CRITICAL",
+                    "url": base_url,
+                    "parameter": param,
+                    "payload": payload,
+                    "description": f"SQL error message exposed via {param} parameter",
+                    "evidence": body[:200]
+                }
         
         # XSS detection
         if "<script>" in payload or "onerror=" in payload:

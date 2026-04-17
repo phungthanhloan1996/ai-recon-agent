@@ -25,34 +25,64 @@ class IDORDetector:
     def detect(
         self,
         url: str,
-        progress_cb: Optional[Callable[[str, str, str], None]] = None
+        progress_cb: Optional[Callable[[str, str, str], None]] = None,
+        sessions: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
-        """Detect IDOR vulnerabilities"""
+        """Detect IDOR vulnerabilities.
+
+        Args:
+            url: Target URL
+            progress_cb: Optional progress callback
+            sessions: List of authenticated session dicts from state.authenticated_sessions.
+                      Each dict has keys: role, cookies (dict), headers (dict), success (bool).
+                      When provided, IDOR tests are repeated for each session so cross-role
+                      access violations (BOLA) can be detected.
+        """
         result = {
             'url': url,
             'tool': 'idor_detector',
             'type': 'idor_vulns',
             'user_enumerations': [],
             'access_bypasses': [],
-            'endpoints_tested': 0
+            'endpoints_tested': 0,
+            'authenticated_roles_tested': [],
         }
-        
+
+        # Build list of (role_label, cookies, headers) contexts to test
+        auth_contexts: List[Dict[str, Any]] = [
+            {"role": "anonymous", "cookies": {}, "headers": {}}
+        ]
+        for sess in (sessions or []):
+            if sess.get("success"):
+                auth_contexts.append({
+                    "role": sess.get("role", "unknown"),
+                    "cookies": sess.get("cookies") or {},
+                    "headers": sess.get("headers") or {},
+                })
+        result['authenticated_roles_tested'] = [c["role"] for c in auth_contexts]
+
         if progress_cb:
-            progress_cb('idor', 'idor_detector', 'Testing IDOR...')
-        
-        logger.info(f"[IDOR] Scanning {url}")
-        
-        # Test user enumeration
-        users = self._test_user_enumeration(url)
-        result['user_enumerations'] = users
-        
+            progress_cb('idor', 'idor_detector', f'Testing IDOR ({len(auth_contexts)} roles)...')
+
+        logger.info(f"[IDOR] Scanning {url} with {len(auth_contexts)} auth contexts")
+
+        # Test user enumeration (anonymous first, then each authed role)
+        for ctx in auth_contexts:
+            users = self._test_user_enumeration(url, cookies=ctx["cookies"], headers=ctx["headers"])
+            for u in users:
+                u["auth_role"] = ctx["role"]
+            result['user_enumerations'].extend(users)
+
         if progress_cb:
-            progress_cb('idor', 'idor_detector', f'Found {len(users)} users')
-        
-        # Test parameter-based IDOR
-        idors = self._test_parameter_idor(url)
-        result['access_bypasses'] = idors
-        result['endpoints_tested'] = len(idors)
+            progress_cb('idor', 'idor_detector', f'Found {len(result["user_enumerations"])} user enum hits')
+
+        # Test parameter-based IDOR for each auth context
+        for ctx in auth_contexts:
+            idors = self._test_parameter_idor(url, cookies=ctx["cookies"], headers=ctx["headers"])
+            for item in idors:
+                item["auth_role"] = ctx["role"]
+            result['access_bypasses'].extend(idors)
+        result['endpoints_tested'] = len(result['access_bypasses'])
         
         try:
             with open(self.findings_file, 'w') as f:
@@ -66,96 +96,106 @@ class IDORDetector:
         
         return result
     
-    def _test_user_enumeration(self, url: str) -> List[Dict]:
+    def _test_user_enumeration(
+        self,
+        url: str,
+        cookies: Optional[Dict] = None,
+        headers: Optional[Dict] = None,
+    ) -> List[Dict]:
         """Detect user enumeration vectors"""
         users = []
-        
-        # Common endpoints for user enumeration
-        endpoints = [
-            '/wp-json/wp/v2/users',  # WordPress REST API
+        cookies = cookies or {}
+        headers = headers or {}
+
+        enum_endpoints = [
+            '/wp-json/wp/v2/users',
             '/api/users',
+            '/api/v1/users',
+            '/api/v2/users',
             '/admin/users',
             '/user/list',
             '/users',
             '/author',
             '/profile',
         ]
-        
-        for endpoint in endpoints:
+
+        for endpoint in enum_endpoints:
             try:
                 test_url = url.rstrip('/') + endpoint
-                resp = self.http_client.get(test_url, timeout=self.timeout)
-                
+                resp = self.http_client.get(
+                    test_url, timeout=self.timeout,
+                    cookies=cookies, headers=headers,
+                )
                 if resp.status_code in [200, 201]:
-                    # Extract user info
                     user_info = self._extract_users_from_response(resp.text)
                     if user_info:
                         users.append({
                             'endpoint': endpoint,
                             'method': 'GET',
                             'user_count': len(user_info),
-                            'users': user_info[:10]  # First 10
+                            'users': user_info[:10],
                         })
                         logger.info(f"[IDOR] User enumeration at {endpoint}: {len(user_info)} users")
-            
             except Exception as e:
-                logger.debug(f"[IDOR] User enum test failed: {e}")
-        
+                logger.debug(f"[IDOR] User enum test failed for {endpoint}: {e}")
+
         return users
-    
-    def _test_parameter_idor(self, url: str) -> List[Dict]:
-        """Test for parameter-based IDOR (ID tampering)"""
+
+    def _test_parameter_idor(
+        self,
+        url: str,
+        cookies: Optional[Dict] = None,
+        headers: Optional[Dict] = None,
+    ) -> List[Dict]:
+        """Test for parameter-based IDOR (ID tampering) + BOLA with auth context."""
         idors = []
-        
+        cookies = cookies or {}
+        headers = headers or {}
+
         try:
-            # Get baseline response with ID=1
-            test_url = f"{url}?id=1"
-            resp1 = self.http_client.get(test_url, timeout=self.timeout)
-            
-            # Try other IDs
+            resp1 = self.http_client.get(
+                f"{url}?id=1", timeout=self.timeout, cookies=cookies, headers=headers
+            )
             for test_id in [2, 10, 99, 100, 999]:
                 try:
-                    test_url_alt = f"{url}?id={test_id}"
-                    resp_alt = self.http_client.get(test_url_alt, timeout=self.timeout)
-                    
-                    # If we get different successful responses, likely IDOR
+                    resp_alt = self.http_client.get(
+                        f"{url}?id={test_id}", timeout=self.timeout,
+                        cookies=cookies, headers=headers,
+                    )
                     if resp_alt.status_code == 200 and resp1.text != resp_alt.text:
                         idors.append({
                             'parameter': 'id',
                             'type': 'direct_object_reference',
                             'tested_ids': [1, test_id],
                             'response_different': True,
-                            'confidence': 'high'
+                            'confidence': 0.75,
                         })
-                        logger.info(f"[IDOR] Direct object reference found via ID parameter")
+                        logger.info("[IDOR] Direct object reference found via id parameter")
                         break
-                except:
+                except Exception:
                     pass
-        
         except Exception as e:
-            logger.debug(f"[IDOR] Parameter test failed: {e}")
-        
-        # Test other numeric parameters
-        numeric_params = ['uid', 'user_id', 'user', 'profile_id', 'post_id', 'article_id']
+            logger.debug(f"[IDOR] id parameter test failed: {e}")
+
+        numeric_params = ['uid', 'user_id', 'user', 'profile_id', 'post_id', 'article_id', 'account_id', 'order_id']
         for param in numeric_params:
             try:
-                test_url1 = f"{url}?{param}=1"
-                test_url2 = f"{url}?{param}=2"
-                
-                resp1 = self.http_client.get(test_url1, timeout=self.timeout)
-                resp2 = self.http_client.get(test_url2, timeout=self.timeout)
-                
-                if resp1.status_code == 200 and resp2.status_code == 200 and resp1.text != resp2.text:
+                resp_a = self.http_client.get(
+                    f"{url}?{param}=1", timeout=self.timeout, cookies=cookies, headers=headers
+                )
+                resp_b = self.http_client.get(
+                    f"{url}?{param}=2", timeout=self.timeout, cookies=cookies, headers=headers
+                )
+                if resp_a.status_code == 200 and resp_b.status_code == 200 and resp_a.text != resp_b.text:
                     idors.append({
                         'parameter': param,
                         'type': 'direct_object_reference',
-                        'confidence': 'high'
+                        'confidence': 0.7,
                     })
                     logger.info(f"[IDOR] Found on parameter: {param}")
-            
-            except:
+            except Exception:
                 pass
-        
+
         return idors
     
     def _extract_users_from_response(self, response_text: str) -> List[str]:

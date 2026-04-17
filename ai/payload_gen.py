@@ -197,9 +197,11 @@ XMLRPC_PAYLOADS = {
 class PayloadGenerator:
     """AI-enhanced payload generation with WAF bypass mutations"""
 
-    def __init__(self, ai_client=None):
-        # ai_client là groq_key (string) được pass từ agent.py
+    def __init__(self, ai_client=None, groq_client=None):
+        # ai_client: raw Groq API key string (legacy)
+        # groq_client: GroqClient instance with OpenRouter fallback (preferred)
         self.ai_client = ai_client
+        self._groq_client = groq_client  # GroqClient with OpenRouter fallback
         # Giới hạn concurrent Groq calls tránh 429
         self._groq_semaphore = threading.Semaphore(max(1, config.GROQ_MAX_CONCURRENCY))
         self._groq_lock = threading.Lock()
@@ -214,26 +216,78 @@ class PayloadGenerator:
         # WAF context được set từ agent sau _ai_decide()
         self.waf_context = {"waf_name": None, "bypass_mode": "NONE", "failed_patterns": []}
 
-    def _groq_cache_key(self, vuln_type: str, parameters: List[str]) -> str:
+    def _groq_cache_key(
+        self, vuln_type: str, parameters: List[str],
+        endpoint_path: str = "", tech_stack: list = None
+    ) -> str:
+        # Normalise path to its first two segments so nearby params share a key
+        # but different paths (e.g. /admin vs /api/v1) get distinct payloads.
+        try:
+            from urllib.parse import urlparse
+            parsed_path = urlparse(endpoint_path).path if endpoint_path else ""
+            segments = [s for s in parsed_path.split("/") if s]
+            path_key = "/".join(segments[:2]) if segments else ""
+        except Exception:
+            path_key = ""
+        tech_key = sorted({str(t).lower() for t in (tech_stack or [])[:4]})
         return json.dumps({
             "vuln_type": vuln_type.lower(),
             "parameters": sorted({str(p).lower() for p in parameters[:5]}),
+            "path": path_key,
+            "tech": tech_key,
             "waf": self.waf_context.get("waf_name"),
             "bypass": self.waf_context.get("bypass_mode", "NONE"),
             "failed": self.waf_context.get("failed_patterns", [])[:4],
         }, sort_keys=True)
 
-    def _call_groq_for_payloads(self, vuln_type: str, parameters: List[str]) -> List[str]:
-        """Gọi Groq API để sinh payload thông minh. Trả về [] nếu lỗi."""
+    def _call_groq_for_payloads(
+        self, vuln_type: str, parameters: List[str],
+        endpoint_url: str = "", tech_stack: list = None
+    ) -> List[str]:
+        """Sinh payload qua GroqClient (có OpenRouter fallback) hoặc raw Groq key."""
         category = (vuln_type or "").lower()
-        if (
-            not self._groq_key
-            or not config.GROQ_ENABLE_PAYLOADS
-            or category not in config.GROQ_ALLOWED_CATEGORIES
-        ):
+        if not config.GROQ_ENABLE_PAYLOADS or category not in config.GROQ_ALLOWED_CATEGORIES:
             return []
 
-        cache_key = self._groq_cache_key(vuln_type, parameters)
+        # Nếu có GroqClient instance → dùng nó (có OpenRouter fallback tự động)
+        if self._groq_client is not None:
+            cache_key = self._groq_cache_key(vuln_type, parameters, endpoint_url, tech_stack)
+            cached = self._groq_cache.get(cache_key)
+            now = time.time()
+            if cached and (now - cached["ts"]) < config.GROQ_CACHE_TTL_SECONDS:
+                logger.debug(f"[PAYLOAD] Cache hit for {category}")
+                return list(cached["payloads"])
+            try:
+                user_msg = json.dumps({
+                    "vuln_type": vuln_type,
+                    "parameters": parameters[:5],
+                    "endpoint_path": endpoint_url,
+                    "tech_stack": (tech_stack or [])[:4],
+                    "waf_detected": self.waf_context.get("waf_name"),
+                    "bypass_mode": self.waf_context.get("bypass_mode", "NONE"),
+                    "failed_patterns": self.waf_context.get("failed_patterns", [])[:8],
+                })
+                raw = self._groq_client.generate(user_msg, system=_PAYLOAD_GEN_SYSTEM, temperature=0.4)
+                raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+                result = json.loads(raw)
+                payloads: List[str] = []
+                if isinstance(result, dict):
+                    payloads = [str(p) for p in result.get("payloads", []) if p]
+                elif isinstance(result, list):
+                    payloads = [str(p) for p in result if p]
+                if payloads:
+                    self._groq_cache[cache_key] = {"ts": time.time(), "payloads": payloads}
+                    logger.info(f"[PAYLOAD] AI generated {len(payloads)} payloads for {vuln_type} (via GroqClient)")
+                return payloads
+            except Exception as e:
+                logger.debug(f"[PAYLOAD] GroqClient payload gen failed for {vuln_type}: {e}")
+                return []
+
+        # Fallback: raw Groq key (no OpenRouter)
+        if not self._groq_key:
+            return []
+
+        cache_key = self._groq_cache_key(vuln_type, parameters, endpoint_url, tech_stack)
         cached = self._groq_cache.get(cache_key)
         now = time.time()
         if cached and (now - cached["ts"]) < config.GROQ_CACHE_TTL_SECONDS:
@@ -262,6 +316,8 @@ class PayloadGenerator:
                     user_msg = json.dumps({
                         "vuln_type": vuln_type,
                         "parameters": parameters[:5],
+                        "endpoint_path": endpoint_url,
+                        "tech_stack": (tech_stack or [])[:4],
                         "waf_detected": self.waf_context.get("waf_name"),
                         "bypass_mode": self.waf_context.get("bypass_mode", "NONE"),
                         "failed_patterns": self.waf_context.get("failed_patterns", [])[:8],
@@ -330,10 +386,13 @@ class PayloadGenerator:
         finally:
             self._groq_semaphore.release()
 
-    def generate_xss(self, context: str = "html", count: int = 10) -> List[str]:
-        """Generate XSS payloads for a given context"""
+    def generate_xss(
+        self, context: str = "html", count: int = 10,
+        endpoint_url: str = "", tech_stack: list = None
+    ) -> List[str]:
+        """Generate XSS payloads for a given context, enriched with tech_stack context."""
         base = XSS_BASE.copy()
-        
+
         if context == "attribute":
             base = [
                 "\" onmouseover=\"alert(1)",
@@ -354,6 +413,14 @@ class PayloadGenerator:
                 "data:text/html,<script>alert(1)</script>",
                 "vbscript:alert(1)",
             ]
+
+        # Try AI-generated payloads with tech_stack context if available
+        if (endpoint_url or tech_stack) and self._groq_client:
+            ai_payloads = self._call_groq_for_payloads(
+                "xss", ["input"], endpoint_url=endpoint_url, tech_stack=tech_stack or []
+            )
+            if ai_payloads:
+                base = ai_payloads + base
 
         # Apply mutations
         mutated = self._mutate_xss(base[:count])
@@ -497,7 +564,10 @@ class PayloadGenerator:
             return shells["php_obf"]
         return shells.get(language, shells["php"])
 
-    def generate_for_category(self, category: str, parameters: List[str] = None, include_ai: bool = True) -> List[Dict]:
+    def generate_for_category(
+        self, category: str, parameters: List[str] = None, include_ai: bool = True,
+        endpoint_url: str = "", tech_stack: list = None
+    ) -> List[Dict]:
         """Generate payloads for a specific vulnerability category"""
         if parameters is None:
             parameters = []
@@ -518,7 +588,10 @@ class PayloadGenerator:
             strings = self.generate_xss(count=5)
 
         # Bổ sung payload thông minh từ Groq nếu có key
-        ai_payloads = self._call_groq_for_payloads(category, parameters) if include_ai else []
+        ai_payloads = (
+            self._call_groq_for_payloads(category, parameters, endpoint_url, tech_stack)
+            if include_ai else []
+        )
         if ai_payloads:
             existing = set(strings)
             strings = strings + [p for p in ai_payloads if p not in existing]

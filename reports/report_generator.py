@@ -197,6 +197,8 @@ class ReportGenerator:
         """Build summary statistics"""
         confirmed_vulns = self._dedupe_vulnerabilities(self.state.get("confirmed_vulnerabilities", []) or [])
         verified_vulns = self._dedupe_vulnerabilities(self.state.get("verified_vulnerabilities", []) or [])
+        # verified_only_vulns: extra findings that came purely from the verifier
+        # (not already present in confirmed set) — used only for dedup merging.
         verified_only_vulns = self._subtract_vulnerability_sets(verified_vulns, confirmed_vulns)
         chains = self.state.get("exploit_chains", [])
         endpoints = self.state.get("prioritized_endpoints", [])
@@ -209,7 +211,9 @@ class ReportGenerator:
             "signals_observed": len(self.state.get("security_findings", []) or []),
             "vulnerabilities_found": len(merged_vulns),
             "confirmed_vulns": len(confirmed_vulns),
-            "verified_vulns": len(verified_only_vulns),
+            # verified_vulns = total vulns that passed the verification check,
+            # regardless of whether they already appeared in confirmed_vulns.
+            "verified_vulns": len(verified_vulns),
             "exploit_chains_planned": len(chains),
             "critical_vulns": len([v for v in merged_vulns if v.get("severity") == "CRITICAL"]),
             "high_vulns": len([v for v in merged_vulns if v.get("severity") == "HIGH"]),

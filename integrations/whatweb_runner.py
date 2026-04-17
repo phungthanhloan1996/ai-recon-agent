@@ -4,6 +4,7 @@ Extracts technologies, versions, and plugins from web servers
 Integrates with CVE matcher for vulnerability identification
 """
 
+import hashlib
 import subprocess
 import json
 import logging
@@ -25,20 +26,8 @@ class WhatwebRunner:
         self.cve_db = self._load_cve_patterns()
 
     def _load_cve_patterns(self) -> Dict[str, Dict[str, Any]]:
-        """Load CVE patterns from rules"""
-        cve_patterns = {}
-        try:
-            rules_dir = Path(__file__).parent.parent / "rules"
-            for rule_file in ["vulnerability_patterns.json", "exploit_chains.json"]:
-                rule_path = rules_dir / rule_file
-                if rule_path.exists():
-                    with open(rule_path, "r") as f:
-                        patterns = json.load(f)
-                        if isinstance(patterns, dict):
-                            cve_patterns.update(patterns)
-        except Exception as e:
-            logger.warning(f"Failed to load CVE patterns: {e}")
-        return cve_patterns
+        """Kept for compatibility — searchsploit now handles CVE lookup in _match_cves."""
+        return {}
 
     def run(self, url: str, timeout: int = 60, max_retries: int = 2) -> Dict[str, Any]:
         """Run whatweb on URL with retry logic and comprehensive parsing"""
@@ -75,54 +64,52 @@ class WhatwebRunner:
 
     def _execute_whatweb(self, url: str, timeout: int) -> str:
         """Execute whatweb command and capture output - improved reliability"""
+        # Per-URL temp file to avoid race condition when scanning multiple hosts concurrently
+        url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+        json_path = f"/tmp/whatweb_{url_hash}.json"
         try:
             cmd = [
                 "whatweb",
                 "--no-errors",
                 "--follow-redirect=same-host",
                 "--max-redirect=5",
-                "--log-json=/tmp/whatweb.json",
+                "--log-json", json_path,
                 "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
                 url
             ]
-            
-            result = subprocess.run(
+
+            # Use DEVNULL for stdout/stderr: whatweb silently skips writing --log-json
+            # when it detects stdout is a PIPE (capture_output=True), so we discard
+            # terminal output and read only from the JSON file.
+            subprocess.run(
                 cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout,
             )
-            
-            # Try to read JSON output first
-            try:
-                json_file = Path("/tmp/whatweb.json")
-                if json_file.exists():
-                    with open(json_file, "r") as f:
-                        data = f.read()
-                        json_file.unlink()  # Clean up
-                        return data
-            except Exception:
-                pass
-            
-            # Return stdout if successful, otherwise try stderr
-            output = result.stdout if result.returncode == 0 else result.stderr
-            
-            # If no output, try to read the JSON file anyway
-            if not output:
+
+            # Read per-URL JSON file
+            json_file = Path(json_path)
+            if json_file.exists():
                 try:
-                    json_file = Path("/tmp/whatweb.json")
-                    if json_file.exists():
-                        with open(json_file, "r") as f:
-                            output = f.read()
+                    data = json_file.read_text(encoding="utf-8", errors="ignore")
+                    json_file.unlink()
+                    if data.strip():
+                        return data
                 except Exception:
                     pass
-            
-            return output
+            return ""
         except subprocess.TimeoutExpired:
             raise
         except Exception as e:
             logger.error(f"Failed to execute whatweb: {e}")
             raise
+        finally:
+            # Always clean up temp file
+            try:
+                Path(json_path).unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _parse_whatweb_output(self, output: str, result: Dict[str, Any]):
         """Parse whatweb JSON output and extract technologies"""
@@ -236,16 +223,21 @@ class WhatwebRunner:
                 for item in details:
                     if isinstance(item, dict):
                         if "version" in item:
-                            tech_info["version"] = str(item["version"])
+                            ver = item["version"]
+                            tech_info["version"] = str(ver[0]) if isinstance(ver, list) and ver else str(ver)
                         tech_info["metadata"].update(item)
                     elif isinstance(item, str):
-                        # Try to extract version from string
                         version_match = re.search(r"(?:v|version)[:\s]*([0-9.]+)", item, re.IGNORECASE)
                         if version_match:
                             tech_info["version"] = version_match.group(1)
             elif isinstance(details, dict):
                 if "version" in details:
-                    tech_info["version"] = str(details["version"])
+                    ver = details["version"]
+                    # whatweb returns version as a list e.g. ["5.6.2"]
+                    if isinstance(ver, list):
+                        tech_info["version"] = str(ver[0]) if ver else None
+                    else:
+                        tech_info["version"] = str(ver)
                 tech_info["metadata"] = details
             elif isinstance(details, str):
                 version_match = re.search(r"(?:v|version)[:\s]*([0-9.]+)", details, re.IGNORECASE)
@@ -277,28 +269,35 @@ class WhatwebRunner:
             return "Unknown"
 
     def _match_cves(self, result: Dict[str, Any]):
-        """Match detected technologies against known CVE patterns"""
+        """Match detected technologies against searchsploit local DB (no API, no rate limit)."""
+        try:
+            from integrations.searchsploit_runner import get_runner
+            runner = get_runner()
+            if not runner.available():
+                return
+        except ImportError:
+            return
+
         for tech in result["technologies"]:
-            tech_name = tech.get("name", "").lower()
-            version = tech.get("version")
-            
-            if not version:
+            tech_name = tech.get("name", "")
+            version = tech.get("version") or ""
+            if not tech_name or not version:
                 continue
-            
-            # Check against loaded CVE patterns
-            for pattern_name, pattern_data in self.cve_db.items():
-                if isinstance(pattern_data, dict):
-                    # Match against product name
-                    if pattern_data.get("product", "").lower() in tech_name:
-                        affected_versions = pattern_data.get("affected_versions", [])
-                        if match_any_range(version, affected_versions):
-                            result["vulnerabilities"].append({
-                                "cve": pattern_data.get("cve_id", pattern_name),
-                                "technology": tech_name,
-                                "version": version,
-                                "severity": pattern_data.get("severity", "MEDIUM"),
-                                "description": pattern_data.get("description", "")[:200]
-                            })
+
+            cve_entries = runner.query(tech_name, version)
+            for entry in cve_entries[:5]:  # cap per-tech to avoid noise
+                result["vulnerabilities"].append({
+                    "cve_id":           entry["cve_id"],
+                    "all_cves":         entry.get("all_cves", []),
+                    "title":            entry["title"],
+                    "technology":       tech_name,
+                    "version":          version,
+                    "severity":         entry["severity"],
+                    "type":             entry["type"],
+                    "exploit_available": entry.get("exploit_available", True),
+                    "edb_id":           entry.get("edb_id", ""),
+                    "source":           "searchsploit",
+                })
 
     def parse_results(self, multiple_results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Aggregate multiple whatweb results"""

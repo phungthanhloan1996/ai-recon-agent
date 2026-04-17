@@ -88,38 +88,52 @@ class LiveHostEngine:
         
         # Queue 1: fast primary probing
         primary_candidates = []
-        with ThreadPoolExecutor(max_workers=30) as executor:
-            futures = []
-            for target in normalized_targets:
-                futures.append(executor.submit(self.probe_host, target, timeout))
-            for future in as_completed(futures):
-                try:
-                    result = future.result()
-                    if result:
-                        live_hosts.append(result)
-                        host = result["url"].split("://", 1)[-1].split(":", 1)[0].split("/", 1)[0]
-                        primary_candidates.append(host)
-                except Exception as e:
-                    logger.debug(f"[LIVE] Probe error: {e}")
+        try:
+            with ThreadPoolExecutor(max_workers=30) as executor:
+                futures = []
+                for target in normalized_targets:
+                    try:
+                        futures.append(executor.submit(self.probe_host, target, timeout))
+                    except RuntimeError as e:
+                        logger.debug(f"[LIVE] Executor shutdown during submit: {e}")
+                        break
+                for future in as_completed(futures):
+                    try:
+                        result = future.result()
+                        if result:
+                            live_hosts.append(result)
+                            host = result["url"].split("://", 1)[-1].split(":", 1)[0].split("/", 1)[0]
+                            primary_candidates.append(host)
+                    except Exception as e:
+                        logger.debug(f"[LIVE] Probe error: {e}")
+        except RuntimeError as e:
+            logger.warning(f"[LIVE] Primary probe aborted: {e}")
     
 
 
         # Queue 2: deeper port probing only on hosts that were alive in queue 1.
         secondary_hosts = list(dict.fromkeys(primary_candidates))[:secondary_limit]
         if secondary_hosts and secondary_ports:
-            with ThreadPoolExecutor(max_workers=20) as executor:
-                futures = []
-                for host in secondary_hosts:
-                    for port in secondary_ports:
-                        futures.append(executor.submit(self.probe_host, f"http://{host}:{port}", timeout))
-                        futures.append(executor.submit(self.probe_host, f"https://{host}:{port}", timeout))
-                for future in as_completed(futures):
-                    try:
-                        result = future.result()
-                        if result:
-                            live_hosts.append(result)
-                    except Exception as e:
-                        logger.debug(f"[LIVE] Secondary probe error: {e}")
+            try:
+                with ThreadPoolExecutor(max_workers=20) as executor:
+                    futures = []
+                    for host in secondary_hosts:
+                        for port in secondary_ports:
+                            try:
+                                futures.append(executor.submit(self.probe_host, f"http://{host}:{port}", timeout))
+                                futures.append(executor.submit(self.probe_host, f"https://{host}:{port}", timeout))
+                            except RuntimeError as e:
+                                logger.debug(f"[LIVE] Executor shutdown during secondary submit: {e}")
+                                break
+                    for future in as_completed(futures):
+                        try:
+                            result = future.result()
+                            if result:
+                                live_hosts.append(result)
+                        except Exception as e:
+                            logger.debug(f"[LIVE] Secondary probe error: {e}")
+            except RuntimeError as e:
+                logger.warning(f"[LIVE] Secondary probe aborted: {e}")
 
         # Remove duplicates and sort
         unique_hosts = self._deduplicate_hosts(live_hosts)

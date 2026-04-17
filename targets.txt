@@ -1,4 +1,1 @@
-http://127.0.0.1:8000/
-http://portal-news.internal.test:8080/
-https://dft.vn/
-https://dolphin-vc.com/
+127.0.0.1:8000

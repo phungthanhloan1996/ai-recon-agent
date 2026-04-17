@@ -7,6 +7,7 @@ Ví dụ: user enum → password brute → login → upload plugin → reverse s
 import hashlib
 import json
 import logging
+import os
 import re
 import time
 from typing import Any, Dict, List, Optional
@@ -30,106 +31,71 @@ CRITICAL SUCCESS FACTORS:
 4. Think about persistence, privilege escalation, and lateral movement
 5. Identify the MINIMUM STEPS to achieve compromise
 
-REALISTIC HIGH-IMPACT CHAINS:
-
-FILE UPLOAD RCE:
-1. Identify file upload endpoint
-2. Bypass validation (extension, MIME type, magic bytes)
-3. Upload webshell to accessible directory
-4. Execute shell → RCE
-
-AUTH BYPASS CHAIN:
-1. Enumerate auth endpoints (login, forgot password, signup)
-2. Identify bypasses (IDOR user IDs, weak tokens, JWT vulnerabilities)
-3. Gain access as other user (ideally admin)
-4. If not admin yet, escalate via role manipulation or API
-
-API EXPLOITATION:
-1. Discover API endpoints and methods
-2. Identify missing authentication or weak validation
-3. Manipulate IDs, roles, or permissions
-4. Access privileged functions or data
-
-PLUGIN EXPLOITATION:
-1. Enumerate plugins (common: WordPress, custom frameworks)
-2. Identify known vulnerable versions
-3. Exploit vulnerability in plugin code
-4. Achieve RCE or admin access
-
-COMMAND INJECTION:
-1. Find parameters reaching system commands (ping, host, etc.)
-2. Inject shell commands
-3. Execute reverse shell → full server access
-
-LFI → RCE:
-1. Find LFI vulnerability (file parameter, page parameter, etc.)
-2. Read sensitive files (config, /proc/self/environ, mail logs)
-3. Extract credentials or write webshell via log poisoning
-
-SSRF CHAIN:
-1. Find URL parameter in webhook/callback/fetch endpoint
-2. Direct server to internal services (metadata, internal APIs)
-3. Extract credentials or tokens
-4. Use tokens for further compromise
-
-DESERIALIZATION:
-1. Identify serialized data (base64, binary)
-2. Craft malicious gadget chain object
-3. Trigger execution → RCE
-
-PRIVILEGE ESCALATION CHAIN:
-1. Gain low-privilege access
-2. Enumerate misconfigurations (SUDO, file permissions, API abuse)
-3. Escalate to admin or system access
-4. Maintain persistence
-
 EACH CHAIN SHOULD INCLUDE:
 
-1. entry_point
-The initial vulnerable endpoint (URL, method, parameters)
+1. entry_point - The initial vulnerable endpoint (URL, method, parameters)
 
-2. steps
-Ordered exploitation steps with:
-- Step name
-- Action (what specifically to test or execute)
-- Expected result / success indicator
-- Tools/techniques needed
-- Preconditions (what must be true first)
-- Postconditions (what we gain)
+2. steps - Ordered exploitation steps, each with:
+- name, action, target, tool, success_indicator
+- produces: what concrete data/access this step creates (e.g. "valid_credentials", "admin_session", "webshell_url")
+- consumes: what data from a previous step this step needs (e.g. "valid_credentials" from step 2)
+- depends_on: list of step names whose 'produces' this step consumes
 
-3. technique
-Main exploitation approach (e.g., "File Upload Bypass + Webshell Execution")
+3. technique - Main exploitation approach
 
-4. expected_impact
-What attacker achieves:
-- RCE (remote code execution)
-- Admin access (full platform control)
-- Data access (database, files)
-- Credential theft (sessions, API keys)
-- Persistence (backdoor, user creation)
-
-5. prerequisites
-What must be true:
-- Is authentication required?
-- Must file upload be enabled?
-- Does endpoint exist and respond?
-- Are there rate limits or WAF?
-
-6. complexity
-Easy: 1-2 steps, no authentication needed
-Medium: 3-4 steps, may need auth or enumeration
-Hard: 5+ steps, requires multiple vulnerabilities or advanced technique
-
-7. chaining_opportunities
-How could this chain with other vulnerabilities for maximum impact?
+4. expected_impact - RCE / admin access / data exfiltration / credential theft
 
 REMEMBER:
 - Think like a penetration tester, not a vulnerability scanner
-- Focus on BUSINESS IMPACT (data, control, compromise)
-- Prioritize REALISTIC and EXECUTABLE chains
-- Consider DEFENDER PERSPECTIVES (how would this be detected/prevented?)
+- Focus on BUSINESS IMPACT
+- The 'produces' / 'consumes' fields are MANDATORY — they describe the data flowing between steps
 
 Return ONLY valid JSON."""
+
+# ─── SYSTEM PROMPT FOR DATA-FLOW CHAIN REASONING ─────────────────────────────
+_DATAFLOW_CHAIN_SYSTEM = """You are an expert penetration tester reasoning about how to chain discovered vulnerabilities into a complete attack path ending in RCE or admin takeover.
+
+You will receive a list of CONFIRMED VULNERABILITIES found on a target.
+For each vulnerability you must think:
+  - What does this vulnerability PRODUCE? (credentials, file-write, code-exec, session, username-list, db-dump, etc.)
+  - What does it CONSUME? (does it need credentials? an authenticated session? a list of usernames?)
+
+Then reason about CONNECTIONS:
+  - Which vuln's PRODUCE feeds another vuln's CONSUME?
+  - Can you trace a path from an unauthenticated starting point to RCE by following these connections?
+
+OUTPUT FORMAT (JSON array of chains):
+[
+  {
+    "name": "short chain name",
+    "goal": "what is achieved at the end",
+    "risk_level": "CRITICAL|HIGH|MEDIUM",
+    "reasoning": "one paragraph explaining WHY these vulns connect and how",
+    "steps": [
+      {
+        "order": 1,
+        "name": "step name",
+        "action": "what to do",
+        "target": "exact URL or endpoint",
+        "tool": "sqlmap|curl|wpscan|hydra|metasploit|manual",
+        "payload": "exact payload or flag string",
+        "success_indicator": "what response/output means success",
+        "produces": ["list", "of", "data", "this", "step", "creates"],
+        "consumes": ["list", "of", "data", "needed", "from", "previous", "steps"],
+        "depends_on": ["step name whose produce this step consumes"]
+      }
+    ],
+    "preconditions_missing": ["any condition not yet confirmed that is needed"]
+  }
+]
+
+RULES:
+- Every step MUST have 'produces' and 'consumes' lists (use [] if nothing needed/produced)
+- A step's 'consumes' MUST be satisfied by a previous step's 'produces' OR already confirmed
+- Do NOT invent vulnerabilities — only use what is in the confirmed list
+- Prefer chains that require ZERO new conditions (all pieces already found)
+- If a chain needs one more piece, list it in 'preconditions_missing'
+- Return ONLY valid JSON, no markdown."""
 
 def repair_json(json_str: str) -> str:
     """Sửa các lỗi JSON phổ biến từ AI response"""
@@ -199,6 +165,7 @@ class ChainPlanner:
         self.groq = groq_client
         self.payload_optimizer = payload_optimizer
         self._url_normalizer = URLNormalizer()
+        self._rules = self._load_rules()
 
 
 
@@ -243,6 +210,150 @@ class ChainPlanner:
                 return {}
 
     # ─── AI-POWERED PLANNING METHODS ──────────────────────────────────────────────
+
+    def _parse_array_or_object(self, text: str):
+        """Parse a JSON array OR object from Groq response.
+
+        `_clean_json_response` only handles objects `{...}`.
+        This method also handles arrays `[...]` which is what
+        `reason_chain_from_vulns` and similar dataflow prompts return.
+        """
+        if not text or not isinstance(text, str):
+            return None
+        text = text.strip()
+        # Strip markdown code fences
+        text = re.sub(r"```(?:json)?", "", text, flags=re.IGNORECASE).strip("`").strip()
+        # Try direct parse first (handles both arrays and objects)
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            pass
+        # Try to extract array [...] first, then object {...}
+        for pattern in [r"(\[[\s\S]*\])", r"(\{[\s\S]*\})"]:
+            m = re.search(pattern, text)
+            if m:
+                try:
+                    return json.loads(m.group(1))
+                except json.JSONDecodeError:
+                    try:
+                        return json.loads(repair_json(m.group(1)))
+                    except Exception:
+                        pass
+        return None
+
+    # ─── RULES ENGINE ─────────────────────────────────────────────────────────────
+
+    def _load_rules(self) -> List[Dict[str, Any]]:
+        """Load chain rules from rules/chains.json relative to this file."""
+        try:
+            rules_path = os.path.join(os.path.dirname(__file__), "..", "rules", "chains.json")
+            rules_path = os.path.normpath(rules_path)
+            if os.path.exists(rules_path):
+                with open(rules_path, "r") as f:
+                    rules = json.load(f)
+                logger.debug(f"[CHAIN] Loaded {len(rules)} rules from chains.json")
+                return rules
+        except Exception as e:
+            logger.warning(f"[CHAIN] Could not load rules/chains.json: {e}")
+        return []
+
+    def _apply_rules(self) -> List[Dict[str, Any]]:
+        """Match rules against current state and return rule-derived chains."""
+        if not self._rules:
+            return []
+
+        confirmed_vulns = self.state.get("confirmed_vulnerabilities", []) or []
+        vulnerabilities = self.state.get("vulnerabilities", []) or []
+        all_vulns = confirmed_vulns + vulnerabilities
+        tech_stack = self.state.get("technologies", {}) or {}
+        wp_version = self.state.get("wp_version", "") or ""
+        endpoints = self.state.get("prioritized_endpoints", []) or self.state.get("endpoints", []) or []
+        endpoint_urls = [
+            (ep if isinstance(ep, str) else ep.get("url", "")) for ep in endpoints
+        ]
+
+        chains = []
+        for rule in self._rules:
+            cond = rule.get("condition", {})
+            ctype = cond.get("type", "")
+            matched = False
+
+            if ctype == "tech":
+                tech_name = cond.get("tech", "").lower()
+                if any(tech_name in str(k).lower() for k in tech_stack):
+                    ver_cmp = cond.get("version_compare", "")
+                    if ver_cmp and wp_version:
+                        try:
+                            op, ver = ver_cmp[0], ver_cmp[1:]
+                            cur = tuple(int(x) for x in wp_version.split(".")[:2])
+                            tgt = tuple(int(x) for x in ver.split(".")[:2])
+                            matched = (op == "<" and cur < tgt) or (op == ">" and cur > tgt) or (op == "=" and cur == tgt)
+                        except Exception:
+                            matched = True
+                    else:
+                        matched = True
+
+            elif ctype == "vuln":
+                type_name = cond.get("type_name", "").lower()
+                severity = cond.get("severity", "").lower()
+                for v in all_vulns:
+                    v_type = str(v.get("type", "")).lower()
+                    v_sev = str(v.get("severity", "")).lower()
+                    if type_name and type_name in v_type:
+                        if not severity or severity in v_sev or v_sev in ("critical", "high"):
+                            matched = True
+                            break
+
+            elif ctype == "endpoint":
+                path = cond.get("path", "").lower()
+                if path and any(path in url.lower() for url in endpoint_urls):
+                    matched = True
+
+            elif ctype == "fragments":
+                required = cond.get("required", [])
+                # Map fragments to state keys / endpoint patterns
+                fragment_checks = {
+                    "upload_form": lambda: any("upload" in u.lower() for u in endpoint_urls),
+                    "directory_listing": lambda: any(
+                        v.get("type", "").lower() in ("directory_listing", "dirlist") for v in all_vulns
+                    ),
+                    "lfi_vulnerability": lambda: any("lfi" in str(v.get("type", "")).lower() for v in all_vulns),
+                }
+                matched = all(fragment_checks.get(frag, lambda: False)() for frag in required)
+
+            if not matched:
+                continue
+
+            # Convert rule actions to chain steps
+            steps = []
+            for action in rule.get("actions", []):
+                steps.append({
+                    "name": action.get("type", "rule_action"),
+                    "action": action.get("type", ""),
+                    "target": self._get_base_url(),
+                    "payload": action.get("args", ""),
+                    "tool": action.get("type", ""),
+                    "success_indicator": "rule condition met",
+                    "description": rule.get("name", ""),
+                })
+
+            chains.append({
+                "name": rule.get("name", rule.get("id", "rule_chain")),
+                "goal": rule.get("name", ""),
+                "steps": steps,
+                "evidence": [f"rule:{rule.get('id', '')}"],
+                "confidence": 0.75 + (0.05 * (3 - min(rule.get("priority", 3), 3))),
+                "preconditions_met": [ctype],
+                "preconditions_missing": [],
+                "primitive": ctype,
+                "severity": "HIGH",
+                "risk_level": "HIGH",
+                "force_chain": rule.get("priority", 3) == 1,
+                "source": "rules_engine",
+            })
+            logger.info(f"[CHAIN] Rule matched: {rule.get('id')} — {rule.get('name')}")
+
+        return chains
 
     def _get_planning_vulnerabilities(self, include_detected: bool = False) -> List[Dict[str, Any]]:
         verified = self.state.get("verified_vulnerabilities", []) or []
@@ -448,24 +559,56 @@ class ChainPlanner:
                 logger.debug("[CHAIN] Insufficient evidence for AI planning")
                 return []
             
-            # Build the planning prompt
+            # ── Primary path: data-flow reasoning across ALL confirmed vulns ──
+            all_vulns = self._get_planning_vulnerabilities(include_detected=True)
+            dataflow_chains = self.reason_chain_from_vulns(all_vulns)
+            if dataflow_chains:
+                logger.info("[CHAIN] Dataflow reasoning → %d chains", len(dataflow_chains))
+                for c in dataflow_chains:
+                    logger.info(
+                        "[CHAIN] → [DATAFLOW] [%s] %s | missing=%s",
+                        c.get("risk_level", "?"), c.get("name", "?"),
+                        c.get("preconditions_missing", []),
+                    )
+                # Convert to ExploitChain objects for compatibility
+                result_chains: List[ExploitChain] = []
+                for c in dataflow_chains:
+                    steps = []
+                    for s in (c.get("steps") or []):
+                        steps.append(ExploitStep(
+                            name=s.get("name", s.get("action", "step")),
+                            action=s.get("action", ""),
+                            target=self._resolve_step_target(
+                                s.get("target", ""), s.get("name", ""), s.get("action", "")
+                            ),
+                            tool=s.get("tool", "curl"),
+                            payload=s.get("payload", ""),
+                            success_indicator=s.get("success_indicator", ""),
+                            depends_on=s.get("depends_on", []),
+                            preconditions=s.get("consumes", []),
+                            postconditions=s.get("produces", []),
+                        ))
+                    result_chains.append(ExploitChain(
+                        name=c.get("name", "Dataflow Chain"),
+                        description=c.get("reasoning", c.get("goal", "")),
+                        steps=steps,
+                        risk_level=c.get("risk_level", "HIGH"),
+                    ))
+                return result_chains
+
+            # ── Fallback: generic AI planning ────────────────────────────────
             prompt = self._build_ai_planning_prompt(planner_state)
-            
-            # Call Groq with the planning prompt
             response = self.groq.generate(
                 prompt=prompt,
                 system=_CHAIN_PLANNER_SYSTEM,
-                temperature=0.3  # Lower temperature for more deterministic planning
+                temperature=0.3,
+                max_tokens=2000,
             )
-            
-            # Parse the AI response into executable chains
             chains = self._parse_ai_plan_response(response, planner_state)
-            
             if chains:
                 logger.info(f"[CHAIN] AI planner generated {len(chains)} chains")
                 for chain in chains:
                     logger.info(f"[CHAIN] → [AI] [{chain.risk_level}] {chain.name}")
-            
             return chains
             
         except Exception as e:
@@ -478,84 +621,143 @@ class ChainPlanner:
             return []
 
     def _build_ai_planning_prompt(self, state: Dict[str, Any]) -> str:
-        """Build the prompt for AI-based chain planning.
-        
-        Args:
-            state: The planner state from _build_planner_state()
-            
-        Returns:
-            Formatted prompt string for the LLM
+        """Build data-flow-aware planning prompt.
+
+        Groq is asked to reason about WHAT EACH VULN PRODUCES and
+        HOW PRODUCTIONS CONNECT to form a chain towards RCE.
         """
-        # Format successful payloads for context
-        payload_context = ""
-        if state.get("successful_payloads"):
-            payload_context = "\nHISTORICALLY SUCCESSFUL PAYLOADS (prioritize these):\n"
-            for p in state["successful_payloads"][:5]:
-                payload_context += f"  - {p.get('payload', '')[:80]} (score: {p.get('score', 0):.2f}, success_rate: {p.get('success_rate', 0):.0%})\n"
-        
-        # Format capabilities
-        caps_text = ", ".join(state.get("capabilities", []))
-        
-        # Format WordPress info
-        wp_text = "Not detected"
-        if state.get("wordpress", {}).get("detected"):
-            wp_info = state["wordpress"]
-            wp_text = f"Version: {wp_info.get('version', 'unknown')}"
-            if wp_info.get("plugins"):
-                wp_text += f", Plugins: {len(wp_info['plugins'])}"
-            if wp_info.get("vulnerabilities"):
-                wp_text += f", Vulnerabilities: {len(wp_info['vulnerabilities'])}"
-        
-        prompt = f"""TARGET ANALYSIS FOR EXPLOIT CHAIN PLANNING
+        vulns = state.get("vulnerabilities", [])
+        techs = state.get("technologies", [])
+        wp = state.get("wordpress", {})
+        endpoints = state.get("endpoints", [])
 
-Target: {state.get('target', '')}
-Base URL: {state.get('base_url', '')}
+        wp_block = ""
+        if wp.get("detected"):
+            users = wp.get("users") or self.state.get("wp_users") or []
+            wp_block = (
+                f"\nWORDPRESS {wp.get('version','unknown')}: "
+                f"users={users}, plugins={len(wp.get('plugins',[]))}"
+            )
 
-AVAILABLE CAPABILITIES: {caps_text}
+        return f"""DATA-FLOW CHAIN REASONING
 
-WORDPRESS: {wp_text}
+Target: {state.get('target','')}  Stack: {', '.join(str(t) for t in techs)}{wp_block}
 
-TECHNOLOGIES: {', '.join(state.get('technologies', []))}
+CONFIRMED VULNERABILITIES (these are the building blocks):
+{json.dumps(vulns, indent=2)}
 
-DISCOVERED ENDPOINTS (top 15):
-{json.dumps(state.get('endpoints', [])[:15], indent=2)}
+ENDPOINTS (context):
+{json.dumps([e.get('url','') for e in endpoints[:10]], indent=2)}
 
-CONFIRMED VULNERABILITIES:
-{json.dumps(state.get('vulnerabilities', []), indent=2)}
-{payload_context}
+TASK — reason step by step:
+1. For EACH vulnerability above, state what it PRODUCES (credentials / file-write /
+   code-exec / username-list / session-token / db-dump / admin-access / etc.)
+2. For EACH vulnerability, state what it CONSUMES (nothing / credentials / session / etc.)
+3. Draw the CONNECTION graph: which produce feeds which consume?
+4. Find ALL complete paths from "unauthenticated" → "RCE or admin takeover"
+   using ONLY the confirmed vulns as nodes.
+5. For any path that is almost complete (needs 1 more piece), list what is missing
+   in preconditions_missing.
 
-GOAL: {state.get('goal', 'rce_or_admin_access')}
-
-THINK STEP BY STEP:
-1. What is the fastest path to achieve the goal?
-2. What vulnerabilities can be chained together?
-3. What are the prerequisites for each step?
-4. What fallback options exist if primary attack fails?
-5. What is the minimum number of steps needed?
-
-Return a JSON array of exploit chains. Each chain must have:
-- name: Short descriptive name
-- description: What this chain achieves
-- risk_level: CRITICAL, HIGH, MEDIUM, or LOW
-- steps: Array of steps, each with:
-  - name: Step name
-  - action: Action type (http_request, sql_inject, upload_file, login, execute_command, exploit_vulnerability)
-  - target: Target URL or endpoint
-  - tool: Recommended tool (curl, sqlmap, wpscan, hydra, burp, custom_script)
-  - success_indicator: What indicates success
-  - depends_on: List of step names this step depends on
-  - preconditions: List of conditions that must be true
-  - postconditions: List of outcomes after this step
-
-IMPORTANT: Focus on REALISTIC and EXECUTABLE chains. Prioritize chains that:
-1. Use historically successful payloads
-2. Require fewer steps
-3. Have clear success indicators
-4. Consider WAF evasion if needed
-
+Return a JSON array following the schema in your instructions.
+Every step MUST have 'produces' and 'consumes' arrays.
 Return ONLY valid JSON."""
-        
-        return prompt
+
+    def reason_chain_from_vulns(self, vulns: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Ask Groq to reason about how confirmed vulns chain together.
+
+        This is the PRIMARY chain-generation path — Groq reasons about data
+        flow (what each vuln produces / consumes) and builds paths to RCE
+        using only confirmed evidence, no hardcoded templates.
+
+        Returns a list of chain dicts with steps containing 'produces'/'consumes'.
+        """
+        if not self.groq or not vulns:
+            return []
+
+        # Build a compact vuln summary emphasising URLs and types
+        vuln_nodes = []
+        for v in vulns:
+            node = {
+                "type": str(v.get("type") or v.get("vuln_type", "unknown")).lower(),
+                "url": str(v.get("url") or v.get("endpoint", "")),
+                "severity": str(v.get("severity", "MEDIUM")),
+                "evidence": str(v.get("evidence", ""))[:120],
+                "confidence": float(v.get("confidence", 0.5) or 0.5),
+            }
+            vuln_nodes.append(node)
+
+        # Include found usernames and tech context
+        users = self.state.get("wp_users") or []
+        techs_raw = self.state.get("tech_stack") or self.state.get("technologies") or {}
+        techs = list(techs_raw.keys()) if isinstance(techs_raw, dict) else list(techs_raw)
+
+        live_hosts = self.state.get("live_hosts") or []
+        tech_fingerprints = []
+        for h in live_hosts[:3]:
+            if isinstance(h, dict):
+                tech_fingerprints.extend(h.get("tech") or h.get("technologies") or [])
+        techs = list(dict.fromkeys(techs + tech_fingerprints))[:15]
+
+        prompt = f"""DATA-FLOW CHAIN REASONING
+
+Target: {self.state.get('target','')}
+Stack: {', '.join(str(t) for t in techs)}
+Enumerated users: {users}
+
+CONFIRMED VULNERABILITIES — your building blocks:
+{json.dumps(vuln_nodes, indent=2)}
+
+TASK:
+Step 1 — For each vuln node, write what it PRODUCES and CONSUMES.
+Step 2 — Draw the data-flow graph: which produce satisfies which consume?
+Step 3 — Find ALL complete chains (no missing pieces) from unauthenticated → RCE/admin.
+Step 4 — Find chains missing exactly ONE piece; put that piece in preconditions_missing.
+Step 5 — Rank chains by completeness (complete first) then by impact.
+
+Every step in your output MUST contain:
+  "produces": ["what data/access this step creates"],
+  "consumes": ["what data this step needs from a previous step"],
+  "depends_on": ["name of previous step that provides the consumed data"]
+
+Return ONLY valid JSON array."""
+
+        try:
+            response = self.groq.generate(
+                prompt=prompt,
+                system=_DATAFLOW_CHAIN_SYSTEM,
+                temperature=0.2,
+                max_tokens=2000,
+            )
+            # Parse response — handles both array [...] and object {...}
+            raw = self._parse_array_or_object(response)
+            if not raw:
+                return []
+            items = raw if isinstance(raw, list) else [raw]
+            result = []
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                steps = item.get("steps", [])
+                if not steps:
+                    continue
+                # Normalise step fields
+                for step in steps:
+                    step.setdefault("produces", [])
+                    step.setdefault("consumes", [])
+                    step.setdefault("depends_on", [])
+                item.setdefault("preconditions_missing", [])
+                item.setdefault("preconditions_met", [
+                    n["type"] for n in vuln_nodes
+                ])
+                item["source"] = "groq_dataflow"
+                item["planner_mode"] = "dataflow"
+                result.append(item)
+            logger.info("[CHAIN] reason_chain_from_vulns → %d chains from Groq", len(result))
+            return result
+        except Exception as e:
+            logger.warning("[CHAIN] reason_chain_from_vulns failed: %s", e)
+            return []
 
     def _parse_ai_plan_response(self, response: str, state: Dict[str, Any]) -> List[ExploitChain]:
             """Parse AI response into ExploitChain objects with robust JSON cleaning."""
@@ -1275,7 +1477,7 @@ Return ONLY valid JSON."""
 
         
     def plan_recon_chains_deterministic(self) -> Dict[str, Any]:
-        """Deterministic chain planning from recon-only signals/primitives (no CVE/vulnerability dependency)."""
+        """Deterministic chain planning grounded in confirmed vulns, tech stack, and rules."""
         raw_endpoints = (
             self.state.get("prioritized_endpoints", [])
             or self.state.get("endpoints", [])
@@ -1286,6 +1488,29 @@ Return ONLY valid JSON."""
         direct_primitives = self._derive_direct_exploit_primitives(recon_endpoints)
         primitives = direct_primitives + self._derive_primitives(signals)
         signal_map = {s["type"]: s for s in signals}
+
+        # --- enrich primitives with confirmed vulnerability evidence ---
+        confirmed_vulns = self.state.get("confirmed_vulnerabilities", []) or []
+        tech_stack = list((self.state.get("technologies", {}) or {}).keys())
+        wp_version = self.state.get("wp_version", "") or ""
+
+        # Map confirmed vuln types → boost matching primitive confidence + attach endpoint
+        vuln_type_map: Dict[str, List[str]] = {}
+        for v in confirmed_vulns:
+            vt = str(v.get("type", "")).lower()
+            url = v.get("url", "") or v.get("endpoint", "")
+            if vt and url:
+                vuln_type_map.setdefault(vt, []).append(url)
+
+        for prim in primitives:
+            ptype = prim.get("type", "").lower()
+            for vt, urls in vuln_type_map.items():
+                if ptype in vt or vt in ptype or any(k in vt for k in ("sql", "xss", "lfi", "rce", "idor", "ssrf", "xxe")):
+                    prim["confidence"] = min(0.95, float(prim.get("confidence", 0.7)) + 0.15)
+                    prim["force_chain"] = True
+                    prim["confirmed_endpoints"] = urls[:3]
+                    prim["evidence_sources"] = list(set(prim.get("evidence_sources", []) + [f"confirmed:{vt}"]))
+                    break
 
         if not recon_endpoints:
             return {"endpoints": [], "signals": signals, "primitives": primitives, "chains": [], "terminal_reason": "no_recon_endpoints"}
@@ -1369,8 +1594,49 @@ Return ONLY valid JSON."""
                 "terminal_reason": "primitive_preconditions_missing",
             }
 
+        # --- direct chains from confirmed vulnerabilities (highest priority) ---
+        for vt, urls in vuln_type_map.items():
+            for url in urls[:2]:
+                chains.append({
+                    "name": f"Confirmed {vt.upper()} exploitation",
+                    "goal": f"Exploit confirmed {vt} on {url}",
+                    "steps": [{
+                        "name": f"exploit_{vt}",
+                        "action": f"test_{vt}",
+                        "target": url,
+                        "tool": "auto",
+                        "payload": "",
+                        "success_indicator": f"{vt} confirmed by scanner",
+                        "description": f"Target confirmed {vt} endpoint",
+                    }],
+                    "evidence": [f"confirmed:{vt}:{url}"],
+                    "confidence": 0.90,
+                    "preconditions_met": [f"confirmed_{vt}"],
+                    "preconditions_missing": [],
+                    "primitive": vt,
+                    "severity": "HIGH",
+                    "risk_level": "HIGH",
+                    "force_chain": True,
+                    "source": "confirmed_vuln",
+                })
+
+        # --- rule-based chains ---
+        rule_chains = self._apply_rules()
+        chains.extend(rule_chains)
+        if rule_chains:
+            logger.info(f"[CHAIN] Added {len(rule_chains)} rule-based chains")
+
         chains.sort(key=lambda c: (1 if c.get("force_chain") else 0, float(c.get("confidence", 0.0))), reverse=True)
-        return {"endpoints": recon_endpoints, "signals": signals, "primitives": primitives, "chains": chains, "terminal_reason": None}
+        return {
+            "endpoints": recon_endpoints,
+            "signals": signals,
+            "primitives": primitives,
+            "chains": chains,
+            "terminal_reason": None,
+            "confirmed_vulns_used": len(vuln_type_map),
+            "tech_stack": tech_stack,
+            "rule_chains": len(rule_chains),
+        }
 
     def plan_chains_from_graph(self, attack_graph) -> List[ExploitChain]:
         """Plan chains from attack graph analysis"""

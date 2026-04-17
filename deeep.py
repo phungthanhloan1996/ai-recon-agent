@@ -729,21 +729,23 @@ def scan_domain_immediately(domain):
         if result['wp']['detected']:
             # Lưu domain với đầy đủ http:// hoặc https://
             url = recon.base_url if recon.base_url else f"https://{domain}"
-            
-            # Lưu TẤT CẢ domain WordPress vào file riêng
+
+            # Lưu TẤT CẢ domain WordPress vào file riêng (full URL)
             try:
                 with open("all_wp_domains.txt", "a", encoding="utf-8") as f:
                     f.write(f"{url}\n")
             except:
                 pass
-            
-            # Lưu domain có vấn đề vào targets.txt
+
+            # Lưu domain có vấn đề vào targets.txt — chỉ plain domain, không protocol
             risk = result['vulnerability_indicators']['risk_score']
             cves = len(result['vulnerability_indicators']['cve_matches'])
             if risk >= 10 or cves > 0:
+                parsed = urllib.parse.urlparse(url)
+                plain_domain = parsed.netloc or domain
                 try:
                     with open(DOMAIN_VULN_FILE, "a", encoding="utf-8") as f:
-                        f.write(f"{url}\n")
+                        f.write(f"{plain_domain}\n")
                 except:
                     pass
             

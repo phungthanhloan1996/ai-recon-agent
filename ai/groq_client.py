@@ -43,16 +43,20 @@ class GroqClient:
     MAX_CALLS_PER_MINUTE = 10       # Global rate limit for Groq
     MIN_CALL_INTERVAL = 1.0         # Minimum seconds between Groq calls
 
+    # ─── DEEPSEEK CONFIGURATION ─────────────────────────────────────────────────
+    DEEPSEEK_API_URL = "https://api.deepseek.com/v1/chat/completions"
+    DEEPSEEK_MODEL = "deepseek-chat"
+
     # ─── OPENROUTER CONFIGURATION ───────────────────────────────────────────────
     OPENROUTER_API_URL = "https://openrouter.ai/api/v1/chat/completions"
     OPENROUTER_SITE_URL = ""
     OPENROUTER_SITE_NAME = "ai-recon-agent"
     OPENROUTER_MODELS = [
-        "meta-llama/llama-3.1-70b-instruct",
-        "meta-llama/llama-3.1-8b-instruct", 
-        "google/gemini-flash-1.5",
-        "mistralai/mistral-large",
-        "openai/gpt-3.5-turbo",
+        "meta-llama/llama-3.3-70b-instruct",    # Llama 3.3 70B - latest
+        "deepseek/deepseek-chat",                # DeepSeek V3 - fast & cheap
+        "google/gemini-2.0-flash-exp:free",      # Gemini 2.0 Flash
+        "mistralai/mistral-large-2411",          # Mistral Large latest
+        "meta-llama/llama-3.1-8b-instruct",     # lightweight fallback
     ]
 
     # ─── STATIC FALLBACK PAYLOADS ───────────────────────────────────────────────
@@ -85,12 +89,15 @@ class GroqClient:
     }
 
     def __init__(self, api_key: str, model: str = "llama-3.3-70b-versatile",
-                 openrouter_api_key: str = None):
+                 openrouter_api_key: str = None, deepseek_api_key: str = None):
         self.api_key = api_key
         self.model = model
         self.openrouter_api_key = openrouter_api_key
         self._openrouter_enabled = bool(openrouter_api_key)
         self._openrouter_model_index = 0  # Round-robin through OpenRouter models
+        # DeepSeek direct provider (api.deepseek.com, OpenAI-compatible)
+        self.deepseek_api_key = deepseek_api_key
+        self._deepseek_enabled = bool(deepseek_api_key)
         
         # Circuit breaker state for Groq
         self._circuit_state = CircuitState.CLOSED
@@ -110,15 +117,19 @@ class GroqClient:
         self._total_openrouter_calls = 0
         self._total_static_fallbacks = 0
         
+        # DeepSeek statistics
+        self._total_deepseek_calls = 0
+
         # Track which provider is active
         self._current_provider = "groq"
 
-    def generate(self, prompt: str, system: str = None, temperature: float = 0.3) -> str:
+    def generate(self, prompt: str, system: str = None, temperature: float = 0.3, max_tokens: int = 500) -> str:
         """
         Generate response with real-time failover:
         1. Try Groq (if circuit allows)
         2. Fallback to OpenRouter if Groq fails
-        3. Fallback to static payloads if all fail
+        3. Fallback to DeepSeek direct if OpenRouter fails/unavailable
+        4. Fallback to static payloads if all fail
         """
         # Check Groq circuit breaker
         if self._circuit_state == CircuitState.OPEN:
@@ -128,29 +139,29 @@ class GroqClient:
             else:
                 # Circuit is open, skip Groq and go directly to OpenRouter
                 logger.warning(f"[GROQ] Circuit open, skipping to OpenRouter fallback")
-                return self._call_openrouter(prompt, system, temperature)
-        
+                return self._call_openrouter(prompt, system, temperature, max_tokens=max_tokens)
+
         # Apply Groq rate limiting
         self._enforce_rate_limit()
-        
+
         # Try Groq first
         try:
-            response = self._call_groq_with_retry(prompt, system, temperature)
+            response = self._call_groq_with_retry(prompt, system, temperature, max_tokens=max_tokens)
             self._current_provider = "groq"
             return response
         except Exception as e:
             logger.warning(f"[GROQ] Advisory unavailable, attempting OpenRouter/static fallback: {e}")
             # Groq failed, try OpenRouter
-            return self._call_openrouter(prompt, system, temperature)
+            return self._call_openrouter(prompt, system, temperature, max_tokens=max_tokens)
 
-    def _call_groq_with_retry(self, prompt: str, system: str, temperature: float, 
-                               max_retries: int = 1) -> str:
+    def _call_groq_with_retry(self, prompt: str, system: str, temperature: float,
+                               max_retries: int = 1, max_tokens: int = 500) -> str:
         """Call Groq API with exponential backoff and retries."""
         last_error = None
         
         for attempt in range(max_retries):
             try:
-                response = self._make_groq_api_call(prompt, system, temperature)
+                response = self._make_groq_api_call(prompt, system, temperature, max_tokens=max_tokens)
                 self._on_success()
                 return response
             except urllib.error.HTTPError as e:
@@ -197,7 +208,7 @@ class GroqClient:
         self._on_failure()
         raise last_error or Exception("Groq API call failed after all retries")
 
-    def _make_groq_api_call(self, prompt: str, system: str, temperature: float) -> str:
+    def _make_groq_api_call(self, prompt: str, system: str, temperature: float, max_tokens: int = 500) -> str:
         """Make actual API call to Groq."""
         url = "https://api.groq.com/openai/v1/chat/completions"
         
@@ -215,11 +226,11 @@ class GroqClient:
             "model": self.model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": 500
+            "max_tokens": max_tokens
         }
-        
+
         response = requests.post(url, headers=headers, json=data, timeout=30)
-        
+
         if response.status_code == 403:
             logger.error(f"[GROQ] 403 Forbidden: {response.text}")
             raise urllib.error.HTTPError(url, 403, response.text, response.headers, None)
@@ -227,27 +238,27 @@ class GroqClient:
         response.raise_for_status()
         return response.json()["choices"][0]["message"]["content"]
 
-    def _call_openrouter(self, prompt: str, system: str, temperature: float) -> str:
+    def _call_openrouter(self, prompt: str, system: str, temperature: float, max_tokens: int = 500) -> str:
         """
         Real-time fallback to OpenRouter API.
         Tries multiple models in round-robin fashion.
+        Falls back to DeepSeek direct, then static payloads.
         """
         if not self._openrouter_enabled:
-            logger.warning("[OPENROUTER] Not configured, using static fallback")
-            self._total_static_fallbacks += 1
-            return self._get_fallback_response(prompt)
-        
+            logger.warning("[OPENROUTER] Not configured, trying DeepSeek direct")
+            return self._call_deepseek_direct(prompt, system, temperature, max_tokens=max_tokens)
+
         last_error = None
         max_models = len(self.OPENROUTER_MODELS)
-        
+
         for i in range(max_models):
             # Round-robin model selection
             model_index = (self._openrouter_model_index + i) % max_models
             model = self.OPENROUTER_MODELS[model_index]
-            
+
             try:
                 logger.info(f"[OPENROUTER] Attempting with model: {model}")
-                response = self._make_openrouter_call(prompt, system, temperature, model)
+                response = self._make_openrouter_call(prompt, system, temperature, model, max_tokens=max_tokens)
                 self._openrouter_model_index = (model_index + 1) % max_models
                 self._total_openrouter_calls += 1
                 self._current_provider = "openrouter"
@@ -257,14 +268,59 @@ class GroqClient:
                 logger.warning(f"[OPENROUTER] Model {model} failed: {e}")
                 last_error = e
                 continue
-        
-        # All OpenRouter models failed
-        logger.error(f"[OPENROUTER] All models failed, using static fallback")
-        self._total_static_fallbacks += 1
-        return self._get_fallback_response(prompt)
 
-    def _make_openrouter_call(self, prompt: str, system: str, temperature: float, 
-                               model: str) -> str:
+        # All OpenRouter models failed — try DeepSeek direct before static fallback
+        logger.warning("[OPENROUTER] All models failed, trying DeepSeek direct")
+        return self._call_deepseek_direct(prompt, system, temperature, max_tokens=max_tokens)
+
+    def _call_deepseek_direct(self, prompt: str, system: str, temperature: float, max_tokens: int = 500) -> str:
+        """
+        Direct call to DeepSeek API (api.deepseek.com, OpenAI-compatible).
+        Used as fallback when Groq and OpenRouter are both unavailable.
+        """
+        if not self._deepseek_enabled:
+            logger.warning("[DEEPSEEK] Not configured, using static fallback")
+            self._total_static_fallbacks += 1
+            return self._get_fallback_response(prompt)
+
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": prompt})
+
+        headers = {
+            "Authorization": f"Bearer {self.deepseek_api_key}",
+            "Content-Type": "application/json",
+        }
+        data = {
+            "model": self.DEEPSEEK_MODEL,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        try:
+            response = requests.post(
+                self.DEEPSEEK_API_URL,
+                headers=headers,
+                json=data,
+                timeout=30,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if "choices" in result and result["choices"]:
+                self._total_deepseek_calls += 1
+                self._current_provider = "deepseek"
+                logger.info("[DEEPSEEK] Success")
+                return result["choices"][0]["message"]["content"]
+            raise Exception(f"Unexpected DeepSeek response: {result}")
+        except Exception as e:
+            logger.error(f"[DEEPSEEK] Failed: {e}")
+            self._total_static_fallbacks += 1
+            return self._get_fallback_response(prompt)
+
+    def _make_openrouter_call(self, prompt: str, system: str, temperature: float,
+                               model: str, max_tokens: int = 500) -> str:
         """Make actual API call to OpenRouter."""
         headers = {
             "Authorization": f"Bearer {self.openrouter_api_key}",
@@ -282,16 +338,16 @@ class GroqClient:
             "model": model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": 500
+            "max_tokens": max_tokens
         }
-        
+
         response = requests.post(
-            self.OPENROUTER_API_URL, 
-            headers=headers, 
-            json=data, 
+            self.OPENROUTER_API_URL,
+            headers=headers,
+            json=data,
             timeout=30
         )
-        
+
         response.raise_for_status()
         result = response.json()
         
@@ -433,6 +489,10 @@ class GroqClient:
                 "total_calls": self._total_openrouter_calls,
                 "current_model_index": self._openrouter_model_index,
             },
+            "deepseek": {
+                "enabled": self._deepseek_enabled,
+                "total_calls": self._total_deepseek_calls,
+            },
             "fallbacks": {
                 "total_fallbacks": self._total_fallbacks,
                 "static_fallbacks": self._total_static_fallbacks,
@@ -461,21 +521,26 @@ class GroqClient:
 # ─── FACTORY FUNCTION ───────────────────────────────────────────────────────────
 
 def create_groq_client(api_key: str = None, openrouter_api_key: str = None,
-                       model: str = None) -> GroqClient:
+                       deepseek_api_key: str = None, model: str = None) -> GroqClient:
     """
     Factory function to create GroqClient with configuration from environment.
+    Fallback chain: Groq → OpenRouter → DeepSeek direct → static payloads
+    Each provider uses its own key and endpoint — keys are never mixed between providers.
     """
     import os
-    
+
     if api_key is None:
         api_key = os.getenv('GROQ_API_KEY')
     if openrouter_api_key is None:
         openrouter_api_key = os.getenv('OPENROUTER_API_KEY')
+    if deepseek_api_key is None:
+        deepseek_api_key = os.getenv('DEEPSEEK_API_KEY')
     if model is None:
         model = os.getenv('PRIMARY_AI_MODEL', 'llama-3.3-70b-versatile')
-    
+
     return GroqClient(
         api_key=api_key,
         model=model,
-        openrouter_api_key=openrouter_api_key
+        openrouter_api_key=openrouter_api_key,
+        deepseek_api_key=deepseek_api_key,
     )

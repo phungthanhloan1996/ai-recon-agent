@@ -763,19 +763,91 @@ class WordPressScannerEngine:
         return list(set(users))  # Remove duplicates
 
     def _run_wpscan(self, url: str) -> Dict[str, Any]:
-        """WPScan is DISABLED - removed API dependency entirely.
-        
-        FIX: WPScan API was causing rate limiting issues (HTTP 429).
-        We now rely solely on:
-        1. wp_advanced_scan for data collection
-        2. HTTP-based detection for vulnerabilities
-        3. Local wordpress_rules.json for vulnerability matching
-        4. CVELookup for CVE enrichment
-        
-        This eliminates all WPScan API rate limiting issues.
+        """Run wpscan WITHOUT --api-token (local DB only, never rate-limited).
+
+        Requires wpscan local DB to be populated:
+          wpscan --update   (no API token needed, downloads plugins.json etc.)
+
+        Returns parsed wpscan JSON or {} on failure.
         """
-        logger.debug(f"[WP] WPScan API scanning is disabled - using local detection only for {url}")
-        return {}
+        if not tool_available("wpscan"):
+            return {}
+        try:
+            cmd = [
+                "wpscan",
+                "--url", url,
+                "--format", "json",
+                "--no-update",           # use local DB only
+                "--disable-tls-checks",
+                "--random-user-agent",
+                "--enumerate", "vp,vt,u1-3",  # vulnerable plugins, themes, users
+                "--plugins-detection", "passive",
+            ]
+            # Never pass --api-token — avoids all rate-limiting
+            rc, stdout, stderr = run_command(cmd, timeout=120)
+            if rc != 0 or not stdout.strip():
+                logger.debug("[WP] wpscan returned rc=%d for %s", rc, url)
+                return {}
+            data = json.loads(stdout)
+            return self._parse_wpscan_json(data)
+        except Exception as e:
+            logger.debug("[WP] wpscan error for %s: %s", url, e)
+            return {}
+
+    def _parse_wpscan_json(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize wpscan JSON output into our internal format."""
+        result: Dict[str, Any] = {"version": None, "plugins": [], "vulnerabilities": []}
+
+        # Version
+        version_info = data.get("version") or {}
+        if isinstance(version_info, dict):
+            result["version"] = version_info.get("number")
+
+        # Plugins with vulnerabilities
+        plugins_raw = data.get("plugins") or {}
+        if isinstance(plugins_raw, dict):
+            for slug, pdata in plugins_raw.items():
+                if not isinstance(pdata, dict):
+                    continue
+                vulns = []
+                for v in (pdata.get("vulnerabilities") or []):
+                    vuln_entry = {
+                        "cve_id": "",
+                        "title": v.get("title", ""),
+                        "severity": "HIGH",
+                        "type": v.get("vuln_type", "vulnerability").lower(),
+                        "exploit_available": bool(v.get("references", {}).get("exploitdb")),
+                        "source": "wpscan_local",
+                    }
+                    # Extract CVE from references
+                    refs = v.get("references") or {}
+                    cves = refs.get("cve") or []
+                    if cves:
+                        vuln_entry["cve_id"] = f"CVE-{cves[0]}" if not str(cves[0]).startswith("CVE") else cves[0]
+                    vuln_entry["all_cves"] = [
+                        f"CVE-{c}" if not str(c).startswith("CVE") else c for c in cves
+                    ]
+                    vulns.append(vuln_entry)
+
+                result["plugins"].append({
+                    "name": slug,
+                    "version": (pdata.get("version") or {}).get("number", "unknown"),
+                    "vulnerabilities": vulns,
+                })
+
+        # Interesting findings as vulnerabilities
+        for finding in (data.get("interesting_findings") or []):
+            if isinstance(finding, dict):
+                result["vulnerabilities"].append({
+                    "type": finding.get("type", "interesting_finding"),
+                    "url": finding.get("url", ""),
+                    "severity": "LOW",
+                    "cve_id": "",
+                    "source": "wpscan_local",
+                    "evidence": [finding.get("to_s", "")],
+                })
+
+        return result
 
     def _scan_wordpress_site(self, url: str) -> Dict[str, Any]:
         """Scan a WordPress site using wp_advanced_scan as PRIMARY, WPScan as enrichment only.
@@ -876,15 +948,47 @@ class WordPressScannerEngine:
         return site_info
 
     def _enrich_site_info_with_cves(self, site_info: Dict[str, Any]):
-        """CVE lookup is DISABLED - WPScan API removed.
-        
-        This method is kept for compatibility but does nothing.
-        All vulnerability detection is now done via:
-        1. wp_advanced_scan for data collection
-        2. HTTP-based detection for vulnerabilities
-        3. Local wordpress_rules.json for vulnerability matching
+        """Enrich plugins/themes with CVEs from searchsploit local DB.
+
+        Only queries plugins that have NO CVEs from wpscan yet (avoids duplicates).
+        searchsploit is purely local — no API, no rate limiting.
         """
-        pass  # No-op - CVE lookup disabled
+        try:
+            from integrations.searchsploit_runner import get_runner
+        except ImportError:
+            return
+        runner = get_runner()
+        if not runner.available():
+            return
+
+        for plugin in (site_info.get("plugins") or []):
+            if not isinstance(plugin, dict):
+                continue
+            # Skip if wpscan already found CVEs for this plugin
+            if plugin.get("vulnerabilities"):
+                continue
+            name = plugin.get("name", "")
+            version = plugin.get("version", "")
+            if not name:
+                continue
+            results = runner.query(f"wordpress {name}", version)
+            if results:
+                plugin["vulnerabilities"] = results
+                logger.info(
+                    "[WP] searchsploit enriched plugin '%s' with %d CVE entries",
+                    name, len(results),
+                )
+
+        for theme in (site_info.get("themes") or []):
+            if not isinstance(theme, dict) or theme.get("vulnerabilities"):
+                continue
+            name = theme.get("name", "")
+            version = theme.get("version", "")
+            if not name:
+                continue
+            results = runner.query(f"wordpress theme {name}", version)
+            if results:
+                theme["vulnerabilities"] = results
 
     def _normalize_component_name(self, name: str) -> str:
         return (name or "").strip().lower().replace("_", "-")

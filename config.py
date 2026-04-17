@@ -17,8 +17,9 @@ CIRCUIT_BREAKER_WINDOW = int(os.getenv('CIRCUIT_BREAKER_WINDOW', 300))  # Time w
 
 # AI Configuration
 GROQ_API_KEY = os.getenv('GROQ_API_KEY')
-ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY')   # reserved for future Claude integration
 OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+DEEPSEEK_API_KEY = os.getenv('DEEPSEEK_API_KEY')     # used via OpenRouter deepseek/deepseek-chat
 
 # WordPress Scanning - API token removed (no longer using WPScan API)
 
@@ -35,12 +36,15 @@ CRAWL_PARALLEL_HOSTS = int(os.getenv('CRAWL_PARALLEL_HOSTS', 6))
 NIKTO_PARALLEL = int(os.getenv('NIKTO_PARALLEL', 4))
 NIKTO_MAX_HOSTS = int(os.getenv('NIKTO_MAX_HOSTS', 10))
 RANK_TOP = int(os.getenv('RANK_TOP', 150))
-SCANNING_MAX_WORKERS = int(os.getenv('SCANNING_MAX_WORKERS', 4))
+SCANNING_MAX_WORKERS = int(os.getenv('SCANNING_MAX_WORKERS', 6))
 NUCLEI_MIN_ENDPOINT_SCORE = int(os.getenv('NUCLEI_MIN_ENDPOINT_SCORE', 8))
 AI_PAYLOAD_MIN_SCORE = int(os.getenv('AI_PAYLOAD_MIN_SCORE', 8))
 PAYLOAD_MUTATION_MIN_SCORE = int(os.getenv('PAYLOAD_MUTATION_MIN_SCORE', 7))
 PAYLOAD_MUTATION_MAX = int(os.getenv('PAYLOAD_MUTATION_MAX', 12))
 SCAN_PAYLOAD_DELAY = float(os.getenv('SCAN_PAYLOAD_DELAY', '0.05'))
+# Maximum wall-clock seconds the entire scanner worker pool is allowed to run.
+# Prevents a large endpoint list from blocking the rest of the pipeline indefinitely.
+SCAN_MAX_TOTAL_SECONDS = int(os.getenv('SCAN_MAX_TOTAL_SECONDS', 1200))
 
 # System Settings
 OUTPUT_DIR = os.getenv('OUTPUT_DIR', 'results')

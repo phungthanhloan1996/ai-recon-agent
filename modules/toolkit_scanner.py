@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Any, Callable, Optional
 from urllib.parse import urlparse
@@ -64,7 +65,8 @@ class ToolkitScanner:
     def run(
         self,
         live_hosts: List[Dict[str, Any]],
-        progress_cb: Optional[Callable[[str, str, str], None]] = None
+        progress_cb: Optional[Callable[[str, str, str], None]] = None,
+        per_host_timeout: int = 180,
     ) -> List[Dict[str, Any]]:
         if not live_hosts:
             return []
@@ -73,12 +75,45 @@ class ToolkitScanner:
         host_urls = host_urls[:host_limit]
         findings: List[Dict[str, Any]] = []
 
-        for url in host_urls:
-            findings.extend(self._run_host_tools(url, progress_cb=progress_cb))
+        total_hosts = len(host_urls)
+        for host_idx, url in enumerate(host_urls, 1):
+            logger.info(
+                "[TOOLKIT] [%d/%d] Scanning host: %s", host_idx, total_hosts, url
+            )
+            _t0 = time.time()
+            # Per-host timeout: prevent one slow host from blocking the rest.
+            # IMPORTANT: do NOT use `with ThreadPoolExecutor(...) as pool:` here —
+            # the context manager calls shutdown(wait=True) on exit, which blocks
+            # until the thread finishes even after result(timeout=...) raises.
+            # Instead, call shutdown(wait=False) on timeout so we move to the next host.
+            _host_pool = ThreadPoolExecutor(max_workers=1)
+            _host_fut = _host_pool.submit(self._run_host_tools, url, progress_cb)
+            try:
+                host_findings = _host_fut.result(timeout=per_host_timeout)
+                _host_pool.shutdown(wait=False)
+            except Exception as _exc:
+                _kind = "timeout" if "TimeoutError" in type(_exc).__name__ or isinstance(_exc, TimeoutError) else "error"
+                logger.warning(
+                    "[TOOLKIT] [%d/%d] %s on %s after %.0fs — skipping",
+                    host_idx, total_hosts, _kind, url, time.time() - _t0,
+                )
+                _host_pool.shutdown(wait=False)   # abandon thread, do NOT wait
+                host_findings = []
+            _elapsed = time.time() - _t0
+            logger.info(
+                "[TOOLKIT] [%d/%d] Done in %.0fs — %d findings: %s",
+                host_idx,
+                total_hosts,
+                _elapsed,
+                len(host_findings),
+                url,
+            )
+            findings.extend(host_findings)
+            # Save partial results to state after each host so timeouts don't lose data
+            self.state.update(external_findings=findings)
+            with open(self.results_file, "w") as f:
+                json.dump(findings, f, indent=2)
 
-        with open(self.results_file, "w") as f:
-            json.dump(findings, f, indent=2)
-        self.state.update(external_findings=findings)
         self.state.update_scan_metadata(toolkit_metrics=self.toolkit_metrics.copy())
         logger.info(f"[TOOLKIT] Recorded {len(findings)} findings")
         return findings
@@ -510,11 +545,22 @@ class ToolkitScanner:
                     "data": result,
                     "url": url,
                 })
+                # Build human-readable output for the report generator
+                tech_lines = []
+                for tech in result.get("technologies", []):
+                    name = tech.get("name", "")
+                    version = tech.get("version", "")
+                    category = tech.get("category", "")
+                    tech_lines.append(f"  [{category}] {name}" + (f" v{version}" if version else ""))
+                for vuln in result.get("vulnerabilities", []):
+                    tech_lines.append(f"  [CVE] {vuln.get('cve')} in {vuln.get('technology')} {vuln.get('version')} ({vuln.get('severity')})")
+                output_text = "\n".join(tech_lines) if tech_lines else "(no technologies detected)"
                 return {
                     "tool": "whatweb",
                     "url": url,
                     "severity": "INFO",
                     "success": True,
+                    "output": output_text,
                     "data": result
                 }
             else:
@@ -579,11 +625,21 @@ class ToolkitScanner:
                     "data": result,
                     "url": url,
                 })
-                
+
+                # Build human-readable output for the report generator
+                tech_list = result.get("technologies", [])
+                version_info = result.get("version_info", {})
+                tech_lines = []
+                for tech in tech_list:
+                    ver = version_info.get(tech, "")
+                    tech_lines.append(f"  {tech}" + (f" v{ver}" if ver else ""))
+                output_text = "\n".join(tech_lines) if tech_lines else "(no technologies detected)"
+
                 response = {
                     "tool": "wappalyzer",
                     "url": url,
                     "severity": "INFO",
+                    "output": output_text,
                     "data": result
                 }
                 
@@ -687,11 +743,11 @@ class ToolkitScanner:
             safe_url = url.replace(':', '_').replace('/', '_').replace('.', '_')[:50]
             output_file = os.path.join(self.output_dir, f"nikto_{safe_url}.json")
             
-            # FIXED: Use -maxtime 5m and -timeout 45 for slow hosts
-            # FIXED: Added -no404 to reduce noise and speed up scanning
-            # FIXED: Added -Cgidirs all to scan all CGI directories
+            # Derive -maxtime from subprocess timeout (leave 10s headroom for init/teardown)
+            nikto_maxtime = max(30, timeout - 10)
+            nikto_maxtime_str = f"{nikto_maxtime}s"
             ret, stdout, stderr = run_command(
-                ["nikto", "-host", url, "-maxtime", "5m", "-timeout", "45", "-Format", "json", "-o", output_file, "-no404", "-Cgidirs", "all"],
+                ["nikto", "-host", url, "-maxtime", nikto_maxtime_str, "-timeout", "20", "-Format", "json", "-o", output_file],
                 timeout=timeout
             )
             

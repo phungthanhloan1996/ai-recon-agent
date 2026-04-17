@@ -136,12 +136,14 @@ class BooleanSQLiDetector:
                 
                 # Significant difference indicates SQLi
                 if len_diff > 50 or content_diff > 0.3:
+                    # Use float confidence so downstream report generation works correctly
+                    confidence_val = 0.75 if len_diff > 100 else 0.50
                     vulns.append({
                         'parameter': param,
                         'type': 'boolean_based',
                         'true_payload': true_payload,
                         'false_payload': false_payload,
-                        'confidence': 'high' if len_diff > 100 else 'medium',
+                        'confidence': confidence_val,
                         'difference': {
                             'length_diff': len_diff,
                             'content_diff': f"{content_diff:.1%}"

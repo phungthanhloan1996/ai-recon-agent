@@ -98,7 +98,7 @@ class DirBustingRunner:
             logger.error(f"Failed to create wordlist: {e}")
             return ""
 
-    def run(self, url: str, timeout: int = 300, max_retries: int = 3) -> Dict[str, Any]:
+    def run(self, url: str, timeout: int = 300, max_retries: int = 1) -> Dict[str, Any]:
         """Run directory brute-forcing on URL.
         
         FIXED: Increased timeout from 180s to 300s to handle slow hosts.
@@ -213,7 +213,8 @@ class DirBustingRunner:
                     "-u", url,
                     "-w", self.wordlist,
                     "-q",
-                    "-t", "30",
+                    "-t", "20",
+                    "--timeout", "10s",
                     "-a", "Mozilla/5.0",
                     "--no-error"
                 ]

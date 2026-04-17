@@ -73,7 +73,9 @@ class JSEndpointHunter:
         all_parameters = set()
         js_results = []
         
-        for js_url in js_urls[:50]:  # Limit to 50 JS files
+        # Hard limit: 25 files max so the phase finishes before any external
+        # process timeout kills the agent, preventing a crash-restart loop.
+        for js_url in js_urls[:25]:
             try:
                 result = self._analyze_js_file(js_url)
                 if result['endpoints'] or result['parameters']:
@@ -111,7 +113,7 @@ class JSEndpointHunter:
         """
         try:
             # Download JS content
-            response = self.http_client.get(js_url, timeout=30)
+            response = self.http_client.get(js_url, timeout=8)
             if response.status_code != 200:
                 return {'js_file': js_url, 'endpoints': [], 'parameters': [], 'interesting_routes': []}
             

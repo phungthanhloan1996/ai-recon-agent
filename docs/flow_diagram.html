@@ -1,0 +1,1055 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>AI Recon Agent — Pipeline Flow</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0d1117;
+    color: #e6edf3;
+    font-family: 'Segoe UI', system-ui, monospace;
+    padding: 24px;
+  }
+  h1 {
+    text-align: center;
+    font-size: 20px;
+    font-weight: 600;
+    color: #79c0ff;
+    letter-spacing: 1px;
+    margin-bottom: 6px;
+  }
+  .subtitle {
+    text-align: center;
+    font-size: 12px;
+    color: #8b949e;
+    margin-bottom: 28px;
+  }
+
+  /* ── Legend ──────────────────────────────── */
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    justify-content: center;
+    margin-bottom: 28px;
+  }
+  .legend-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+    color: #8b949e;
+  }
+  .legend-box {
+    width: 14px; height: 14px;
+    border-radius: 3px;
+  }
+
+  /* ── Pipeline wrapper ────────────────────── */
+  .pipeline {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0;
+    max-width: 1100px;
+    margin: 0 auto;
+  }
+
+  /* ── Phase group ─────────────────────────── */
+  .phase-group {
+    width: 100%;
+    border: 1px solid;
+    border-radius: 10px;
+    padding: 14px 16px 10px;
+    margin-bottom: 6px;
+    position: relative;
+  }
+  .phase-label {
+    position: absolute;
+    top: -11px;
+    left: 16px;
+    background: #0d1117;
+    padding: 0 8px;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+  }
+  .phase-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: flex-start;
+    justify-content: flex-start;
+  }
+
+  /* ── Block ───────────────────────────────── */
+  .block {
+    border-radius: 6px;
+    padding: 8px 12px;
+    min-width: 140px;
+    max-width: 220px;
+    flex: 0 0 auto;
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  .block-title {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 4px;
+    white-space: nowrap;
+  }
+  .block-detail {
+    font-size: 10px;
+    color: #8b949e;
+    line-height: 1.5;
+  }
+  .block-detail .tool { color: #ffa657; }
+  .block-detail .ai   { color: #bc8cff; }
+  .block-detail .out  { color: #3fb950; }
+  .block-detail .in   { color: #58a6ff; }
+
+  /* ── Arrow connector ─────────────────────── */
+  .arrow-down {
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 28px;
+    position: relative;
+  }
+  .arrow-down svg {
+    display: block;
+  }
+  .arrow-label {
+    font-size: 10px;
+    color: #8b949e;
+    background: #0d1117;
+    padding: 1px 6px;
+    border-radius: 3px;
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  /* ── Inline arrows between blocks ─────────── */
+  .inline-arrow {
+    display: flex;
+    align-items: center;
+    color: #484f58;
+    font-size: 16px;
+    padding: 0 2px;
+    flex-shrink: 0;
+    align-self: center;
+  }
+
+  /* ── Loop box ────────────────────────────── */
+  .loop-badge {
+    display: inline-block;
+    border: 1px dashed #f0883e;
+    border-radius: 4px;
+    color: #f0883e;
+    font-size: 10px;
+    padding: 2px 6px;
+    margin-left: 8px;
+    vertical-align: middle;
+  }
+
+  /* ── Phase colours ───────────────────────── */
+  /* Discovery  */ .ph-discovery  { border-color: #1f6feb; }
+  .ph-discovery  .phase-label     { color: #58a6ff; }
+  .ph-discovery  .block           { background: #0c1f3a; }
+  .ph-discovery  .block-title     { color: #79c0ff; }
+
+  /* Fingerprint */ .ph-fingerprint{ border-color: #388bfd; }
+  .ph-fingerprint .phase-label    { color: #79c0ff; }
+  .ph-fingerprint .block          { background: #0e2044; }
+  .ph-fingerprint .block-title    { color: #a5d6ff; }
+
+  /* Crawling   */ .ph-crawl      { border-color: #1a7f37; }
+  .ph-crawl      .phase-label     { color: #3fb950; }
+  .ph-crawl      .block           { background: #0d2818; }
+  .ph-crawl      .block-title     { color: #56d364; }
+
+  /* Scanning   */ .ph-scan       { border-color: #9e6a03; }
+  .ph-scan       .phase-label     { color: #d29922; }
+  .ph-scan       .block           { background: #2d1f00; }
+  .ph-scan       .block-title     { color: #e3b341; }
+
+  /* AI Chain   */ .ph-ai         { border-color: #6e40c9; }
+  .ph-ai         .phase-label     { color: #bc8cff; }
+  .ph-ai         .block           { background: #1c0d33; }
+  .ph-ai         .block-title     { color: #d2a8ff; }
+
+  /* Exploitation */ .ph-exploit  { border-color: #b62324; }
+  .ph-exploit    .phase-label     { color: #f85149; }
+  .ph-exploit    .block           { background: #2d0d0d; }
+  .ph-exploit    .block-title     { color: #ff7b72; }
+
+  /* Reporting  */ .ph-report     { border-color: #2e6a2e; }
+  .ph-report     .phase-label     { color: #7ee787; }
+  .ph-report     .block           { background: #0d2210; }
+  .ph-report     .block-title     { color: #7ee787; }
+
+  /* ── Side note ───────────────────────────── */
+  .sidenote {
+    font-size: 10px;
+    color: #6e7681;
+    text-align: center;
+    margin: 2px 0 8px;
+  }
+
+  /* ── Loop annotation ─────────────────────── */
+  .loop-block {
+    border: 1px dashed #f0883e;
+    border-radius: 8px;
+    padding: 4px 12px;
+    margin: 4px 0;
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #f0883e;
+    font-size: 10px;
+  }
+
+  /* ── Terminal conditions ─────────────────── */
+  .terminal-block {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    justify-content: center;
+    margin: 6px 0 10px;
+  }
+  .terminal-pill {
+    background: #21262d;
+    border: 1px solid #30363d;
+    border-radius: 20px;
+    padding: 3px 10px;
+    font-size: 10px;
+    color: #8b949e;
+  }
+
+  /* ── Groq call detail box ────────────────── */
+  .groq-box {
+    background: #1c0d33;
+    border: 1px solid #6e40c9;
+    border-radius: 6px;
+    padding: 8px 12px;
+    font-size: 10px;
+    flex: 1 1 200px;
+  }
+  .groq-box .groq-title {
+    color: #bc8cff;
+    font-weight: 700;
+    font-size: 11px;
+    margin-bottom: 4px;
+  }
+  .groq-box .groq-in  { color: #58a6ff; }
+  .groq-box .groq-out { color: #3fb950; }
+
+  /* ── State file pill row ─────────────────── */
+  .file-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 6px;
+  }
+  .file-pill {
+    background: #161b22;
+    border: 1px solid #30363d;
+    border-radius: 4px;
+    padding: 2px 8px;
+    font-size: 10px;
+    font-family: monospace;
+    color: #8b949e;
+  }
+
+  /* ── Section divider label ───────────────── */
+  .divider {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    margin: 4px 0;
+  }
+  .divider-line { flex: 1; height: 1px; background: #21262d; }
+  .divider-text { font-size: 10px; color: #484f58; white-space: nowrap; }
+</style>
+</head>
+<body>
+
+<h1>AI Recon Agent — Full Pipeline Flow</h1>
+<div class="subtitle">agent.py → phase execution order · tools called · Groq LLM integration · state data flow</div>
+
+<!-- Legend -->
+<div class="legend">
+  <div class="legend-item"><div class="legend-box" style="background:#0c1f3a;border:1px solid #1f6feb"></div> Discovery</div>
+  <div class="legend-item"><div class="legend-box" style="background:#0e2044;border:1px solid #388bfd"></div> Fingerprinting</div>
+  <div class="legend-item"><div class="legend-box" style="background:#0d2818;border:1px solid #1a7f37"></div> Crawling &amp; Prioritization</div>
+  <div class="legend-item"><div class="legend-box" style="background:#2d1f00;border:1px solid #9e6a03"></div> Scanning</div>
+  <div class="legend-item"><div class="legend-box" style="background:#1c0d33;border:1px solid #6e40c9"></div> AI Chain &amp; Gap Analysis</div>
+  <div class="legend-item"><div class="legend-box" style="background:#2d0d0d;border:1px solid #b62324"></div> Exploitation</div>
+  <div class="legend-item"><div class="legend-box" style="background:#0d2210;border:1px solid #2e6a2e"></div> Reporting</div>
+  <div class="legend-item"><span style="color:#ffa657">■</span> External Tool</div>
+  <div class="legend-item"><span style="color:#bc8cff">■</span> Groq/LLM Call</div>
+  <div class="legend-item"><span style="color:#3fb950">■</span> State Write</div>
+  <div class="legend-item"><span style="color:#58a6ff">■</span> State Read</div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════ -->
+<div class="pipeline">
+
+  <!-- ── ENTRY ── -->
+  <div class="phase-group" style="border-color:#30363d; border-style:dashed; padding:10px 16px;">
+    <div class="phase-label" style="color:#6e7681">ENTRY</div>
+    <div class="phase-row">
+      <div class="block" style="background:#161b22; border-color:#30363d; min-width:180px">
+        <div class="block-title" style="color:#e6edf3">agent.py → Agent.run()</div>
+        <div class="block-detail">
+          Reads: <span class="in">targets.txt / -t flag</span><br>
+          Init: StateManager, GroqClient,<br>
+          ChainPlanner, GapAnalyzer,<br>
+          AttackGraph, EnhancedDashboard<br>
+          <span class="out">Writes: state.json (checkpoint)</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block" style="background:#161b22; border-color:#30363d;">
+        <div class="block-title" style="color:#e6edf3">URL Normalizer</div>
+        <div class="block-detail">
+          Normalise &amp; dedup targets<br>
+          Reachability pre-check<br>
+          <span class="out">seed_targets[]</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block" style="background:#161b22; border-color:#30363d;">
+        <div class="block-title" style="color:#e6edf3">Main Iteration Loop</div>
+        <div class="block-detail">
+          max_iterations (default 3)<br>
+          Phase skipping if stagnant<br>
+          <span class="out">Checkpoints every phase</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- arrow -->
+  <div class="arrow-down">
+    <svg width="2" height="22"><line x1="1" y1="0" x2="1" y2="22" stroke="#30363d" stroke-width="2"/></svg>
+    <svg width="12" height="8" style="margin-top:-2px"><polygon points="6,8 0,0 12,0" fill="#30363d"/></svg>
+  </div>
+  <div class="sidenote">Iteration 1 only — runs once during initial scan</div>
+
+  <!-- ═══ PHASE 1: DISCOVERY ═══ -->
+  <div class="phase-group ph-discovery">
+    <div class="phase-label">① Discovery — Subdomain Recon</div>
+    <div class="phase-row">
+      <div class="block">
+        <div class="block-title">_run_recon_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: seed_targets</span><br>
+          <span class="tool">subfinder</span> → passive DNS<br>
+          <span class="tool">assetfinder</span> → CT logs<br>
+          <span class="tool">amass</span> → OSINT enum<br>
+          <span class="tool">Wayback Machine</span> → archived<br>
+          <span class="out">→ state.subdomains[]</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_live_hosts_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: subdomains</span><br>
+          <span class="tool">httpx</span> → HTTP probe<br>
+          ports: 80,443,8080,8443,<br>
+          8888,3000,5000,9000<br>
+          30 concurrent workers<br>
+          <span class="out">→ state.live_hosts[]</span><br>
+          <span class="out">→ live_hosts.json</span>
+        </div>
+      </div>
+    </div>
+    <div class="file-row">
+      <div class="file-pill">live_hosts.txt</div>
+      <div class="file-pill">live_hosts.json</div>
+      <div class="file-pill">recon_cache.json (dedup)</div>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <svg width="2" height="22"><line x1="1" y1="0" x2="1" y2="22" stroke="#388bfd" stroke-width="2"/></svg>
+    <svg width="12" height="8" style="margin-top:-2px"><polygon points="6,8 0,0 12,0" fill="#388bfd"/></svg>
+    <div class="arrow-label">live_hosts[]</div>
+  </div>
+
+  <!-- ═══ PHASE 2: FINGERPRINTING ═══ -->
+  <div class="phase-group ph-fingerprint">
+    <div class="phase-label">② Fingerprinting — Tech Stack &amp; WordPress Detection</div>
+    <div class="phase-row">
+      <div class="block">
+        <div class="block-title">_run_toolkit_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: live_hosts</span><br>
+          <span class="tool">whatweb</span> → tech fingerprint<br>
+          &nbsp;&nbsp;→ JSON log per host<br>
+          &nbsp;&nbsp;→ CVE via searchsploit<br>
+          <span class="tool">wafw00f</span> → WAF detect<br>
+          <span class="tool">nikto</span> → misconfig scan<br>
+          <span class="tool">nmap</span> → port/service<br>
+          <span class="out">→ state.technologies{}</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_wordpress_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: live_hosts</span><br>
+          If WordPress detected:<br>
+          <span class="tool">wpscan</span> → version, plugins,<br>
+          themes, users, CVEs<br>
+          <span class="out">→ state.wp_users[]</span><br>
+          <span class="out">→ state.wp_plugins[]</span><br>
+          <span class="out">→ state.wordpress_detected</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_service_fingerprint_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: live_hosts</span><br>
+          Response header analysis<br>
+          Banner grabbing<br>
+          Server token extraction<br>
+          <span class="out">→ state.tech_stack[]</span>
+        </div>
+      </div>
+    </div>
+    <div class="file-row">
+      <div class="file-pill">nikto_*.json</div>
+      <div class="file-pill">wordpress_scan.json</div>
+      <div class="file-pill">toolkit_findings.json</div>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <svg width="2" height="22"><line x1="1" y1="0" x2="1" y2="22" stroke="#1a7f37" stroke-width="2"/></svg>
+    <svg width="12" height="8" style="margin-top:-2px"><polygon points="6,8 0,0 12,0" fill="#1a7f37"/></svg>
+    <div class="arrow-label">live_hosts[] + technologies{}</div>
+  </div>
+
+  <!-- ═══ PHASE 3: CRAWLING ═══ -->
+  <div class="phase-group ph-crawl">
+    <div class="phase-label">③ Crawling &amp; Endpoint Discovery</div>
+    <div class="phase-row">
+      <div class="block">
+        <div class="block-title">_run_discovery_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: live_hosts, urls</span><br>
+          <span class="tool">katana</span> → active crawl<br>
+          <span class="tool">hakrawler</span> → passive crawl<br>
+          <span class="tool">gau</span> → known URLs<br>
+          <span class="tool">waybackurls</span> → archived<br>
+          <span class="out">→ state.urls[]</span><br>
+          <span class="out">→ state.endpoints[]</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_js_endpoint_hunt_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: urls</span><br>
+          Extract JS bundle URLs<br>
+          Parse webpack chunks<br>
+          Extract API routes<br>
+          <span class="out">→ state.endpoints[] +</span><br>
+          <span class="out">&nbsp;&nbsp;js_found_endpoints[]</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_parameter_mining_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: endpoints</span><br>
+          <span class="tool">ffuf / arjun</span> → param fuzz<br>
+          Hidden param discovery<br>
+          <span class="out">→ state.endpoints[]</span><br>
+          <span class="out">&nbsp;&nbsp;(enriched params)</span>
+        </div>
+      </div>
+    </div>
+    <div class="file-row">
+      <div class="file-pill">endpoints.txt</div>
+      <div class="file-pill">endpoints_ranked.json</div>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <svg width="2" height="22"><line x1="1" y1="0" x2="1" y2="22" stroke="#1a7f37" stroke-width="2"/></svg>
+    <svg width="12" height="8" style="margin-top:-2px"><polygon points="6,8 0,0 12,0" fill="#1a7f37"/></svg>
+    <div class="arrow-label">endpoints[]</div>
+  </div>
+
+  <!-- classification + prioritization -->
+  <div class="phase-group ph-crawl">
+    <div class="phase-label">③b Classification &amp; Prioritization</div>
+    <div class="phase-row">
+      <div class="block">
+        <div class="block-title">_run_classification_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: endpoints, tech_stack</span><br>
+          <span class="ai">Groq → EndpointClassifier</span><br>
+          <span class="ai">Prompt: classify attack surface</span><br>
+          <span class="ai">→ auth/upload/admin/api/etc</span><br>
+          <span class="out">→ endpoints[].class_score</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_prioritization_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: endpoints, technologies</span><br>
+          EndpointRanker scoring:<br>
+          param count, method, path<br>
+          auth surface, file ext<br>
+          scan_deduplicator.dedupe()<br>
+          <span class="out">→ state.prioritized_endpoints[]</span><br>
+          <span class="out">→ endpoints_ranked.json</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <svg width="2" height="22"><line x1="1" y1="0" x2="1" y2="22" stroke="#9e6a03" stroke-width="2"/></svg>
+    <svg width="12" height="8" style="margin-top:-2px"><polygon points="6,8 0,0 12,0" fill="#9e6a03"/></svg>
+    <div class="arrow-label">prioritized_endpoints[]</div>
+  </div>
+
+  <!-- loop marker -->
+  <div class="loop-block">
+    <svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1 A6 6 0 1 1 1 7" stroke="#f0883e" stroke-width="1.5" fill="none"/><polygon points="1,7 4,4 4,10" fill="#f0883e"/></svg>
+    <span>ITERATION LOOP begins — phases below repeat each iteration (max 3 iterations)</span>
+  </div>
+
+  <!-- ═══ PHASE 4: SCANNING ═══ -->
+  <div class="phase-group ph-scan">
+    <div class="phase-label">④ Active Scanning — Vulnerability Detection</div>
+    <div class="phase-row">
+      <div class="block">
+        <div class="block-title">_run_scanning_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: prioritized_endpoints</span><br>
+          <span class="ai">Groq → PayloadGenerator</span><br>
+          <span class="ai">&nbsp;→ custom payloads per type</span><br>
+          <span class="ai">Groq → PayloadMutator</span><br>
+          <span class="ai">&nbsp;→ WAF-evading variants</span><br>
+          <span class="tool">nuclei</span> → template scan<br>
+          <span class="tool">sqlmap</span> → SQLi detection<br>
+          <span class="tool">dalfox</span> → XSS detection<br>
+          <span class="out">→ state.confirmed_vulns[]</span><br>
+          <span class="out">→ scan_results.json</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">Tier-1 Detectors</div>
+        <div class="block-detail">
+          Always-loaded modules:<br>
+          waf_bypass_engine<br>
+          boolean_sqli_detector<br>
+          xss_detector<br>
+          idor_detector<br>
+          <span class="out">→ xss_findings.json</span><br>
+          <span class="out">→ boolean_sqli_findings.json</span><br>
+          <span class="out">→ idor_findings.json</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">Tier-3 Detectors</div>
+        <div class="block-detail">
+          Optional (try/except):<br>
+          xxe_detector, jwt_analyzer<br>
+          cors_scanner, nosql_injection<br>
+          ldap_injection, open_redirect<br>
+          graphql_scanner, ssrf_detector<br>
+          ssti_detector, http_smuggling<br>
+          crlf_injection, race_condition<br>
+          password_reset_bypass<br>
+          <span class="out">→ merged into confirmed_vulns[]</span>
+        </div>
+      </div>
+    </div>
+    <div class="file-row">
+      <div class="file-pill">scan_results.json</div>
+      <div class="file-pill">xss_findings.json</div>
+      <div class="file-pill">boolean_sqli_findings.json</div>
+      <div class="file-pill">idor_findings.json</div>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <svg width="2" height="22"><line x1="1" y1="0" x2="1" y2="22" stroke="#9e6a03" stroke-width="2"/></svg>
+    <svg width="12" height="8" style="margin-top:-2px"><polygon points="6,8 0,0 12,0" fill="#9e6a03"/></svg>
+    <div class="arrow-label">scan_responses[] + confirmed_vulnerabilities[]</div>
+  </div>
+
+  <!-- analysis -->
+  <div class="phase-group ph-scan" style="margin-bottom:6px">
+    <div class="phase-label">④b Analysis — Parse &amp; Merge Findings</div>
+    <div class="phase-row">
+      <div class="block">
+        <div class="block-title">_run_analysis_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: scan_responses, vulns</span><br>
+          Normalise tool output formats<br>
+          Deduplicate by URL+type+param<br>
+          Promote HIGH/CRIT to confirmed<br>
+          <span class="out">→ confirmed_vulnerabilities[]</span><br>
+          <span class="out">→ manual_validation_required[]</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_attack_graph_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: confirmed_vulns</span><br>
+          NetworkX DiGraph build:<br>
+          Nodes = vuln instances<br>
+          Edges = exploit relationships<br>
+          (SQLi→admin, XSS→session)<br>
+          <span class="out">→ state.attack_graph</span><br>
+          <span class="out">→ attack_graph.json</span>
+        </div>
+      </div>
+    </div>
+    <div class="file-row">
+      <div class="file-pill">attack_graph.json</div>
+      <div class="file-pill">exploit_verifications.json</div>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <svg width="2" height="22"><line x1="1" y1="0" x2="1" y2="22" stroke="#6e40c9" stroke-width="2"/></svg>
+    <svg width="12" height="8" style="margin-top:-2px"><polygon points="6,8 0,0 12,0" fill="#6e40c9"/></svg>
+    <div class="arrow-label">confirmed_vulnerabilities[] + attack_graph</div>
+  </div>
+
+  <!-- ═══ PHASE 5: AI CHAIN GENERATION ═══ -->
+  <div class="phase-group ph-ai">
+    <div class="phase-label">⑤ AI Chain Generation — Groq Data-Flow Reasoning</div>
+    <div class="phase-row" style="align-items:stretch">
+      <div class="block" style="flex:0 0 auto; min-width:180px">
+        <div class="block-title">_run_chain_planning_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: confirmed_vulns</span><br>
+          <span class="in">reads: tech_stack, wp_users</span><br>
+          <span class="in">reads: prioritized_endpoints</span><br>
+          <br>
+          <span style="color:#6e7681">Step 1: deterministic rules</span><br>
+          Match rules/chains.json<br>
+          <br>
+          <span style="color:#6e7681">Step 2: Groq dataflow</span><br>
+          <span class="ai">reason_chain_from_vulns()</span><br>
+          max_tokens=2000<br>
+          <br>
+          <span class="out">→ state.exploit_chains[]</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+
+      <!-- Groq detail boxes -->
+      <div style="display:flex; flex-direction:column; gap:8px; flex:1">
+        <div class="groq-box">
+          <div class="groq-title">🤖 Groq Call #1 — Dataflow Chain Reasoning</div>
+          <div class="groq-in"><b>INPUT:</b> confirmed_vulns (type, url, severity, evidence, confidence)<br>
+          + tech stack + enumerated usernames + target</div>
+          <div style="margin:4px 0; color:#6e7681">TASK: For each vuln → PRODUCES? CONSUMES?<br>
+          Trace paths unauthenticated → RCE<br>
+          Output complete chains + chains missing 1 piece</div>
+          <div class="groq-out"><b>OUTPUT:</b> JSON array [{name, goal, risk_level, reasoning,<br>
+          steps[{order, produces[], consumes[], depends_on[]}],<br>
+          preconditions_missing[]}]</div>
+        </div>
+        <div class="groq-box">
+          <div class="groq-title">🤖 Groq Call #2 — Exploit Strategy Selection</div>
+          <div class="groq-in"><b>INPUT:</b> all chains + vulns + endpoints + tech stack + signals + primitives</div>
+          <div class="groq-out"><b>OUTPUT:</b> SelectedStrategy {chain_name, confidence, reasoning}</div>
+        </div>
+      </div>
+    </div>
+    <div class="file-row">
+      <div class="file-pill">exploit_recipes.json</div>
+      <div class="file-pill">manual_attack_playbook.json</div>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <svg width="2" height="22"><line x1="1" y1="0" x2="1" y2="22" stroke="#6e40c9" stroke-width="2"/></svg>
+    <svg width="12" height="8" style="margin-top:-2px"><polygon points="6,8 0,0 12,0" fill="#6e40c9"/></svg>
+    <div class="arrow-label">exploit_chains[] with preconditions_missing[]</div>
+  </div>
+
+  <!-- ═══ GAP ANALYSIS ═══ -->
+  <div class="phase-group ph-ai">
+    <div class="phase-label">⑤b Gap Analysis — Iterative Precondition Filling</div>
+    <div class="phase-row" style="align-items:stretch">
+      <div class="block" style="flex:0 0 auto; min-width:195px">
+        <div class="block-title">_run_preflight_sync_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: exploit_chains</span><br>
+          GapAnalyzer.analyze_loop()<br>
+          max 4 iterations:<br>
+          <br>
+          1. Collect all missing conditions<br>
+          2. <span class="ai">Ask Groq</span>: "what to probe?"<br>
+          3. Dispatch to module<br>
+          4. Update state + chain<br>
+          5. Check if chain executable<br>
+          6. Repeat or stop<br>
+          <br>
+          <span class="out">→ chains with fewer gaps</span><br>
+          <span class="out">→ new confirmed_vulns</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div style="display:flex; flex-direction:column; gap:8px; flex:1">
+        <div class="groq-box">
+          <div class="groq-title">🤖 Groq Call #3 — Gap Reasoning (per iteration)</div>
+          <div class="groq-in"><b>INPUT:</b> tech stack, confirmed vulns, fulfilled preconditions,<br>
+          missing conditions, chain goal, step_produced_data (credentials/tokens found so far)</div>
+          <div style="margin:4px 0; color:#6e7681">Pick SINGLE most impactful condition to probe next.<br>
+          Choose module: shell_probe / default_creds / wp_scan /<br>
+          api_scan / swagger / crawler / parameter_miner</div>
+          <div class="groq-out"><b>OUTPUT:</b> {condition, module, rationale, target_scope}</div>
+        </div>
+        <div class="block" style="flex:none; max-width:none">
+          <div class="block-title" style="color:#d2a8ff">Module Dispatch</div>
+          <div class="block-detail">
+            <span class="tool">shell_probe</span> → curl/httpx verify endpoint<br>
+            <span class="tool">default_creds</span> → try weak passwords<br>
+            <span class="tool">wp_scan</span> → wpscan for version/plugins<br>
+            <span class="tool">api_scan</span> → REST/GraphQL discovery<br>
+            <span class="tool">swagger</span> → OpenAPI spec hunt<br>
+            <span class="tool">crawler</span> → targeted crawl<br>
+            <span class="tool">parameter_miner</span> → ffuf/arjun<br>
+            <span class="out">Each module updates step_produced_data{}</span><br>
+            <span class="out">(credentials, usernames, tokens propagate)</span>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <svg width="2" height="22"><line x1="1" y1="0" x2="1" y2="22" stroke="#b62324" stroke-width="2"/></svg>
+    <svg width="12" height="8" style="margin-top:-2px"><polygon points="6,8 0,0 12,0" fill="#b62324"/></svg>
+    <div class="arrow-label">selected_exploit_strategy + executable chains</div>
+  </div>
+
+  <!-- ═══ PHASE 6: EXPLOITATION ═══ -->
+  <div class="phase-group ph-exploit">
+    <div class="phase-label">⑥ Exploitation — Execute Chains</div>
+    <div class="phase-row">
+      <div class="block">
+        <div class="block-title">_run_exploit_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: selected_strategy</span><br>
+          <span class="in">reads: exploit_chains</span><br>
+          Execute chain steps in order<br>
+          Check produces→consumes links<br>
+          <span class="out">→ exploit_results[]</span><br>
+          <span class="out">→ authenticated_sessions[]</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_sqli_exploit_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: confirmed sqli vulns</span><br>
+          <span class="tool">sqlmap --dbs</span> → enum DBs<br>
+          <span class="tool">sqlmap --dump-all</span> → extract<br>
+          If --os-shell confirmed:<br>
+          <span class="tool">sqlmap --os-shell</span><br>
+          <span class="out">→ sqlmap_results/</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_upload_bypass_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: upload surface</span><br>
+          Bypass extension filters<br>
+          MIME type confusion<br>
+          Double extension tricks<br>
+          <span class="out">→ upload_bypass_findings.json</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_reverse_shell_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: web_shells, rce_vectors</span><br>
+          Execute shell payload<br>
+          <span class="tool">netcat / msfvenom</span><br>
+          <span class="out">→ state.reverse_shells[]</span>
+        </div>
+      </div>
+    </div>
+    <div class="phase-row" style="margin-top:8px">
+      <div class="block">
+        <div class="block-title">_run_default_creds_phase()</div>
+        <div class="block-detail">
+          <span class="tool">hydra / manual</span><br>
+          admin:admin, admin:password<br>
+          <span class="out">→ default_creds_findings.json</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_cve_exploit_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: tech versions</span><br>
+          Match CVE database<br>
+          <span class="tool">searchsploit</span> → exploits<br>
+          <span class="tool">nuclei</span> → CVE templates<br>
+          <span class="out">→ cve_exploit_findings.json</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_api_vuln_phase()</div>
+        <div class="block-detail">
+          BOLA / mass assignment<br>
+          Rate limit bypass<br>
+          Auth bypass on API<br>
+          <span class="out">→ api_vuln findings</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">Post-Exploitation</div>
+        <div class="block-detail">
+          _run_persistence_phase()<br>
+          _run_lateral_movement_phase()<br>
+          _run_privilege_escalation_phase()<br>
+          _run_metasploit_exploit_phase()<br>
+          <span class="out">→ persistence_vectors[]</span>
+        </div>
+      </div>
+    </div>
+    <div class="file-row">
+      <div class="file-pill">exploit_results.json</div>
+      <div class="file-pill">sqlmap_results/</div>
+      <div class="file-pill">upload_bypass_findings.json</div>
+      <div class="file-pill">default_creds_findings.json</div>
+    </div>
+  </div>
+
+  <div class="arrow-down">
+    <svg width="2" height="22"><line x1="1" y1="0" x2="1" y2="22" stroke="#3fb950" stroke-width="2"/></svg>
+    <svg width="12" height="8" style="margin-top:-2px"><polygon points="6,8 0,0 12,0" fill="#3fb950"/></svg>
+    <div class="arrow-label">exploit_results[] + all findings</div>
+  </div>
+
+  <!-- learning + LLM analysis -->
+  <div class="phase-group ph-ai" style="margin-bottom:6px">
+    <div class="phase-label">⑥b Learning &amp; Meta-Analysis</div>
+    <div class="phase-row">
+      <div class="block">
+        <div class="block-title">_run_learning_phase()</div>
+        <div class="block-detail">
+          Record what worked / failed<br>
+          Adjust payload weights<br>
+          Prioritize successful patterns<br>
+          <span class="out">→ learning_artifacts.json</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_llm_analysis_phase()</div>
+        <div class="block-detail">
+          <span class="ai">Groq → LLMAnalyzer</span><br>
+          analyze_vulnerabilities()<br>
+          assess_risk() → score<br>
+          suggest_attack_paths()<br>
+          get_remediation_advice()<br>
+          <span class="out">→ state.llm_analysis{}</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_verify_vulns_phase()</div>
+        <div class="block-detail">
+          Re-probe CRITICAL/HIGH vulns<br>
+          Confirm true positives<br>
+          Reduce false positives<br>
+          <span class="out">→ verified_vulnerabilities[]</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">_run_chain_validate_phase()</div>
+        <div class="block-detail">
+          <span class="in">reads: exploit_chains</span><br>
+          Validate each step's produces<br>
+          Check depends_on integrity<br>
+          Score chain completeness<br>
+          <span class="out">→ validated chains</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- terminal conditions -->
+  <div style="width:100%; text-align:center; margin: 2px 0 4px;">
+    <span style="font-size:11px; color:#f0883e">⟳ Iteration End — Check termination conditions:</span>
+  </div>
+  <div class="terminal-block">
+    <div class="terminal-pill">✓ RCE / Admin access achieved</div>
+    <div class="terminal-pill">✓ Confidence threshold reached</div>
+    <div class="terminal-pill">✗ No new signals (stagnation)</div>
+    <div class="terminal-pill">✗ Max iterations exhausted</div>
+    <div class="terminal-pill">✗ Wall-clock time limit</div>
+    <div class="terminal-pill">✗ Groq circuit breaker OPEN</div>
+  </div>
+  <div style="width:100%; text-align:center; font-size:10px; color:#6e7681; margin-bottom:8px">
+    If not terminal → loop back to ④ Scanning with updated prioritized_endpoints
+  </div>
+
+  <div class="arrow-down">
+    <svg width="2" height="22"><line x1="1" y1="0" x2="1" y2="22" stroke="#2e6a2e" stroke-width="2"/></svg>
+    <svg width="12" height="8" style="margin-top:-2px"><polygon points="6,8 0,0 12,0" fill="#2e6a2e"/></svg>
+    <div class="arrow-label">all state → report generation</div>
+  </div>
+
+  <!-- ═══ PHASE 7: REPORTING ═══ -->
+  <div class="phase-group ph-report">
+    <div class="phase-label">⑦ Reporting — Final Output</div>
+    <div class="phase-row">
+      <div class="block">
+        <div class="block-title">_generate_final_report()</div>
+        <div class="block-detail">
+          <span class="in">reads: all state</span><br>
+          ReportGenerator.generate()<br>
+          Merge all findings<br>
+          Calculate severity stats<br>
+          <span class="out">→ final_report.html</span><br>
+          <span class="out">→ final_report.json</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">EnhancedDashboard</div>
+        <div class="block-detail">
+          Live terminal Rich UI<br>
+          Phase progress bars<br>
+          Finding counters<br>
+          Chain status display<br>
+          <span class="out">→ STDOUT (live)</span>
+        </div>
+      </div>
+      <div class="inline-arrow">→</div>
+      <div class="block">
+        <div class="block-title">Output Summary</div>
+        <div class="block-detail">
+          CRITICAL / HIGH / MEDIUM vulns<br>
+          Attack chains found<br>
+          Exploitation status<br>
+          Manual playbook<br>
+          Remediation recommendations<br>
+          <span class="out">→ results/&lt;target&gt;_&lt;ts&gt;/</span>
+        </div>
+      </div>
+    </div>
+    <div class="file-row">
+      <div class="file-pill">final_report.json</div>
+      <div class="file-pill">final_report.md</div>
+      <div class="file-pill">manual_attack_playbook.json</div>
+      <div class="file-pill">manual_validation_queue.json</div>
+      <div class="file-pill">state.json</div>
+    </div>
+  </div>
+
+  <!-- ── GROQ CALL SUMMARY ── -->
+  <div style="margin-top:28px; width:100%">
+    <div class="divider"><div class="divider-line"></div><div class="divider-text">ALL GROQ/LLM CALLS — WHAT FLOWS IN AND OUT</div><div class="divider-line"></div></div>
+  </div>
+
+  <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); gap:10px; width:100%; margin-top:12px">
+    <div class="groq-box">
+      <div class="groq-title">① EndpointClassifier (Phase ③b)</div>
+      <div class="groq-in">IN: endpoint list + tech stack</div>
+      <div class="groq-out">OUT: attack surface classification per endpoint (auth/upload/admin/api/…)</div>
+    </div>
+    <div class="groq-box">
+      <div class="groq-title">② PayloadGenerator (Phase ④)</div>
+      <div class="groq-in">IN: endpoint type, method, params, tech context</div>
+      <div class="groq-out">OUT: custom payloads (SQLi/XSS/SSTI/etc) targeted to endpoint</div>
+    </div>
+    <div class="groq-box">
+      <div class="groq-title">③ PayloadMutator (Phase ④)</div>
+      <div class="groq-in">IN: baseline payloads + WAF fingerprint</div>
+      <div class="groq-out">OUT: obfuscated/mutated payload variants for WAF evasion</div>
+    </div>
+    <div class="groq-box">
+      <div class="groq-title">④ reason_chain_from_vulns (Phase ⑤)</div>
+      <div class="groq-in">IN: confirmed_vulns[], tech_stack[], wp_users[], target — max_tokens=2000</div>
+      <div class="groq-out">OUT: JSON chains[] with steps[{produces[], consumes[], depends_on[]}], preconditions_missing[]</div>
+    </div>
+    <div class="groq-box">
+      <div class="groq-title">⑤ ExploitSelector (Phase ⑤)</div>
+      <div class="groq-in">IN: all chains + vulns + tech + signals + primitives</div>
+      <div class="groq-out">OUT: SelectedStrategy {chain_name, confidence, reasoning}</div>
+    </div>
+    <div class="groq-box">
+      <div class="groq-title">⑥ GapAnalyzer (Phase ⑤b, ×4 iterations)</div>
+      <div class="groq-in">IN: missing conditions, tech stack, fulfilled conditions, step_produced_data (creds/tokens)</div>
+      <div class="groq-out">OUT: {condition, module, rationale, target_scope} — dispatches probe module</div>
+    </div>
+    <div class="groq-box">
+      <div class="groq-title">⑦ LLMAnalyzer (Phase ⑥b)</div>
+      <div class="groq-in">IN: all vulns, findings, endpoints, chains, tech stack</div>
+      <div class="groq-out">OUT: risk score, attack path suggestions, remediation advice</div>
+    </div>
+  </div>
+
+  <!-- ── KNOWN ISSUES SECTION ── -->
+  <div style="margin-top:28px; width:100%">
+    <div class="divider"><div class="divider-line"></div><div class="divider-text">KNOWN ARCHITECTURAL PROBLEMS (technical debt)</div><div class="divider-line"></div></div>
+  </div>
+  <div style="display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:10px; width:100%; margin-top:12px; margin-bottom:20px">
+    <div style="background:#2d0d0d; border:1px solid #6e2020; border-radius:6px; padding:10px; font-size:11px;">
+      <div style="color:#ff7b72; font-weight:700; margin-bottom:4px">⚠ Hardcoded fallback chains</div>
+      <div style="color:#8b949e">_run_chain_planning_phase() has a hardcoded xmlrpc_bruteforce chain injected when Groq returns 0 chains. This bypasses all data-flow reasoning.</div>
+    </div>
+    <div style="background:#2d0d0d; border:1px solid #6e2020; border-radius:6px; padding:10px; font-size:11px;">
+      <div style="color:#ff7b72; font-weight:700; margin-bottom:4px">⚠ Scanner↔findings sync gap</div>
+      <div style="color:#8b949e">dalfox results must be manually synced into xss_findings.json. sqlmap results must be manually synced into boolean_sqli_findings.json. Pipeline writes to different files.</div>
+    </div>
+    <div style="background:#2d0d0d; border:1px solid #6e2020; border-radius:6px; padding:10px; font-size:11px;">
+      <div style="color:#ff7b72; font-weight:700; margin-bottom:4px">⚠ GapAnalyzer tool calls are advisory only</div>
+      <div style="color:#8b949e">Groq recommends a module, but the actual tool call is hardcoded in gap_analyzer.py dispatch map. Groq cannot call arbitrary tools — it only selects from a fixed list of 8 modules.</div>
+    </div>
+    <div style="background:#2d0d0d; border:1px solid #6e2020; border-radius:6px; padding:10px; font-size:11px;">
+      <div style="color:#ff7b72; font-weight:700; margin-bottom:4px">⚠ 60+ phases in agent.py</div>
+      <div style="color:#8b949e">Many phases (_run_zero_day_phase, _run_container_escape_phase, _run_log_evasion_phase, etc.) are stubs or near-stubs. Creates noise without value in most scans.</div>
+    </div>
+    <div style="background:#2d0d0d; border:1px solid #6e2020; border-radius:6px; padding:10px; font-size:11px;">
+      <div style="color:#ff7b72; font-weight:700; margin-bottom:4px">⚠ combine_chains() never called</div>
+      <div style="color:#8b949e">ChainPlanner.combine_chains() exists but is not wired into the main flow. Groq-generated chains are used directly without being merged/combined.</div>
+    </div>
+    <div style="background:#2d0d0d; border:1px solid #6e2020; border-radius:6px; padding:10px; font-size:11px;">
+      <div style="color:#ff7b72; font-weight:700; margin-bottom:4px">⚠ max_tokens=500 in all Groq calls</div>
+      <div style="color:#8b949e">Fixed — reason_chain_from_vulns now passes max_tokens=2000. But other Groq calls (PayloadGenerator, EndpointClassifier, LLMAnalyzer) still default to 500, which may truncate complex responses.</div>
+    </div>
+  </div>
+
+</div><!-- end .pipeline -->
+
+</body>
+</html>
