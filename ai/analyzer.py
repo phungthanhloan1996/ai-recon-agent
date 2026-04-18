@@ -1071,7 +1071,7 @@ Format the report clearly with sections and subsections."""
 
         # Try to use AI client if available (injected from agent.py)
         if hasattr(self.ai_client, "generate"):
-            response = self.ai_client.generate(prompt)
+            response = self.ai_client.generate(prompt, max_tokens=2000)
             if response:
                 return response
 
@@ -1110,7 +1110,8 @@ Identify potential vulnerabilities based on response patterns, error messages, a
             response = self.ai_client.generate(
                 prompt=prompt,
                 system=_RESPONSE_ANALYZER_SYSTEM,
-                temperature=0.2
+                temperature=0.2,
+                max_tokens=2000,
             )
 
             try:

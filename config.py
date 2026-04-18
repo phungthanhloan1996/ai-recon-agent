@@ -187,3 +187,13 @@ CHAIN_OPTIMIZATION_STRATEGY = os.getenv('CHAIN_OPTIMIZATION_STRATEGY', 'balanced
 # ═══════════════════════════════════════════════════════════════════
 LLM_ANALYZER_ENABLED = os.getenv('LLM_ANALYZER_ENABLED', 'true').lower() == 'true'
 LLM_FALLBACK_RULE_BASED = os.getenv('LLM_FALLBACK_RULE_BASED', 'true').lower() == 'true'
+
+# ═══════════════════════════════════════════════════════════════════
+# Advanced Modules Gate
+# Set to true to enable: zero_day, container_escape, log_evasion,
+# persistence, lateral_movement, ssl_pinning, mfa_bypass, oauth_saml
+# ═══════════════════════════════════════════════════════════════════
+ENABLE_ADVANCED_MODULES = os.getenv('ENABLE_ADVANCED_MODULES', 'false').lower() == 'true'
+
+# Groq-driven exploit decision — replaces fixed phase 10.5 counter logic
+GROQ_EXPLOIT_DECISION_ENABLED = os.getenv('GROQ_EXPLOIT_DECISION_ENABLED', 'true').lower() == 'true'

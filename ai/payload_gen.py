@@ -267,7 +267,7 @@ class PayloadGenerator:
                     "bypass_mode": self.waf_context.get("bypass_mode", "NONE"),
                     "failed_patterns": self.waf_context.get("failed_patterns", [])[:8],
                 })
-                raw = self._groq_client.generate(user_msg, system=_PAYLOAD_GEN_SYSTEM, temperature=0.4)
+                raw = self._groq_client.generate(user_msg, system=_PAYLOAD_GEN_SYSTEM, temperature=0.4, max_tokens=2000)
                 raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
                 result = json.loads(raw)
                 payloads: List[str] = []
@@ -329,7 +329,7 @@ class PayloadGenerator:
                             {"role": "system", "content": _PAYLOAD_GEN_SYSTEM},
                             {"role": "user", "content": user_msg}
                         ],
-                        "max_tokens": 800,
+                        "max_tokens": 2000,
                         "temperature": 0.4
                     }).encode("utf-8")
                     req = urllib.request.Request(

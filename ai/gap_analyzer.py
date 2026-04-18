@@ -442,7 +442,7 @@ class GapAnalyzer:
         )
 
         prompt = "\n".join(parts)
-        raw = self.groq_client.generate(prompt, system=_NEXT_STEP_SYSTEM, temperature=0.15)
+        raw = self.groq_client.generate(prompt, system=_NEXT_STEP_SYSTEM, temperature=0.15, max_tokens=2000)
         return self._parse_single_gap(raw)
 
     def _parse_single_gap(self, raw: str) -> Optional[Dict]:

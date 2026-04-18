@@ -49,15 +49,30 @@ class DalfoxRunner:
         except json.JSONDecodeError:
             pass
 
+        # Parse dalfox [POC] format: [POC][V/R][METHOD][context] URL
+        poc_pattern = re.compile(r'^\[POC\]\[([VR])\]\[(\w+)\]\[([^\]]+)\]\s+(.+)$')
         for line in content.splitlines():
             line = line.strip()
             if not line:
                 continue
-            if "vulnerab" in line.lower() or "xss" in line.lower() or "payload" in line.lower():
+            poc_match = poc_pattern.match(line)
+            if poc_match:
+                verified_flag, method, context, payload_url = poc_match.groups()
                 findings.append({
                     "type": "xss",
                     "evidence": line[:500],
                     "severity": "HIGH",
+                    "verified": verified_flag == "V",
+                    "method": method,
+                    "context": context,
+                    "payload_url": payload_url.strip(),
+                })
+            elif "vulnerab" in line.lower() or "xss" in line.lower() or "payload" in line.lower():
+                findings.append({
+                    "type": "xss",
+                    "evidence": line[:500],
+                    "severity": "HIGH",
+                    "verified": False,
                 })
         return findings
 

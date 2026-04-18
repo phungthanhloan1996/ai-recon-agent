@@ -282,7 +282,7 @@
 <body>
 
 <h1>AI Recon Agent — Full Pipeline Flow</h1>
-<div class="subtitle">agent.py → phase execution order · tools called · Groq LLM integration · state data flow</div>
+<div class="subtitle">agent.py → phase execution order · tools called · Groq LLM integration · state data flow &nbsp;·&nbsp; <span style="color:#7ee787">v1.24 — dalfox [POC] parse fix · verified flag fix · xss/sqli merge fix</span></div>
 
 <!-- Legend -->
 <div class="legend">
@@ -548,23 +548,31 @@
           <span class="ai">Groq → PayloadMutator</span><br>
           <span class="ai">&nbsp;→ WAF-evading variants</span><br>
           <span class="tool">nuclei</span> → template scan<br>
-          <span class="tool">sqlmap</span> → SQLi detection<br>
-          <span class="tool">dalfox</span> → XSS detection<br>
-          <span class="out">→ state.confirmed_vulns[]</span><br>
-          <span class="out">→ scan_results.json</span>
+          <span class="tool">sqlmap</span> → SQLi detect<br>
+          &nbsp;&nbsp;vulnerable=True → <span class="out">verified=True</span><br>
+          &nbsp;&nbsp;→ <span class="out">boolean_sqli_findings.json</span><br>
+          <span class="tool">dalfox</span> → XSS detect<br>
+          &nbsp;&nbsp;parse <code>[POC][V]</code> lines<br>
+          &nbsp;&nbsp;→ <span class="out">verified=True</span> (confidence 0.95)<br>
+          &nbsp;&nbsp;→ <span class="out">xss_findings.json</span><br>
+          <span class="out">→ state.confirmed_vulns[]</span>
         </div>
       </div>
       <div class="inline-arrow">→</div>
       <div class="block">
-        <div class="block-title">Tier-1 Detectors</div>
+        <div class="block-title">Tier-1 Detectors <span style="font-size:9px;color:#484f58">(merge, not overwrite)</span></div>
         <div class="block-detail">
           Always-loaded modules:<br>
           waf_bypass_engine<br>
-          boolean_sqli_detector<br>
-          xss_detector<br>
+          <b>_run_boolean_sqli_phase()</b><br>
+          &nbsp;&nbsp;custom detector + <span class="in">merge</span><br>
+          &nbsp;&nbsp;existing sqlmap findings<br>
+          <b>_run_xss_phase()</b><br>
+          &nbsp;&nbsp;custom detector + <span class="in">merge</span><br>
+          &nbsp;&nbsp;existing dalfox findings<br>
           idor_detector<br>
-          <span class="out">→ xss_findings.json</span><br>
-          <span class="out">→ boolean_sqli_findings.json</span><br>
+          <span class="out">→ xss_findings.json (merged)</span><br>
+          <span class="out">→ boolean_sqli_findings.json (merged)</span><br>
           <span class="out">→ idor_findings.json</span>
         </div>
       </div>
@@ -584,10 +592,19 @@
         </div>
       </div>
     </div>
+    <!-- verified flag data flow note -->
+    <div style="margin-top:8px; background:#1a1200; border:1px solid #4d3800; border-radius:6px; padding:6px 12px; font-size:10px; color:#d29922;">
+      <b>verified flag flow (after fix):</b>
+      sqlmap vulnerable=True → <code>_promote_sqlmap_result()</code> → <code>verified=True</code> in confirmed_vulns[] &nbsp;|&nbsp;
+      dalfox <code>[POC][V]</code> → <code>_parse_findings()</code> → <code>verified=True</code>, confidence=0.95 &nbsp;|&nbsp;
+      <code>_run_xss/sqli_phase()</code> <b>merges</b> custom detector results with existing tool findings (no overwrite)
+    </div>
     <div class="file-row">
       <div class="file-pill">scan_results.json</div>
       <div class="file-pill">xss_findings.json</div>
       <div class="file-pill">boolean_sqli_findings.json</div>
+      <div class="file-pill">dalfox_results/</div>
+      <div class="file-pill">sqlmap_results/</div>
       <div class="file-pill">idor_findings.json</div>
     </div>
   </div>
@@ -1027,9 +1044,16 @@
       <div style="color:#ff7b72; font-weight:700; margin-bottom:4px">⚠ Hardcoded fallback chains</div>
       <div style="color:#8b949e">_run_chain_planning_phase() has a hardcoded xmlrpc_bruteforce chain injected when Groq returns 0 chains. This bypasses all data-flow reasoning.</div>
     </div>
-    <div style="background:#2d0d0d; border:1px solid #6e2020; border-radius:6px; padding:10px; font-size:11px;">
-      <div style="color:#ff7b72; font-weight:700; margin-bottom:4px">⚠ Scanner↔findings sync gap</div>
-      <div style="color:#8b949e">dalfox results must be manually synced into xss_findings.json. sqlmap results must be manually synced into boolean_sqli_findings.json. Pipeline writes to different files.</div>
+    <div style="background:#0d2210; border:1px solid #2e6a2e; border-radius:6px; padding:10px; font-size:11px;">
+      <div style="color:#7ee787; font-weight:700; margin-bottom:4px">✓ FIXED — Scanner↔findings sync</div>
+      <div style="color:#8b949e">
+        <b>dalfox_runner._parse_findings()</b>: now recognises <code>[POC][V/R][METHOD][context]</code> format.
+        <code>[V]</code> = verified=True, confidence=0.95. <code>[R]</code> = unverified, confidence=0.8.<br>
+        <b>_promote_dalfox_result()</b>: sets <code>verified=has_verified_poc</code> in the vuln object.<br>
+        <b>_promote_sqlmap_result()</b>: sets <code>verified=True</code> unconditionally when vulnerable=True.<br>
+        <b>_run_xss_phase() / _run_boolean_sqli_phase()</b>: now <b>merges</b> custom detector results with
+        existing dalfox/sqlmap findings instead of overwriting them.
+      </div>
     </div>
     <div style="background:#2d0d0d; border:1px solid #6e2020; border-radius:6px; padding:10px; font-size:11px;">
       <div style="color:#ff7b72; font-weight:700; margin-bottom:4px">⚠ GapAnalyzer tool calls are advisory only</div>

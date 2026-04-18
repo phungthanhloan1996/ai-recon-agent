@@ -169,7 +169,8 @@ Provide classification in JSON format with endpoint_type, technologies, attack_s
             response = self.groq.generate(
                 prompt=prompt,
                 system=_ENDPOINT_CLASSIFIER_SYSTEM,
-                temperature=0.2
+                temperature=0.2,
+                max_tokens=2000,
             )
             
             # Parse JSON response

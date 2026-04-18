@@ -78,6 +78,7 @@ from ai.payload_gen import PayloadGenerator
 from ai.payload_mutation import PayloadMutator
 from ai.analyzer import AIAnalyzer
 from ai.chain_planner import ChainPlanner, AIPoweredChainPlanner
+from core.groq_context import GroqScanContext
 
 # ─── NEW: Advanced Post-Exploitation Modules ────────────────────────────────
 from modules.mfa_bypass import MFABypass, TOTPCracker
@@ -2168,6 +2169,7 @@ class ReconAgent:
         self.chain_planner = ChainPlanner(
             self.state, learning_engine=self.learning_engine,
             groq_client=self.groq_client,
+            groq_context=None,  # set after groq_context is initialized below
         )
         self.ai_chain_planner = (
             AIPoweredChainPlanner(self.groq_client) if self.groq_client else None
@@ -2381,6 +2383,13 @@ class ReconAgent:
             )
         else:
             self.llm_analyzer = None
+
+        # ─── Groq Shared Context (accumulated across all phases) ────────────────
+        self.groq_context = GroqScanContext.load(output_dir)
+        if not self.groq_context.target:
+            self.groq_context.target = self.target
+        # Wire context into chain planner now that groq_context exists
+        self.chain_planner.groq_context = self.groq_context
 
         if self.resumed_from_state:
             previous_phase = self.state.get("current_phase", "unknown")
@@ -3081,71 +3090,82 @@ class ReconAgent:
                     self._run_subdomain_takeover_phase()
 
                 # ─── POST-EXPLOITATION PHASES (24-32) ────────────────────────────────────
+                # These phases are gated by ENABLE_ADVANCED_MODULES (default: false)
 
-                # Phase 24: MFA Bypass & Circumvention
-                if not self._should_skip_phase("mfa_bypass"):
-                    self.current_phase = "mfa_bypass"
-                    self.phase_detail = "bypass MFA/2FA mechanisms"
-                    self.phase_tool = "mfa-bypass-engine"
-                    self.phase_status = "running"
-                    self._update_display()
-                    self._run_mfa_bypass_phase()
+                if config.ENABLE_ADVANCED_MODULES:
+                    # Phase 24: MFA Bypass & Circumvention
+                    if not self._should_skip_phase("mfa_bypass"):
+                        self.current_phase = "mfa_bypass"
+                        self.phase_detail = "bypass MFA/2FA mechanisms"
+                        self.phase_tool = "mfa-bypass-engine"
+                        self.phase_status = "running"
+                        self._update_display()
+                        self._run_mfa_bypass_phase()
 
-                # Phase 25: OAuth/SAML Exploitation
-                if not self._should_skip_phase("oauth_saml"):
-                    self.current_phase = "oauth_saml"
-                    self.phase_detail = "exploit OAuth/SAML flows"
-                    self.phase_tool = "oauth-saml-exploiter"
-                    self.phase_status = "running"
-                    self._update_display()
-                    self._run_oauth_saml_phase()
+                    # Phase 25: OAuth/SAML Exploitation
+                    if not self._should_skip_phase("oauth_saml"):
+                        self.current_phase = "oauth_saml"
+                        self.phase_detail = "exploit OAuth/SAML flows"
+                        self.phase_tool = "oauth-saml-exploiter"
+                        self.phase_status = "running"
+                        self._update_display()
+                        self._run_oauth_saml_phase()
 
-                # Phase 26: Persistence & Backdoor Deployment
-                if not self._should_skip_phase("persistence"):
-                    self.current_phase = "persistence"
-                    self.phase_detail = "establish backdoors"
-                    self.phase_tool = "persistence-engine"
-                    self.phase_status = "running"
-                    self._update_display()
-                    self._run_persistence_phase()
+                    # Phase 26: Persistence & Backdoor Deployment
+                    if not self._should_skip_phase("persistence"):
+                        self.current_phase = "persistence"
+                        self.phase_detail = "establish backdoors"
+                        self.phase_tool = "persistence-engine"
+                        self.phase_status = "running"
+                        self._update_display()
+                        self._run_persistence_phase()
 
-                # Phase 27: Lateral Movement
-                if not self._should_skip_phase("lateral_movement"):
-                    self.current_phase = "lateral_movement"
-                    self.phase_detail = "move across network"
-                    self.phase_tool = "lateral-movement-engine"
-                    self.phase_status = "running"
-                    self._update_display()
-                    self._run_lateral_movement_phase()
+                    # Phase 27: Lateral Movement
+                    if not self._should_skip_phase("lateral_movement"):
+                        self.current_phase = "lateral_movement"
+                        self.phase_detail = "move across network"
+                        self.phase_tool = "lateral-movement-engine"
+                        self.phase_status = "running"
+                        self._update_display()
+                        self._run_lateral_movement_phase()
 
-                # Phase 28: SSL/TLS Pinning Bypass
-                if not self._should_skip_phase("ssl_pinning"):
-                    self.current_phase = "ssl_pinning"
-                    self.phase_detail = "bypass certificate pinning"
-                    self.phase_tool = "ssl-bypass-engine"
-                    self.phase_status = "running"
-                    self._update_display()
-                    self._run_ssl_pinning_phase()
+                    # Phase 28: SSL/TLS Pinning Bypass
+                    if not self._should_skip_phase("ssl_pinning"):
+                        self.current_phase = "ssl_pinning"
+                        self.phase_detail = "bypass certificate pinning"
+                        self.phase_tool = "ssl-bypass-engine"
+                        self.phase_status = "running"
+                        self._update_display()
+                        self._run_ssl_pinning_phase()
 
-                # Phase 29: Zero-Day Detection
-                if not self._should_skip_phase("zero_day"):
-                    self.current_phase = "zero_day"
-                    self.phase_detail = "detect zero-day vulns"
-                    self.phase_tool = "zero-day-detector"
-                    self.phase_status = "running"
-                    self._update_display()
-                    self._run_zero_day_phase()
+                    # Phase 29: Zero-Day Detection
+                    if not self._should_skip_phase("zero_day"):
+                        self.current_phase = "zero_day"
+                        self.phase_detail = "detect zero-day vulns"
+                        self.phase_tool = "zero-day-detector"
+                        self.phase_status = "running"
+                        self._update_display()
+                        self._run_zero_day_phase()
 
-                # Phase 30: Container/Cloud Escape
-                if not self._should_skip_phase("container_escape"):
-                    self.current_phase = "container_escape"
-                    self.phase_detail = "escape container/cloud"
-                    self.phase_tool = "container-escape-engine"
-                    self.phase_status = "running"
-                    self._update_display()
-                    self._run_container_escape_phase()
+                    # Phase 30: Container/Cloud Escape
+                    if not self._should_skip_phase("container_escape"):
+                        self.current_phase = "container_escape"
+                        self.phase_detail = "escape container/cloud"
+                        self.phase_tool = "container-escape-engine"
+                        self.phase_status = "running"
+                        self._update_display()
+                        self._run_container_escape_phase()
 
-                # Phase 31: Custom Exploit Framework
+                    # Phase 32: Log Evasion & Covering Tracks
+                    if not self._should_skip_phase("log_evasion"):
+                        self.current_phase = "log_evasion"
+                        self.phase_detail = "erase forensic evidence"
+                        self.phase_tool = "log-evasion-engine"
+                        self.phase_status = "running"
+                        self._update_display()
+                        self._run_log_evasion_phase()
+
+                # Phase 31: Custom Exploit Framework (not gated — has its own stub check)
                 if not self._should_skip_phase("custom_exploit"):
                     self.current_phase = "custom_exploit"
                     self.phase_detail = "deploy custom exploits"
@@ -3153,15 +3173,6 @@ class ReconAgent:
                     self.phase_status = "running"
                     self._update_display()
                     self._run_custom_exploit_phase()
-
-                # Phase 32: Log Evasion & Covering Tracks
-                if not self._should_skip_phase("log_evasion"):
-                    self.current_phase = "log_evasion"
-                    self.phase_detail = "erase forensic evidence"
-                    self.phase_tool = "log-evasion-engine"
-                    self.phase_status = "running"
-                    self._update_display()
-                    self._run_log_evasion_phase()
 
                 # Phase 33: Learning
                 if "learn" not in self.completed_phases:
@@ -3685,6 +3696,33 @@ class ReconAgent:
         scan_meta = self.state.get("scan_metadata", {}) or {}
         scan_meta["completed_phases"] = sorted(self.completed_phases)
         self.state.update(scan_metadata=scan_meta)
+        # Sync accumulated state into GroqScanContext and persist
+        self._update_groq_context(phase)
+
+    def _update_groq_context(self, phase: str) -> None:
+        """Append current state snapshot to GroqScanContext and save to disk."""
+        try:
+            snapshot = {
+                "live_hosts": self.state.get("live_hosts", []) or [],
+                "technologies": self.state.get("technologies", {}) or {},
+                "tech_stack": self.state.get("tech_stack", []) or [],
+                "confirmed_vulnerabilities": self.state.get("confirmed_vulnerabilities", []) or [],
+                "vulnerabilities": self.state.get("vulnerabilities", []) or [],
+                "endpoints": self.state.get("endpoints", []) or [],
+                "prioritized_endpoints": self.state.get("prioritized_endpoints", []) or [],
+                "auth_surfaces": self.state.get("auth_surfaces", []) or [],
+                "open_ports": self.state.get("open_ports", []) or [],
+                "wp_version": self.state.get("wp_version", ""),
+                "wp_users": self.state.get("wp_users", []) or [],
+                "wp_plugins": self.state.get("wp_plugins", []) or [],
+                "wp_vulnerabilities": self.state.get("wp_vulnerabilities", []) or [],
+                "js_secrets": self.state.get("js_secrets", []) or [],
+                "failed_attempts": self.state.get("failed_attempts", []) or [],
+            }
+            self.groq_context.append_phase(phase, snapshot)
+            self.groq_context.save(self.output_dir)
+        except Exception as e:
+            self.logger.debug(f"[GROQ_CTX] Context update failed: {e}")
 
     def _run_recon_phase(self):
         before = len(self.state.get("subdomains", []))
@@ -7116,39 +7154,6 @@ class ReconAgent:
         signals = plan.get("signals", []) or []
         primitives = plan.get("primitives", []) or []
         terminal_reason = plan.get("terminal_reason")
-        # Nếu không có chain nhưng có primitive xmlrpc_bruteforce, tự tạo chain
-
-        if not chains and any(
-            p.get("type") == "xmlrpc_bruteforce_primitive" for p in primitives
-        ):
-            # Tạo chain brute-force từ xmlrpc và user enumeration
-            brute_chain = {
-                "chain_id": "xmlrpc_bruteforce",
-                "name": "XML-RPC Brute Force using enumerated users",
-                "goal": "Gain WordPress access via XML-RPC brute force",
-                "steps": [
-                    {
-                        "name": "bruteforce",
-                        "action": "xmlrpc_bruteforce",
-                        "target": "xmlrpc.php",
-                        "tool": "wp_scanner",
-                    },
-                    {
-                        "name": "login",
-                        "action": "authenticate",
-                        "target": "wp-login.php",
-                    },
-                ],
-                "confidence": 0.7,
-                "risk_level": "HIGH",
-                "force_chain": True,
-                "primitives": [
-                    "xmlrpc_bruteforce_primitive",
-                    "username_list_primitive",
-                ],
-            }
-            chains = [brute_chain]
-            terminal_reason = None  # reset terminal để không dừng
 
         manual_playbook = []
 
@@ -8175,11 +8180,17 @@ class ReconAgent:
                             "🔍", "Boolean SQLi", url, f"{vuln_count} found"
                         )
 
-            self.state.update(boolean_sqli_findings=sqli_results)
+            # Merge with existing sqlmap findings instead of overwriting
+            existing_sqli = self.state.get("boolean_sqli_findings") or []
+            if isinstance(existing_sqli, dict):
+                existing_sqli = existing_sqli.get("vulnerabilities", [])
+            merged_sqli = list(existing_sqli) + sqli_results
+            self.state.update(boolean_sqli_findings=merged_sqli)
             vuln_count = sum(len(r.get("vulnerabilities", [])) for r in sqli_results)
-            self.last_action = f"bool_sqli: {vuln_count} vulnerabilities found"
+            total_sqli = len(existing_sqli) + vuln_count
+            self.last_action = f"bool_sqli: {total_sqli} vulnerabilities found"
             self.phase_detail = (
-                f"[BOOL_SQLI] Complete - {vuln_count} blind SQLi detected"
+                f"[BOOL_SQLI] Complete - {total_sqli} blind SQLi detected"
             )
             self._update_display()
 
@@ -8257,10 +8268,16 @@ class ReconAgent:
                             "✖️", "XSS", url, f"{vuln_count} ({', '.join(types)})"
                         )
 
-            self.state.update(xss_findings=xss_results)
+            # Merge with existing dalfox findings instead of overwriting
+            existing_xss = self.state.get("xss_findings") or []
+            if isinstance(existing_xss, dict):
+                existing_xss = existing_xss.get("vulnerabilities", [])
+            merged_xss = list(existing_xss) + xss_results
+            self.state.update(xss_findings=merged_xss)
             vuln_count = sum(len(r.get("vulnerabilities", [])) for r in xss_results)
-            self.last_action = f"xss: {vuln_count} vulnerabilities found"
-            self.phase_detail = f"[XSS] Complete - {vuln_count} XSS vectors detected"
+            total_xss = len(existing_xss) + vuln_count
+            self.last_action = f"xss: {total_xss} vulnerabilities found"
+            self.phase_detail = f"[XSS] Complete - {total_xss} XSS vectors detected"
             self._update_display()
 
         except Exception as e:
@@ -11563,10 +11580,8 @@ Exploitability estimation:
         self._mark_phase_done("priv_pivot")
 
     def _run_exploit_selection_phase(self):
-        """Phase 10.5: Automatic Exploit Selection (recon-driven deterministic)."""
-        self.phase_detail = (
-            "[SELECT] Selecting best exploitation strategy (recon-driven)..."
-        )
+        """Phase 10.5: Groq-driven exploit decision (exploit|scan_more|stop)."""
+        self.phase_detail = "[SELECT] Groq reasoning on exploit strategy..."
         self._update_display()
 
         try:
@@ -11587,6 +11602,67 @@ Exploitability estimation:
             signals = scan_meta.get("recon_signals", []) or []
             primitives = scan_meta.get("recon_primitives", []) or []
             chain_terminal_reason = scan_meta.get("chain_terminal_reason")
+
+            # ── Groq-driven decision (when enabled and client available) ────────
+            if config.GROQ_EXPLOIT_DECISION_ENABLED and self.groq_client and chains:
+                groq_decision = self._ask_groq_exploit_decision(chains, scan_meta)
+                if groq_decision:
+                    action = groq_decision.get("action", "")
+                    chain_name = groq_decision.get("chain_name", "")
+                    rationale = groq_decision.get("rationale", "")
+                    missing = groq_decision.get("missing_before_exploit", [])
+
+                    self.logger.info(f"[GROQ_DECISION] action={action} chain={chain_name}")
+                    scan_meta["groq_decision"] = groq_decision
+                    self.state.update(scan_metadata=scan_meta)
+
+                    if action == "stop":
+                        self.phase_detail = f"[SELECT] Groq: STOP — {rationale[:80]}"
+                        self._update_display()
+                        self._set_terminal_state(rationale or "groq_stop", stop_reason="groq_stop")
+                        self.phase_status = "done"
+                        self._mark_phase_done("exploit_select")
+                        return
+
+                    if action == "scan_more":
+                        self.phase_detail = f"[SELECT] Groq: scan_more — missing: {missing}"
+                        self._update_display()
+                        scan_meta["groq_scan_more_modules"] = missing
+                        scan_meta["selected_chain"] = "scan_more"
+                        scan_meta["selected_reason"] = rationale
+                        scan_meta["planner_mode"] = "groq_scan_more"
+                        self.state.update(scan_metadata=scan_meta)
+                        self.state.update(selected_exploit_strategy={"action": "scan_more", "modules": missing})
+                        self.phase_status = "done"
+                        self._mark_phase_done("exploit_select")
+                        return
+
+                    if action == "exploit" and chain_name:
+                        # Find named chain in chains list
+                        selected_chain = next(
+                            (c for c in chains if isinstance(c, dict) and c.get("name") == chain_name),
+                            chains[0] if chains else None,
+                        )
+                        if selected_chain:
+                            self.phase_detail = f"[SELECT] Groq: EXPLOIT {chain_name[:50]}"
+                            self._update_display()
+                            scan_meta["selected_chain"] = chain_name
+                            scan_meta["selected_reason"] = rationale
+                            scan_meta["planner_mode"] = "groq_exploit"
+                            scan_meta["forced_chain"] = True
+                            scan_meta.pop("selector_terminal_reason", None)
+                            self.state.update(scan_metadata=scan_meta)
+                            self.state.update(selected_exploit_strategy=selected_chain)
+                            if self.batch_display:
+                                self.batch_display._add_to_ai_feed(
+                                    "⚔️ Groq Strategy",
+                                    f"Exploit: {chain_name}",
+                                    self.target,
+                                )
+                            self.phase_status = "done"
+                            self._mark_phase_done("exploit_select")
+                            return
+            # ── Fallback: deterministic rule-based selector ──────────────────
 
             if chains and signals and primitives:
                 self.logger.info(
@@ -11753,6 +11829,68 @@ Exploitability estimation:
 
         self.phase_status = "done"
         self._mark_phase_done("exploit_select")
+
+    def _ask_groq_exploit_decision(self, chains: list, scan_meta: dict) -> Optional[dict]:
+        """Ask Groq to decide: exploit|scan_more|stop given full accumulated context."""
+        if not self.groq_client:
+            return None
+        try:
+            ctx_summary = self.groq_context.to_summary()
+            chains_summary = json.dumps(
+                [
+                    {
+                        "name": c.get("name", ""),
+                        "goal": c.get("goal", ""),
+                        "risk_level": c.get("risk_level", ""),
+                        "confidence": c.get("confidence", 0),
+                        "preconditions_met": c.get("preconditions_met", []),
+                        "preconditions_missing": c.get("preconditions_missing", []),
+                        "steps_count": len(c.get("steps", [])),
+                    }
+                    for c in chains[:10]
+                    if isinstance(c, dict)
+                ],
+                indent=2,
+            )
+            prompt = f"""You are a senior penetration tester deciding the next action for a running scan.
+
+ACCUMULATED SCAN CONTEXT:
+{ctx_summary}
+
+AVAILABLE EXPLOIT CHAINS (with preconditions):
+{chains_summary}
+
+TASK: Based on everything above, decide the optimal next action.
+
+OUTPUT (JSON only, no markdown):
+{{
+  "action": "exploit" | "scan_more" | "stop",
+  "chain_name": "<exact chain name to exploit, or empty string>",
+  "rationale": "<1 sentence explaining why>",
+  "missing_before_exploit": ["<module or data needed if action=scan_more>"]
+}}
+
+RULES:
+- Use "exploit" only if all preconditions of the chosen chain are met and confidence > 0.6
+- Use "scan_more" with specific module names if key preconditions are missing
+- Use "stop" only if no viable paths exist and evidence is exhausted
+- Return ONLY the JSON object, nothing else"""
+
+            raw = self.groq_client.generate(
+                prompt=prompt,
+                system="You are an expert penetration tester. Output ONLY valid JSON, no markdown.",
+                temperature=0.1,
+                max_tokens=2000,
+            )
+            # Parse response
+            raw = raw.strip()
+            raw = re.sub(r"```(?:json)?", "", raw, flags=re.IGNORECASE).strip("`").strip()
+            m = re.search(r"\{[\s\S]*\}", raw)
+            if m:
+                return json.loads(m.group(0))
+        except Exception as e:
+            self.logger.debug(f"[GROQ_DECISION] Failed: {e}")
+        return None
 
     def _generate_final_report(self):
         report_gen = ReportGenerator(self.state, self.output_dir)

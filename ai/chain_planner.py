@@ -45,6 +45,12 @@ EACH CHAIN SHOULD INCLUDE:
 
 4. expected_impact - RCE / admin access / data exfiltration / credential theft
 
+5. preconditions_met - list of conditions already confirmed in current scan context
+
+6. preconditions_missing - list of conditions still needed before this chain can execute
+
+7. next_recommended_scan - specific module names to run to fill gaps (e.g. "jwt_analyzer", "boolean_sqli")
+
 REMEMBER:
 - Think like a penetration tester, not a vulnerability scanner
 - Focus on BUSINESS IMPACT
@@ -85,7 +91,9 @@ OUTPUT FORMAT (JSON array of chains):
         "depends_on": ["step name whose produce this step consumes"]
       }
     ],
-    "preconditions_missing": ["any condition not yet confirmed that is needed"]
+    "preconditions_met": ["conditions already confirmed in the scan context"],
+    "preconditions_missing": ["any condition not yet confirmed that is needed"],
+    "next_recommended_scan": ["specific module names to run if preconditions are missing, e.g. 'boolean_sqli', 'jwt_analyzer'"]
   }
 ]
 
@@ -94,7 +102,7 @@ RULES:
 - A step's 'consumes' MUST be satisfied by a previous step's 'produces' OR already confirmed
 - Do NOT invent vulnerabilities — only use what is in the confirmed list
 - Prefer chains that require ZERO new conditions (all pieces already found)
-- If a chain needs one more piece, list it in 'preconditions_missing'
+- If a chain needs one more piece, list it in 'preconditions_missing' and fill 'next_recommended_scan'
 - Return ONLY valid JSON, no markdown."""
 
 def repair_json(json_str: str) -> str:
@@ -159,8 +167,9 @@ class ChainPlanner:
     - Falls back to rule-based planning when AI is unavailable
     """
 
-    def __init__(self, state, learning_engine=None, groq_client=None, payload_optimizer=None):
+    def __init__(self, state, learning_engine=None, groq_client=None, payload_optimizer=None, groq_context=None):
         self.state = state
+        self.groq_context = groq_context  # GroqScanContext for accumulated cross-phase context
         self.learning_engine = learning_engine
         self.groq = groq_client
         self.payload_optimizer = payload_optimizer
@@ -511,7 +520,7 @@ class ChainPlanner:
                     "description": v.get("description", ""),
                 })
         
-        return {
+        result = {
             "target": self.state.get("target", ""),
             "base_url": self._get_base_url(),
             "endpoints": endpoint_summary,
@@ -520,14 +529,26 @@ class ChainPlanner:
             "capabilities": self._infer_capabilities(),
             "technologies": self.state.get("tech_stack", []) or self.state.get("technologies", []),
             "successful_payloads": successful_payloads,
-            "goal": "rce_or_admin_access",  # Primary goal
+            "goal": "rce_or_admin_access",
             "alternative_goals": [
                 "data_exfiltration",
                 "credential_theft",
                 "persistence",
                 "privilege_escalation"
-            ]
+            ],
         }
+        # Attach full GroqScanContext summary when available for richer cross-phase reasoning
+        if self.groq_context is not None:
+            try:
+                result["groq_context_summary"] = self.groq_context.to_summary()
+                result["auth_surfaces"] = self.groq_context.auth_surfaces[:10]
+                result["exposed_services"] = self.groq_context.exposed_services[:10]
+                result["js_secrets_count"] = len(self.groq_context.js_secrets)
+                result["failed_attempts"] = self.groq_context.failed_attempts[-5:]
+                result["phases_completed"] = self.groq_context.phases_completed
+            except Exception:
+                pass
+        return result
 
     def _plan_with_ai(self) -> List[ExploitChain]:
         """Use AI to generate exploit chains based on comprehensive state analysis.
@@ -3054,7 +3075,7 @@ Return ONLY a JSON list. Each item must contain:
 - reasoning
 """
         try:
-            response = self.groq.generate(prompt)
+            response = self.groq.generate(prompt, max_tokens=2000)
 
             match = re.search(r"\[[\s\S]*\]", response)
             if not match:
@@ -3168,7 +3189,8 @@ Format each chain as JSON with:
             response = self.groq.generate(
                 prompt=prompt,
                 system=_CHAIN_PLANNER_SYSTEM,
-                temperature=0.3
+                temperature=0.3,
+                max_tokens=2000,
             )
 
             # Parse and convert AI response to ExploitChain objects

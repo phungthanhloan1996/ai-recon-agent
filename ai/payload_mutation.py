@@ -149,7 +149,8 @@ Return JSON with list of mutated payloads ready for injection."""
             response = self.groq.generate(
                 prompt=prompt,
                 system=_WAF_EVASION_SYSTEM,
-                temperature=0.3
+                temperature=0.3,
+                max_tokens=2000,
             )
 
             try:

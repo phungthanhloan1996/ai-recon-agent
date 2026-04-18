@@ -485,6 +485,7 @@ class ScanningEngine:
             "source": "sqlmap",
             "severity": "CRITICAL",
             "confidence": 0.95,
+            "verified": True,
             "output": result.get("output", "")[:2000],
             "findings": result.get("findings", []),
             "dbms": result.get("dbms"),
@@ -501,6 +502,20 @@ class ScanningEngine:
         }
         self._append_unique_vulnerability(vuln, confirmed=True)
 
+        # Sync to boolean_sqli_findings.json immediately so next phase reads it
+        sqli_file = os.path.join(self.output_dir, "boolean_sqli_findings.json")
+        try:
+            existing = []
+            if os.path.exists(sqli_file):
+                with open(sqli_file) as _f:
+                    _d = json.load(_f)
+                    existing = _d if isinstance(_d, list) else _d.get("vulnerabilities", [])
+            existing.append(vuln)
+            with open(sqli_file, "w") as _f:
+                json.dump({"vulnerabilities": existing}, _f, indent=2)
+        except Exception as _e:
+            logger.debug(f"[SCANNING] boolean_sqli_findings.json sync failed: {_e}")
+
     def _promote_dalfox_result(self, url: str, result: Dict[str, Any]):
         findings = result.get("findings", []) or []
         # Guard: skip if dalfox produced no real output — empty artifact = false positive
@@ -515,11 +530,14 @@ class ScanningEngine:
                 pass
         if not result.get("success") and not findings:
             return
+        has_verified_poc = any(
+            isinstance(f, dict) and f.get("verified") for f in findings
+        )
         evidence = ""
         if findings:
             first = findings[0] if isinstance(findings[0], dict) else {}
             evidence = first.get("evidence", "") or first.get("message", "")
-        confidence = 0.8 if findings else 0.65
+        confidence = 0.95 if has_verified_poc else (0.8 if findings else 0.65)
         vuln = {
             "name": "Cross-Site Scripting",
             "type": "xss",
@@ -529,6 +547,7 @@ class ScanningEngine:
             "source": "dalfox",
             "severity": "HIGH",
             "confidence": confidence,
+            "verified": has_verified_poc,
             "output": result.get("output", "")[:2000],
             "findings": findings,
             "evidence": evidence,
@@ -581,6 +600,20 @@ class ScanningEngine:
                 },
             }
             self._append_unique_vulnerability(vuln, confirmed=confidence >= 0.7)
+            # Sync high-confidence nuclei findings to confirmed_vulnerabilities.json
+            if confidence >= 0.7:
+                nfile = os.path.join(self.output_dir, "confirmed_vulnerabilities.json")
+                try:
+                    existing = []
+                    if os.path.exists(nfile):
+                        with open(nfile) as _f:
+                            _d = json.load(_f)
+                            existing = _d if isinstance(_d, list) else _d.get("vulnerabilities", [])
+                    existing.append(vuln)
+                    with open(nfile, "w") as _f:
+                        json.dump({"vulnerabilities": existing}, _f, indent=2)
+                except Exception as _ne:
+                    logger.debug(f"[SCANNING] confirmed_vulnerabilities.json sync failed: {_ne}")
 
     def _is_valid_url(self, url: str) -> bool:
         """Kiểm tra URL hợp lệ trước khi gửi request"""
